@@ -1,0 +1,12 @@
+id = "zed-objectscript"
+name = "InterSystems ObjectScript"
+version = "1.0.0"
+schema_version = 1
+authors = ["Dave McCaldon <davem@intersystems.com>"]
+description = "InterSystems IRIS ObjectScript Extension"
+repository = "https://github.com/intersystems/zed-objectscript"
+
+[grammars.objectscript_udl]
+repository = "https://github.com/intersystems/tree-sitter-objectscript"
+commit = "f53770ad22dfdebbecfaedb05c32f6f4924fcba7"
+path = "udl"

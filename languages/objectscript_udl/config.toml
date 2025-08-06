@@ -1,0 +1,10 @@
+name = "objectscript_udl"
+grammar = "objectscript_udl"
+path_suffixes = ["cls"]
+line_comments = ["// ", ";", ";;", "#;"]
+autoclose_before = ";:.,=}])>` \n\t\""
+brackets = [
+    { start = "{", end = "}", close = true, newline = true },
+    { start = "[", end = "]", close = true, newline = false },
+    { start = "(", end = ")", close = true, newline = false },
+]
