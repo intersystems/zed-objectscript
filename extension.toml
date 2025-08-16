@@ -1,4 +1,4 @@
-id = "zed-objectscript"
+id = "objectscript"
 name = "InterSystems ObjectScript"
 version = "1.0.0"
 schema_version = 1
