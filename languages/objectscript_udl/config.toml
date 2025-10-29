@@ -1,5 +1,5 @@
-name = "objectscript_udl"
-grammar = "objectscript_udl"
+name = "objectscript"
+grammar = "objectscript"
 path_suffixes = ["cls"]
 line_comments = ["// ", ";", ";;", "#;"]
 autoclose_before = ";:.,=}])>` \n\t\""

@@ -4,6 +4,8 @@
 (embedded_html
  (angled_bracket_fenced_text) @injection.content
  (#set! injection.language "html")
+ (#set! injection.include-children "false")
+ (#set! injection.combined "true")
 )
 
 (embedded_sql
@@ -11,16 +13,22 @@
     (paren_fenced_text) @injection.content
   )
  (#set! injection.language "sql")
+ (#set! injection.include-children "false")
+ (#set! injection.combined "true")
 )
 
 (embedded_js
  (angled_bracket_fenced_text) @injection.content
  (#set! injection.language "javascript")
+ (#set! injection.include-children "false")
+ (#set! injection.combined "true")
 )
 
 (embedded_xml
  (angled_bracket_fenced_text) @injection.content
  (#set! injection.language "xml")
+ (#set! injection.include-children "false")
+ (#set! injection.combined "true")
 )
 
 ([
@@ -61,14 +69,16 @@
 )
 
 ; XDATA blocks.  There's a MimeType keyword that defines the content-type
-; but we need to individually match each one so that we can specify the
-; name of the tree-sitter grammar to inject.
+; To prevent overlapping matches, we use a different body for the case where
+; no MimeType is given and default to XML, otherwise we extract the language
+; from the mimetype.
+
 (xdata
     keywords:
     (_
         (kw_MimeType rhs: _ @_mimetype (#eq? @_mimetype "\"text/markdown\""))
     )
-    body: (_) @injection.content
+    body: (xdata_body_content_any) @injection.content
     (#set! injection.language "markdown")
     (#set! injection.include-children "true")
 )
@@ -78,7 +88,8 @@
     (_
         (kw_MimeType rhs: _ @_mimetype (#eq? @_mimetype "\"text/xml\""))
     )
-    body: (_) @injection.content
+    ; NOTE: Since MimeType is given, we match xdata_body_content_any not xml
+    body: (xdata_body_content_any) @injection.content
     (#set! injection.language "xml")
     (#set! injection.include-children "true")
 )
@@ -88,7 +99,7 @@
     (_
         (kw_MimeType rhs: _ @_mimetype (#eq? @_mimetype "\"text/html\""))
     )
-    body: (_) @injection.content
+    body: (xdata_body_content_any) @injection.content
     (#set! injection.language "html")
     (#set! injection.include-children "true")
 )
@@ -98,7 +109,7 @@
     (_
         (kw_MimeType rhs: _ @_mimetype (#eq? @_mimetype "\"application/json\""))
     )
-    body: (_) @injection.content
+    body: (xdata_body_content_any) @injection.content
     (#set! injection.language "json")
     (#set! injection.include-children "true")
 )
@@ -108,14 +119,14 @@
     (_
         (kw_MimeType rhs: _ @_mimetype (#eq? @_mimetype "\"text/css\""))
     )
-    body: (_) @injection.content
+    body: (xdata_body_content_any) @injection.content
     (#set! injection.language "css")
     (#set! injection.include-children "true")
 )
 
-; Match other less specific XDATAs
+; Match an unspecified XDATA -- defaults to XML
 (xdata
-    body: (_) @injection.content
+    body: (xdata_body_content_xml) @injection.content
     (#set! injection.language "xml")
     (#set! injection.include-children "true")
 )
