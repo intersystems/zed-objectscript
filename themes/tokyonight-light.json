@@ -1,0 +1,98 @@
+{
+  "$schema": "https://zed.dev/schema/themes/v0.2.0.json",
+  "name": "InterSystems Tokyonight Light",
+  "author": "InterSystems",
+  "themes": [
+    {
+      "name": "InterSystems Tokyonight Light",
+      "appearance": "light",
+      "style": {
+        "background": "#e1e2e7",
+        "foreground": "#3760bf",
+        "text": "#3760bf",
+        "text.muted": "#9199b3",
+        "editor.background": "#e1e2e7",
+        "editor.foreground": "#3760bf",
+        "editor.active_line.background": "#c4c8da",
+        "selection": "#c4c8da",
+        "selection.inactive": "#c4c8da",
+        "status_bar.background": "#c8cada",
+        "status_bar.foreground": "#3760bf",
+        "tab.active_background": "#c8cada",
+        "tab.active_foreground": "#3760bf",
+        "tab.inactive_foreground": "#9199b3",
+        "terminal.background": "#e1e2e7",
+        "terminal.foreground": "#3760bf",
+        "syntax": {
+          "ignore": {
+            "color": "#9199b3"
+          },
+          "warning": {
+            "color": "#8f5e15",
+            "font_weight": 700
+          },
+          "error": {
+            "color": "#bf3a4c",
+            "font_weight": 700
+          },
+          "comment": {
+            "color": "#848cb5",
+            "font_style": "italic"
+          },
+          "string": {
+            "color": "#587539"
+          },
+          "number": {
+            "color": "#b15c00"
+          },
+          "keyword": {
+            "color": "#7867d2",
+            "font_weight": 700
+          },
+          "operator": {
+            "color": "#1b78b3"
+          },
+          "function": {
+            "color": "#2e7de9"
+          },
+          "type": {
+            "color": "#33635c"
+          },
+          "variable": {
+            "color": "#3760bf"
+          },
+          "constant": {
+            "color": "#8f3f71"
+          },
+          "punctuation": {
+            "color": "#68739c"
+          },
+          "tag": {
+            "color": "#2e7de9"
+          },
+          "property": {
+            "color": "#33635c"
+          },
+          "attribute": {
+            "color": "#33635c"
+          },
+          "label": {
+            "color": "#8f3f71"
+          },
+          "boolean": {
+            "color": "#b15c00"
+          },
+          "embedded": {
+            "color": "#587539"
+          },
+          "markup.raw": {
+            "color": "#587539"
+          },
+          "markup.heading": {
+            "color": "#68739c"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,4 +1,3 @@
-; EXPR GRAMMAR HIGHLIGHTS
 (pattern_expression) @string.regex
 (numeric_literal) @number
 (string_literal) @string
@@ -85,7 +84,7 @@
 (json_null_literal) @string
 (bracket) @punctuation.bracket
 
-; CORE GRAMMAR HIGHLIGHTS
+;; inherits: objectscript_expr
 (locktype) @variable
 
 (macro_arg) @variable
@@ -122,3 +121,4 @@ keyword: (_) @keyword
   "##;"
   "$"
 ] @punctuation
+

@@ -1,0 +1,104 @@
+{
+  "$schema": "https://zed.dev/schema/themes/v0.2.0.json",
+  "name": "InterSystems Solarized Light",
+  "author": "InterSystems",
+  "themes": [
+    {
+      "name": "InterSystems Solarized Light",
+      "appearance": "light",
+      "style": {
+        "background": "#fdf6e3",
+        "foreground": "#657b83",
+        "text": "#657b83",
+        "text.muted": "#93a1a1",
+        "editor.background": "#fdf6e3",
+        "editor.foreground": "#657b83",
+        "editor.active_line.background": "#eee8d5",
+        "selection": "#eee8d5",
+        "selection.inactive": "#eee8d5",
+        "status_bar.background": "#eee8d5",
+        "status_bar.foreground": "#657b83",
+        "tab.active_background": "#eee8d5",
+        "tab.active_foreground": "#657b83",
+        "tab.inactive_foreground": "#93a1a1",
+        "terminal.background": "#fdf6e3",
+        "terminal.foreground": "#657b83",
+        "syntax": {
+          "ignore": {
+            "color": "#93a1a1"
+          },
+          "warning": {
+            "color": "#b58900",
+            "font_weight": 700
+          },
+          "error": {
+            "color": "#dc322f",
+            "font_weight": 700
+          },
+          "comment": {
+            "color": "#93a1a1",
+            "font_style": "italic"
+          },
+          "string": {
+            "color": "#2aa198"
+          },
+          "number": {
+            "color": "#d33682"
+          },
+          "keyword": {
+            "color": "#859900",
+            "font_weight": 700
+          },
+          "operator": {
+            "color": "#586e75"
+          },
+          "function": {
+            "color": "#268bd2"
+          },
+          "type": {
+            "color": "#b58900"
+          },
+          "variable": {
+            "color": "#586e75"
+          },
+          "variable.special": {
+            "color": "#cb4b16"
+          },
+          "variable.parameter": {
+            "color": "#2aa198"
+          },
+          "constant": {
+            "color": "#cb4b16"
+          },
+          "punctuation": {
+            "color": "#839496"
+          },
+          "tag": {
+            "color": "#268bd2"
+          },
+          "property": {
+            "color": "#b58900"
+          },
+          "attribute": {
+            "color": "#b58900"
+          },
+          "label": {
+            "color": "#cb4b16"
+          },
+          "boolean": {
+            "color": "#d33682"
+          },
+          "embedded": {
+            "color": "#2aa198"
+          },
+          "markup.raw": {
+            "color": "#2aa198"
+          },
+          "markup.heading": {
+            "color": "#839496"
+          }
+        }
+      }
+    }
+  ]
+}
