@@ -228,7 +228,10 @@
             "color": "#fca7ea"
           },
           "variable": {
-            "color": "#c8d3f5"
+            "color": "#82aaff"
+          },
+          "variable.special": {
+            "color": "#ff757f"
           },
           "variable.builtin": {
             "color": "#ff757f"
