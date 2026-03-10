@@ -1,0 +1,258 @@
+{
+  "$schema": "https://zed.dev/schema/themes/v0.2.0.json",
+  "name": "InterSystems Tokyonight Day",
+  "author": "InterSystems",
+  "themes": [
+    {
+      "name": "InterSystems Tokyonight Day",
+      "appearance": "light",
+      "style": {
+        "background": "#e1e2e7",
+        "foreground": "#3760bf",
+        "text": "#3760bf",
+        "text.muted": "#3760bf",
+        "editor.background": "#e1e2e7",
+        "editor.foreground": "#3760bf",
+        "editor.active_line.background": "#b7c1e3",
+        "selection": "#b7c1e3",
+        "selection.inactive": "#b7c1e3",
+        "status_bar.background": "#d0d5e3",
+        "status_bar.foreground": "#6172b0",
+        "tab.active_background": "#d0d5e3",
+        "tab.active_foreground": "#6172b0",
+        "tab.inactive_background": "#e1e2e7",
+        "tab.inactive_foreground": "#3760bf",
+        "terminal.background": "#e1e2e7",
+        "terminal.foreground": "#3760bf",
+        "syntax": {
+          "annotation": {
+            "color": "#007197"
+          },
+          "attribute": {
+            "color": "#007197"
+          },
+          "attribute.builtin": {
+            "color": "#188092"
+          },
+          "boolean": {
+            "color": "#b15c00"
+          },
+          "character": {
+            "color": "#587539"
+          },
+          "character.printf": {
+            "color": "#188092"
+          },
+          "character.special": {
+            "color": "#188092"
+          },
+          "comment": {
+            "color": "#848cb5",
+            "font_style": "italic"
+          },
+          "comment.error": {
+            "color": "#c64343"
+          },
+          "comment.hint": {
+            "color": "#118c74"
+          },
+          "comment.info": {
+            "color": "#07879d"
+          },
+          "comment.note": {
+            "color": "#118c74"
+          },
+          "comment.todo": {
+            "color": "#2e7de9"
+          },
+          "comment.warning": {
+            "color": "#8c6c3e"
+          },
+          "constant": {
+            "color": "#b15c00"
+          },
+          "constant.builtin": {
+            "color": "#188092"
+          },
+          "constant.macro": {
+            "color": "#007197"
+          },
+          "constructor": {
+            "color": "#9854f1"
+          },
+          "constructor.tsx": {
+            "color": "#188092"
+          },
+          "function": {
+            "color": "#2e7de9"
+          },
+          "function.builtin": {
+            "color": "#188092"
+          },
+          "function.call": {
+            "color": "#2e7de9"
+          },
+          "function.macro": {
+            "color": "#007197"
+          },
+          "function.method": {
+            "color": "#2e7de9"
+          },
+          "function.method.call": {
+            "color": "#2e7de9"
+          },
+          "keyword": {
+            "color": "#7847bd"
+          },
+          "keyword.conditional": {
+            "color": "#9854f1"
+          },
+          "keyword.coroutine": {
+            "color": "#7847bd"
+          },
+          "keyword.debug": {
+            "color": "#b15c00"
+          },
+          "keyword.directive": {
+            "color": "#007197"
+          },
+          "keyword.directive.define": {
+            "color": "#007197"
+          },
+          "keyword.exception": {
+            "color": "#9854f1"
+          },
+          "keyword.function": {
+            "color": "#9854f1"
+          },
+          "keyword.import": {
+            "color": "#007197"
+          },
+          "keyword.operator": {
+            "color": "#006a83"
+          },
+          "keyword.repeat": {
+            "color": "#9854f1"
+          },
+          "keyword.return": {
+            "color": "#7847bd"
+          },
+          "keyword.storage": {
+            "color": "#188092"
+          },
+          "label": {
+            "color": "#2e7de9"
+          },
+          "module": {
+            "color": "#2e7de9"
+          },
+          "module.builtin": {
+            "color": "#f52a65"
+          },
+          "namespace.builtin": {
+            "color": "#f52a65"
+          },
+          "number": {
+            "color": "#b15c00"
+          },
+          "number.float": {
+            "color": "#b15c00"
+          },
+          "operator": {
+            "color": "#006a83"
+          },
+          "property": {
+            "color": "#387068"
+          },
+          "punctuation": {
+            "color": "#188092"
+          },
+          "punctuation.bracket": {
+            "color": "#6172b0"
+          },
+          "punctuation.delimiter": {
+            "color": "#006a83"
+          },
+          "punctuation.special": {
+            "color": "#006a83"
+          },
+          "punctuation.special.markdown": {
+            "color": "#b15c00"
+          },
+          "string": {
+            "color": "#587539"
+          },
+          "string.documentation": {
+            "color": "#8c6c3e"
+          },
+          "string.escape": {
+            "color": "#9854f1"
+          },
+          "string.regexp": {
+            "color": "#2e5857"
+          },
+          "string.special": {
+            "color": "#188092"
+          },
+          "tag": {
+            "color": "#9854f1"
+          },
+          "tag.attribute": {
+            "color": "#387068"
+          },
+          "tag.builtin": {
+            "color": "#188092"
+          },
+          "tag.delimiter": {
+            "color": "#188092"
+          },
+          "tag.delimiter.tsx": {
+            "color": "#649be8"
+          },
+          "tag.javascript": {
+            "color": "#f52a65"
+          },
+          "tag.tsx": {
+            "color": "#f52a65"
+          },
+          "type": {
+            "color": "#188092"
+          },
+          "type.builtin": {
+            "color": "#4094a3"
+          },
+          "type.definition": {
+            "color": "#188092"
+          },
+          "type.qualifier": {
+            "color": "#7847bd"
+          },
+          "variable": {
+            "color": "#3760bf"
+          },
+          "variable.builtin": {
+            "color": "#f52a65"
+          },
+          "variable.member": {
+            "color": "#387068"
+          },
+          "variable.parameter": {
+            "color": "#8c6c3e"
+          },
+          "variable.parameter.builtin": {
+            "color": "#7b6a58"
+          },
+          "error": {
+            "color": "#c64343"
+          },
+          "ignore": {
+            "color": "#3760bf"
+          },
+          "warning": {
+            "color": "#8c6c3e"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,261 @@
+{
+  "$schema": "https://zed.dev/schema/themes/v0.2.0.json",
+  "name": "InterSystems Tokyonight Moon",
+  "author": "InterSystems",
+  "themes": [
+    {
+      "name": "InterSystems Tokyonight Moon",
+      "appearance": "dark",
+      "style": {
+        "background": "#222436",
+        "foreground": "#c8d3f5",
+        "text": "#c8d3f5",
+        "text.muted": "#c8d3f5",
+        "editor.background": "#222436",
+        "editor.foreground": "#c8d3f5",
+        "editor.active_line.background": "#2d3f76",
+        "selection": "#2d3f76",
+        "selection.inactive": "#2d3f76",
+        "status_bar.background": "#1e2030",
+        "status_bar.foreground": "#828bb8",
+        "tab.active_background": "#1e2030",
+        "tab.active_foreground": "#828bb8",
+        "tab.inactive_background": "#222436",
+        "tab.inactive_foreground": "#c8d3f5",
+        "terminal.background": "#222436",
+        "terminal.foreground": "#c8d3f5",
+        "syntax": {
+          "annotation": {
+            "color": "#86e1fc"
+          },
+          "attribute": {
+            "color": "#86e1fc"
+          },
+          "attribute.builtin": {
+            "color": "#65bcff"
+          },
+          "boolean": {
+            "color": "#ff966c"
+          },
+          "character": {
+            "color": "#c3e88d"
+          },
+          "character.printf": {
+            "color": "#65bcff"
+          },
+          "character.special": {
+            "color": "#65bcff"
+          },
+          "comment": {
+            "color": "#636da6",
+            "font_style": "italic"
+          },
+          "comment.error": {
+            "color": "#c53b53"
+          },
+          "comment.hint": {
+            "color": "#4fd6be"
+          },
+          "comment.info": {
+            "color": "#0db9d7"
+          },
+          "comment.note": {
+            "color": "#4fd6be"
+          },
+          "comment.todo": {
+            "color": "#82aaff"
+          },
+          "comment.warning": {
+            "color": "#ffc777"
+          },
+          "constant": {
+            "color": "#ff966c"
+          },
+          "constant.builtin": {
+            "color": "#65bcff"
+          },
+          "constant.macro": {
+            "color": "#86e1fc"
+          },
+          "constructor": {
+            "color": "#c099ff"
+          },
+          "constructor.tsx": {
+            "color": "#65bcff"
+          },
+          "function": {
+            "color": "#82aaff"
+          },
+          "function.builtin": {
+            "color": "#65bcff"
+          },
+          "function.call": {
+            "color": "#82aaff"
+          },
+          "function.macro": {
+            "color": "#86e1fc"
+          },
+          "function.method": {
+            "color": "#82aaff"
+          },
+          "function.method.call": {
+            "color": "#82aaff"
+          },
+          "keyword": {
+            "color": "#fca7ea"
+          },
+          "keyword.conditional": {
+            "color": "#c099ff"
+          },
+          "keyword.coroutine": {
+            "color": "#fca7ea"
+          },
+          "keyword.debug": {
+            "color": "#ff966c"
+          },
+          "keyword.directive": {
+            "color": "#86e1fc"
+          },
+          "keyword.directive.define": {
+            "color": "#86e1fc"
+          },
+          "keyword.exception": {
+            "color": "#c099ff"
+          },
+          "keyword.function": {
+            "color": "#c099ff"
+          },
+          "keyword.import": {
+            "color": "#86e1fc"
+          },
+          "keyword.operator": {
+            "color": "#89ddff"
+          },
+          "keyword.repeat": {
+            "color": "#c099ff"
+          },
+          "keyword.return": {
+            "color": "#fca7ea"
+          },
+          "keyword.storage": {
+            "color": "#65bcff"
+          },
+          "label": {
+            "color": "#82aaff"
+          },
+          "module": {
+            "color": "#82aaff"
+          },
+          "module.builtin": {
+            "color": "#ff757f"
+          },
+          "namespace.builtin": {
+            "color": "#ff757f"
+          },
+          "number": {
+            "color": "#ff966c"
+          },
+          "number.float": {
+            "color": "#ff966c"
+          },
+          "operator": {
+            "color": "#89ddff"
+          },
+          "property": {
+            "color": "#4fd6be"
+          },
+          "punctuation": {
+            "color": "#65bcff"
+          },
+          "punctuation.bracket": {
+            "color": "#828bb8"
+          },
+          "punctuation.delimiter": {
+            "color": "#89ddff"
+          },
+          "punctuation.special": {
+            "color": "#89ddff"
+          },
+          "punctuation.special.markdown": {
+            "color": "#ff966c"
+          },
+          "string": {
+            "color": "#c3e88d"
+          },
+          "string.documentation": {
+            "color": "#ffc777"
+          },
+          "string.escape": {
+            "color": "#c099ff"
+          },
+          "string.regexp": {
+            "color": "#b4f9f8"
+          },
+          "string.special": {
+            "color": "#65bcff"
+          },
+          "tag": {
+            "color": "#c099ff"
+          },
+          "tag.attribute": {
+            "color": "#4fd6be"
+          },
+          "tag.builtin": {
+            "color": "#65bcff"
+          },
+          "tag.delimiter": {
+            "color": "#65bcff"
+          },
+          "tag.delimiter.tsx": {
+            "color": "#6582c3"
+          },
+          "tag.javascript": {
+            "color": "#ff757f"
+          },
+          "tag.tsx": {
+            "color": "#ff757f"
+          },
+          "type": {
+            "color": "#65bcff"
+          },
+          "type.builtin": {
+            "color": "#589ed7"
+          },
+          "type.definition": {
+            "color": "#65bcff"
+          },
+          "type.qualifier": {
+            "color": "#fca7ea"
+          },
+          "variable": {
+            "color": "#82aaff"
+          },
+          "variable.special": {
+            "color": "#ff757f"
+          },
+          "variable.builtin": {
+            "color": "#ff757f"
+          },
+          "variable.member": {
+            "color": "#4fd6be"
+          },
+          "variable.parameter": {
+            "color": "#ffc777"
+          },
+          "variable.parameter.builtin": {
+            "color": "#f4c990"
+          },
+          "error": {
+            "color": "#c53b53"
+          },
+          "ignore": {
+            "color": "#c8d3f5"
+          },
+          "warning": {
+            "color": "#ffc777"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,104 @@
+{
+  "$schema": "https://zed.dev/schema/themes/v0.2.0.json",
+  "name": "InterSystems Tokyonight Dark",
+  "author": "InterSystems",
+  "themes": [
+    {
+      "name": "InterSystems Tokyonight Dark",
+      "appearance": "dark",
+      "style": {
+        "background": "#222436",
+        "foreground": "#c8d3f5",
+        "text": "#c8d3f5",
+        "text.muted": "#545c7e",
+        "editor.background": "#222436",
+        "editor.foreground": "#c8d3f5",
+        "editor.active_line.background": "#2d3f76",
+        "selection": "#2d3f76",
+        "selection.inactive": "#2d3f76",
+        "status_bar.background": "#3b4261",
+        "status_bar.foreground": "#c8d3f5",
+        "tab.active_background": "#3b4261",
+        "tab.active_foreground": "#c8d3f5",
+        "tab.inactive_foreground": "#545c7e",
+        "terminal.background": "#222436",
+        "terminal.foreground": "#c8d3f5",
+        "syntax": {
+          "ignore": {
+            "color": "#545c7e"
+          },
+          "warning": {
+            "color": "#ffc777",
+            "font_weight": 700
+          },
+          "error": {
+            "color": "#ff757f",
+            "font_weight": 700
+          },
+          "comment": {
+            "color": "#7a88cf",
+            "font_style": "italic"
+          },
+          "string": {
+            "color": "#c3e88d"
+          },
+          "number": {
+            "color": "#ff966c"
+          },
+          "keyword": {
+            "color": "#c099ff",
+            "font_weight": 700
+          },
+          "operator": {
+            "color": "#89ddff"
+          },
+          "function": {
+            "color": "#82aaff"
+          },
+          "type": {
+            "color": "#86e1fc"
+          },
+          "variable": {
+            "color": "#82aaff"
+          },
+          "variable.special": {
+            "color": "#ff757f"
+          },
+          "variable.parameter": {
+            "color": "#ffc777"
+          },
+          "constant": {
+            "color": "#ff757f"
+          },
+          "punctuation": {
+            "color": "#9099c2"
+          },
+          "tag": {
+            "color": "#82aaff"
+          },
+          "property": {
+            "color": "#86e1fc"
+          },
+          "attribute": {
+            "color": "#86e1fc"
+          },
+          "label": {
+            "color": "#ff757f"
+          },
+          "boolean": {
+            "color": "#ff966c"
+          },
+          "embedded": {
+            "color": "#c3e88d"
+          },
+          "markup.raw": {
+            "color": "#c3e88d"
+          },
+          "markup.heading": {
+            "color": "#9099c2"
+          }
+        }
+      }
+    }
+  ]
+}
