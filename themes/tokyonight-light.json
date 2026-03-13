@@ -61,6 +61,12 @@
           "variable": {
             "color": "#3760bf"
           },
+          "variable.special": {
+            "color": "#bf3a4c"
+          },
+          "variable.parameter": {
+            "color": "#8f5e15"
+          },
           "constant": {
             "color": "#8f3f71"
           },

@@ -230,6 +230,9 @@
           "variable": {
             "color": "#3760bf"
           },
+          "variable.special": {
+            "color": "#c64343"
+          },
           "variable.builtin": {
             "color": "#f52a65"
           },

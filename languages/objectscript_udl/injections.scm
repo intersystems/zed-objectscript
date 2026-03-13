@@ -34,7 +34,7 @@
 
 
 
-; UDL injections
+; UDL grammar injections
 ;; Keywords, one of type language = "python", none of type codemode
 ; External method body injection based on [ Language = ... ]
 (method_definition

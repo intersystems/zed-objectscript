@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  query_checks:
+    name: Query checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up ts_query_ls
+        run: curl -fL https://github.com/ribru17/ts_query_ls/releases/latest/download/ts_query_ls-x86_64-unknown-linux-gnu.tar.gz | tar -xz
+
+      - name: Lint query files
+        run: ./ts_query_ls lint languages --config '{"language_retrieval_patterns":["languages/([^/]+)/[^/]+\\.scm$"]}'
+
+      - name: Check Zed highlight captures
+        run: python3 scripts/lint_zed_captures.py
