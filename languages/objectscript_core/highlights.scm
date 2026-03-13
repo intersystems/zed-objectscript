@@ -47,8 +47,6 @@
   "#"
   "|"
   "||"
-  "/"
-  "/"
   "$$"
 ] @punctuation
 
@@ -121,4 +119,3 @@ keyword: (_) @keyword
   "##;"
   "$"
 ] @punctuation
-

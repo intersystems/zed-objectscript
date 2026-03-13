@@ -105,7 +105,7 @@
 
 (PubidLiteral) @string.special
 
-(SystemLiteral (URI) @markup.link)
+(SystemLiteral (URI) @link_uri)
 
 ;; Processing instructions
 
@@ -154,15 +154,13 @@
 
 ;; Text
 
-(CharData) @markup
+(CharData) @text
 
 (CDSect
-  (CDStart) @markup.heading
-  (CData) @markup.raw
-  "]]>" @markup.heading)
+  (CDStart) @punctuation.markup
+  (CData) @text.literal
+  "]]>" @punctuation.markup)
 
 ;; Misc
 
 (Comment) @comment
-
-(ERROR) @error
