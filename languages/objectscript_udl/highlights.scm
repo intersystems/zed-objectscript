@@ -22,7 +22,7 @@
 (objectscript_identifier) @variable
 
 (method_arg) @variable.parameter
-; I didn't include ( or ) in this, because they are often grouped 
+; I didn't include '(' or ')' in this, because they are often grouped 
 ; as part of a sequence that gets turned into a single token, so they 
 ; don't get matched, and one ends up getting colored differently than the other.
 [
@@ -50,6 +50,12 @@
   "/"
   "/"
   "$$"
+  "--"
+  ";"
+  "//"
+  "#;"
+  "##;"
+  "$"
 ] @punctuation
 
 [
@@ -68,13 +74,13 @@
   "="
   ">"
   ">="
-   "@"
+  "@"
   "*"
   "**"
   "'"
   "'!"
   "'?"
-    "!"
+  "!"
   "?"
 ] @operator
 
@@ -83,8 +89,6 @@
 (json_number_literal) @number
 (json_null_literal) @string
 (bracket) @punctuation.bracket
-
-;; inherits: objectscript_expr
 (locktype) @variable
 
 (macro_arg) @variable
@@ -113,16 +117,6 @@ keyword: (_) @keyword
 
 (tag) @tag
 
-[
-  "--"
-  ";"
-  "//"
-  "#;"
-  "##;"
-  "$"
-] @punctuation
-
-;; inherits: objectscript_core
 ; ------------------ UDL -------------------
 
 [
