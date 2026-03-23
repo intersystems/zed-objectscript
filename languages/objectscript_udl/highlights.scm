@@ -1,35 +1,73 @@
 (pattern_expression) @string.regex
-(numeric_literal) @number
+
+[
+  (json_number_literal)
+  (numeric_literal)
+] @number
+
+[
+  (json_boolean_literal)
+  (json_null_literal)
+] @boolean
+
+(json_object_literal_pair
+  (json_string_literal) @string.special)
+
+[
+  (json_string_literal)
+  (string_literal)
+] @string
+
 (string_literal) @string
 
-(keyword_pound_pound_class) @keyword
-(keyword_pound_pound_super) @keyword
-(system_defined_variable) @variable.special
-(system_defined_function) @variable.special
-(sql_field_modifier) @variable.special
-(property_name) @property
-(method_name) @function
-(parameter_name) @property
-(class_name) @type
-(macro) @constant
+[
+  (keyword_pound_pound_super)
+  (keyword_pound_pound_class)
+] @keyword
 
-(routine_ref) @variable
-(sql_field_identifier) @variable
-(lvn) @variable
-(gvn) @variable
-(ssvn) @variable
-(instance_variable) @variable
-(objectscript_identifier) @variable
+(system_defined_variable) @variable.special
+(system_defined_function) @function.builtin
+(sql_field_modifier) @keyword
+
+[
+  (property_name)
+  (parameter_name)
+  (sql_field_identifier)
+] @variant
+
+(method_name) @function
+[
+  (routine_name)
+  (class_name)
+] @type
+
+[
+  (macro_function)
+  (macro_constant)
+] @constant
+
+[
+  (lvn)
+  (gvn)
+  (ssvn)
+  (objectscript_identifier)
+] @variable
+
+(namespace) @namespace
+
+[
+  (objectscript_identifier_special)
+  (instance_variable)
+] @variant
 
 (method_arg) @variable.parameter
-; I didn't include '(' or ')' in this, because they are often grouped 
+; I didn't include ( or ) in this, because they are often grouped 
 ; as part of a sequence that gets turned into a single token, so they 
 ; don't get matched, and one ends up getting colored differently than the other.
 [
   "_"
   ","
   ":"
-  "."
   ".."
   "..."
   "'["
@@ -48,13 +86,7 @@
   "|"
   "||"
   "$$"
-  "--"
-  ";"
-  "//"
-  "#;"
-  "##;"
-  "$"
-] @punctuation
+] @punctuation.delimiter
 
 [
   "'&"
@@ -82,28 +114,118 @@
   "?"
 ] @operator
 
-(json_string_literal) @string
-(json_boolean_literal) @boolean
-(json_number_literal) @number
-(json_null_literal) @string
 (bracket) @punctuation.bracket
-(locktype) @variable
 
-(macro_arg) @variable
+;; inherits: objectscript_expr
+(macro_arg) @variant
 (macro_value) @constant.builtin
-keyword: (_) @keyword
+(macro_def) @preproc
 
-(embedded_js_special_case_complete) @punctuation.special
-(embedded_sql_marker) @punctuation.special
-(embedded_sql_reverse_marker) @punctuation.special
-(html_marker) @punctuation.special
-(html_marker_reversed) @punctuation.special
+[
+  (keyword_for)
+  (keyword_while)
+  (keyword_continue)
+  (keyword_quit)
+  (keyword_throw)
+  (keyword_if)
+  (keyword_elseif)
+  (keyword_else)
+  (keyword_oldelse)
+  (keyword_try)
+  (keyword_catch)
+  (keyword_break)
+  (keyword_return)
+  (keyword_zbreak)
+  (keyword_debug)
+  (keyword_trace)
+  (keyword_step)
+  (keyword_nostep)
+  (keyword_stepmethod)
+  (keyword_errortrap)
+  (keyword_interrupt)
+  (keyword_normal)
+  (keyword_zkill)
+  (keyword_zn)
+  (keyword_zsu)
+  (keyword_ztrap)
+  (keyword_zz)
+  (keyword_print)
+  (keyword_zprint)
+  (keyword_set)
+  (keyword_write)
+  (keyword_zwrite)
+  (keyword_do)
+  (keyword_for)
+  (keyword_while)
+  (keyword_kill)
+  (keyword_lock)
+  (keyword_read)
+  (keyword_open)
+  (keyword_close)
+  (keyword_use)
+  (keyword_new)
+  (keyword_job)
+  (keyword_merge)
+  (keyword_goto)
+  (keyword_halt_or_hang)
+  (keyword_halt)
+  (keyword_hang)
+  (keyword_tcommit)
+  (keyword_trollback)
+  (keyword_tstart)
+  (keyword_xecute)
+  (keyword_view)
+] @type.builtin
 
-(attribute) @attribute
+[
+  (keyword_pound_define)
+  (keyword_pound_def1arg)
+  (keyword_pound_if)
+  (keyword_pound_elseif)
+  (keyword_pound_else)
+  (keyword_pound_endif)
+  (keyword_pound_ifdef)
+  (keyword_pound_ifndef)
+  (keyword_dim)
+  (keyword_pound_import)
+  (keyword_pound_include)
+  (keyword_pound_delay)
+  (locktype)
+] @preproc
 
-(open_keywords) @attribute
-(use_keywords) @attribute
-(close_parameter_option_value) @attribute
+[
+  (keyword_as)
+  (keyword_of)
+  (keyword_public)
+  (keyword_private)
+  (keyword_methodimpl)
+  (open_keywords)
+  (use_keywords)
+  (close_parameter_option_value)
+  (keyword_clear)
+  (keyword_on)
+  (keyword_off)
+  (keyword_all)
+  (keyword_ext)
+  (keyword_stepmethod)
+  (keyword_destruct)
+] @keyword
+
+[
+  (keyword_embedded_html)
+  (keyword_embedded_xml)
+  (keyword_embedded_sql_amp)
+  (keyword_embedded_sql_hash)
+  (keyword_js)
+] @embedded
+
+[
+  (embedded_js_special_case_complete)
+  (embedded_sql_marker)
+  (embedded_sql_reverse_marker)
+  (html_marker)
+  (html_marker_reversed)
+] @punctuation.special
 
 [
   (line_comment_1)
@@ -113,48 +235,94 @@ keyword: (_) @keyword
   (block_comment)
 ] @comment
 
-(tag) @tag
+(tag) @label
+
+; case where comments get eaten by scanner, this will still
+; highlight just the comments of these commands as comments
+[
+  (command_quit)
+  (command_else)
+  (command_continue)
+  (command_if)
+  (command_do)
+  (command_for)
+  (command_lock)
+  (command_return)
+  (command_halt_or_hang)
+  (command_break)
+] @comment
 
 ; ------------------ UDL -------------------
+(iris_username) @keyword.directive
 
 [
-    (method_keyword_codemode_expression)
-    (call_method_keyword)
-    (method_keyword)
-    (class_keywords)
-    (query_keywords)
-    (trigger_keyword)
-    (method_keyword_language)
-    (relationship_keyword)
-    (foreignkey_keyword)
-    (parameter_keyword)
-    (projection_keyword)
-    (index_keyword)
-    (index_keyword_extent)
-    (xdata_keyword)
-    (xdata_keyword_mimetype)
-    (property_keyword)
+  (keyword_import)
+  (keyword_include)
+  (keyword_includegenerator)
+  (keyword_method)
+  (keyword_classmethod)
+  (keyword_class)
+  (keyword_extends)
+  (keyword_property)
+  (keyword_relationship)
+  (keyword_foreignkey)
+  (keyword_parameter)
+  (keyword_projection)
+  (keyword_index)
+  (keyword_query)
+  (keyword_trigger)
+  (keyword_xdata)
+  (keyword_storage)
     
 ] @attribute
 
+[
+  (method_keyword_codemode_expression)
+  (call_method_keyword)
+  (method_keyword)
+  (class_keywords)
+  (query_keywords)
+  (trigger_keyword)
+  (method_keyword_language)
+  (relationship_keyword)
+  (foreignkey_keyword)
+  (parameter_keyword)
+  (projection_keyword)
+  (index_keyword)
+  (index_keyword_extent)
+  (xdata_keyword)
+  (xdata_keyword_mimetype)
+  (property_keyword)
+  (keyword_not)
+  (keyword_references)
+  (keyword_byref)
+  (keyword_output)
+] @type.builtin
+
 (documatic_line) @comment.doc
 
-(query_name) @property
-(property_name) @property
-(relationship_name) @property
-(foreignkey_name) @property
-(parameter_name) @property
-(projection_name) @property
-(index_name) @property
-(xdata_name) @property
-(storage_name) @property
+[
+  (query_name)
+  (trigger_name)
+  (relationship_name)
+  (foreignkey_name)
+  (parameter_name)
+  (projection_name)
+  (index_name)
+  (xdata_name)
+  (storage_name)
+  (xml_identifier)
+  (index_property)
+] @variant
 
-(return_type) @type.builtin
-(typename) @type
-(parameter_type) @type.builtin
-(index_type) @type.builtin
-(projection_type) @type.builtin
-(property_type) @type.builtin
-(index_property_type) @type.builtin
-
-(identifier) @variable
+[
+  (return_type)
+  (keyword_list)
+  (keyword_array)
+  (parameter_type)
+  (index_type)
+  (projection_type)
+  (property_type)
+  (index_property_type)
+  (typename)
+] @type.builtin

@@ -1,6 +1,6 @@
-name = "objectscript_core"
-grammar = "objectscript_core"
-path_suffixes = ["inc", "mac"]
+name = "objectscript_routine"
+grammar = "objectscript_routine"
+path_suffixes = ["inc", "mac", "int"]
 line_comments = ["// ", ";", ";;", "#;"]
 autoclose_before = ";:.,=}])>` \n\t\""
 brackets = [
