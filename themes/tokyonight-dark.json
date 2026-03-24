@@ -36,39 +36,39 @@
             "font_weight": 700
           },
           "comment": {
-            "color": "#7a88cf",
+            "color": "#e571a8",
             "font_style": "italic"
           },
           "string": {
-            "color": "#c3e88d"
+            "color": "#7173e5"
           },
           "number": {
-            "color": "#ff966c"
+            "color": "#71d8e5"
           },
           "keyword": {
-            "color": "#c099ff",
+            "color": "#e59171",
             "font_weight": 700
           },
           "operator": {
-            "color": "#89ddff"
+            "color": "#ade571"
           },
           "function": {
-            "color": "#82aaff"
+            "color": "#71b1e5"
           },
           "type": {
-            "color": "#86e1fc"
+            "color": "#e57190"
           },
           "variable": {
-            "color": "#82aaff"
+            "color": "#9671e5"
           },
           "variable.special": {
-            "color": "#ff757f"
+            "color": "#71e5b3"
           },
           "variable.parameter": {
-            "color": "#ffc777"
+            "color": "#71e5da"
           },
           "constant": {
-            "color": "#ff757f"
+            "color": "#71e574"
           },
           "punctuation": {
             "color": "#9099c2"
@@ -80,22 +80,61 @@
             "color": "#86e1fc"
           },
           "attribute": {
-            "color": "#86e1fc"
+            "color": "#e5a071"
           },
           "label": {
-            "color": "#ff757f"
+            "color": "#86e571"
           },
           "boolean": {
-            "color": "#ff966c"
+            "color": "#e571b6"
           },
           "embedded": {
-            "color": "#c3e88d"
+            "color": "#e5de71"
           },
           "markup.raw": {
             "color": "#c3e88d"
           },
           "markup.heading": {
             "color": "#9099c2"
+          },
+          "string.regex": {
+            "color": "#e5d071"
+          },
+          "string.special": {
+            "color": "#95e571"
+          },
+          "function.builtin": {
+            "color": "#d571e5"
+          },
+          "variant": {
+            "color": "#d3e571"
+          },
+          "namespace": {
+            "color": "#e5b871"
+          },
+          "punctuation.delimiter": {
+            "color": "#e571ce"
+          },
+          "punctuation.bracket": {
+            "color": "#718be5"
+          },
+          "constant.builtin": {
+            "color": "#e57971"
+          },
+          "preproc": {
+            "color": "#71e59b"
+          },
+          "type.builtin": {
+            "color": "#bd71e5"
+          },
+          "punctuation.special": {
+            "color": "#71c9e5"
+          },
+          "keyword.directive": {
+            "color": "#7e71e5"
+          },
+          "comment.doc": {
+            "color": "#71e5c2"
           }
         }
       }

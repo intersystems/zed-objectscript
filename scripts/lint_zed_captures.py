@@ -16,6 +16,7 @@ ALLOWED_ZED_CAPTURES = {
     "comment",
     "comment.doc",
     "constant",
+    "constant.builtin",
     "constructor",
     "embedded",
     "emphasis",
@@ -55,6 +56,7 @@ ALLOWED_ZED_CAPTURES = {
     "type",
     "variable",
     "variable.special",
+    "variable.parameter",
     "variant",
 }
 

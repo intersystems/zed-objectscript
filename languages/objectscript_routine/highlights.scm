@@ -116,7 +116,7 @@
 
 (bracket) @punctuation.bracket
 
-;; inherits: objectscript_expr
+; core
 (macro_arg) @variant
 (macro_value) @constant.builtin
 (macro_def) @preproc
@@ -250,82 +250,9 @@
   (command_break)
 ] @comment
 
-; ------------------ UDL -------------------
-(iris_username) @keyword.directive
-
-[
-  (keyword_import)
-  (keyword_include)
-  (keyword_includegenerator)
-  (keyword_method)
-  (keyword_classmethod)
-  (keyword_class)
-  (keyword_extends)
-  (keyword_property)
-  (keyword_relationship)
-  (keyword_foreignkey)
-  (keyword_parameter)
-  (keyword_projection)
-  (keyword_index)
-  (keyword_query)
-  (keyword_trigger)
-  (keyword_xdata)
-  (keyword_storage)
-    
-] @attribute
-
-[
-  (method_keyword_codemode_expression)
-  (call_method_keyword)
-  (method_keyword)
-  (class_keywords)
-  (query_keywords)
-  (trigger_keyword)
-  (method_keyword_language)
-  (relationship_keyword)
-  (foreignkey_keyword)
-  (parameter_keyword)
-  (projection_keyword)
-  (index_keyword)
-  (index_keyword_extent)
-  (xdata_keyword)
-  (xdata_keyword_mimetype)
-  (property_keyword)
-  (keyword_not)
-  (keyword_references)
-  (keyword_byref)
-  (keyword_output)
-] @type.builtin
+;routine 
+(routine_type) @type.builtin
 
 (documatic_line) @comment.doc
-
-[
-  (query_name)
-  (trigger_name)
-  (relationship_name)
-  (foreignkey_name)
-  (parameter_name)
-  (projection_name)
-  (index_name)
-  (xdata_name)
-  (storage_name)
-  (xml_identifier)
-  (index_property)
-] @variant
-
-[
-  (return_type)
-  (keyword_list)
-  (keyword_array)
-  (parameter_type)
-  (index_type)
-  (projection_type)
-  (property_type)
-  (index_property_type)
-  (typename)
-] @type.builtin
-
-; routine
-(routine_type) @type.builtin
 
 (routine) @attribute
