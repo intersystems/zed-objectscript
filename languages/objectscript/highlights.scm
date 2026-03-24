@@ -122,8 +122,6 @@
 (macro_def) @preproc
 
 [
-  (keyword_for)
-  (keyword_while)
   (keyword_continue)
   (keyword_quit)
   (keyword_throw)
