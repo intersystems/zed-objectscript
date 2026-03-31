@@ -191,14 +191,15 @@
   (locktype)
 ] @preproc
 
+"--" @operator
+
 [
   (keyword_as)
   (keyword_of)
   (keyword_public)
   (keyword_private)
   (keyword_methodimpl)
-  (open_keywords)
-  (use_keywords)
+  (device_keywords)
   (close_parameter_option_value)
   (keyword_clear)
   (keyword_on)

@@ -197,8 +197,7 @@
   (keyword_public)
   (keyword_private)
   (keyword_methodimpl)
-  (open_keywords)
-  (use_keywords)
+  (device_keywords)
   (close_parameter_option_value)
   (keyword_clear)
   (keyword_on)
@@ -208,6 +207,8 @@
   (keyword_stepmethod)
   (keyword_destruct)
 ] @keyword
+
+"--" @operator
 
 [
   (keyword_embedded_html)
@@ -256,3 +257,5 @@
 (documatic_line) @comment.doc
 
 (routine) @attribute
+
+(compiled_header) @markup.heading
