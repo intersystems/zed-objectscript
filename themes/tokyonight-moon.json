@@ -29,13 +29,13 @@
             "color": "#86e1fc"
           },
           "attribute": {
-            "color": "#86e1fc"
+            "color": "#71d1e5"
           },
           "attribute.builtin": {
             "color": "#65bcff"
           },
           "boolean": {
-            "color": "#ff966c"
+            "color": "#71e584"
           },
           "character": {
             "color": "#c3e88d"
@@ -47,7 +47,7 @@
             "color": "#65bcff"
           },
           "comment": {
-            "color": "#636da6",
+            "color": "#71e593",
             "font_style": "italic"
           },
           "comment.error": {
@@ -69,10 +69,10 @@
             "color": "#ffc777"
           },
           "constant": {
-            "color": "#ff966c"
+            "color": "#cd71e5"
           },
           "constant.builtin": {
-            "color": "#65bcff"
+            "color": "#71e5d2"
           },
           "constant.macro": {
             "color": "#86e1fc"
@@ -84,10 +84,10 @@
             "color": "#65bcff"
           },
           "function": {
-            "color": "#82aaff"
+            "color": "#e58971"
           },
           "function.builtin": {
-            "color": "#65bcff"
+            "color": "#9ce571"
           },
           "function.call": {
             "color": "#82aaff"
@@ -102,7 +102,7 @@
             "color": "#82aaff"
           },
           "keyword": {
-            "color": "#fca7ea"
+            "color": "#71e0e5"
           },
           "keyword.conditional": {
             "color": "#c099ff"
@@ -114,7 +114,7 @@
             "color": "#ff966c"
           },
           "keyword.directive": {
-            "color": "#86e1fc"
+            "color": "#e5d771"
           },
           "keyword.directive.define": {
             "color": "#86e1fc"
@@ -141,7 +141,7 @@
             "color": "#65bcff"
           },
           "label": {
-            "color": "#82aaff"
+            "color": "#b571e5"
           },
           "module": {
             "color": "#82aaff"
@@ -153,13 +153,13 @@
             "color": "#ff757f"
           },
           "number": {
-            "color": "#ff966c"
+            "color": "#e5717f"
           },
           "number.float": {
             "color": "#ff966c"
           },
           "operator": {
-            "color": "#89ddff"
+            "color": "#8e71e5"
           },
           "property": {
             "color": "#4fd6be"
@@ -168,19 +168,19 @@
             "color": "#65bcff"
           },
           "punctuation.bracket": {
-            "color": "#828bb8"
+            "color": "#e5b071"
           },
           "punctuation.delimiter": {
-            "color": "#89ddff"
+            "color": "#75e571"
           },
           "punctuation.special": {
-            "color": "#89ddff"
+            "color": "#e57171"
           },
           "punctuation.special.markdown": {
             "color": "#ff966c"
           },
           "string": {
-            "color": "#c3e88d"
+            "color": "#e5c871"
           },
           "string.documentation": {
             "color": "#ffc777"
@@ -192,7 +192,7 @@
             "color": "#b4f9f8"
           },
           "string.special": {
-            "color": "#65bcff"
+            "color": "#a671e5"
           },
           "tag": {
             "color": "#c099ff"
@@ -216,10 +216,10 @@
             "color": "#ff757f"
           },
           "type": {
-            "color": "#65bcff"
+            "color": "#71e5ab"
           },
           "type.builtin": {
-            "color": "#589ed7"
+            "color": "#b4e571"
           },
           "type.definition": {
             "color": "#65bcff"
@@ -228,10 +228,10 @@
             "color": "#fca7ea"
           },
           "variable": {
-            "color": "#82aaff"
+            "color": "#dbe571"
           },
           "variable.special": {
-            "color": "#ff757f"
+            "color": "#e571be"
           },
           "variable.builtin": {
             "color": "#ff757f"
@@ -240,7 +240,7 @@
             "color": "#4fd6be"
           },
           "variable.parameter": {
-            "color": "#ffc777"
+            "color": "#e57197"
           },
           "variable.parameter.builtin": {
             "color": "#f4c990"
@@ -253,6 +253,24 @@
           },
           "warning": {
             "color": "#ffc777"
+          },
+          "string.regex": {
+            "color": "#71a1e5"
+          },
+          "variant": {
+            "color": "#717ae5"
+          },
+          "namespace": {
+            "color": "#71b9e5"
+          },
+          "preproc": {
+            "color": "#e571d6"
+          },
+          "embedded": {
+            "color": "#7192e5"
+          },
+          "comment.doc": {
+            "color": "#e571af"
           }
         }
       }
