@@ -1,6 +1,6 @@
 id = "objectscript"
 name = "InterSystems ObjectScript"
-version = "1.3.0"
+version = "1.4.0"
 schema_version = 1
 authors = ["Dave McCaldon <davem@intersystems.com>","Hannah Kimura <hannah.kimura@intersystems.com>"]
 description = "InterSystems IRIS ObjectScript Extension"
@@ -8,17 +8,17 @@ repository = "https://github.com/intersystems/zed-objectscript"
 
 [grammars.objectscript_udl]
 repository = "https://github.com/intersystems/tree-sitter-objectscript"
-commit = "e492601cb5b4564fdf41e5a1800432a3ee4cf74f"
+commit = "8d1c5370c657548d3e843061462e72f8bc1e9e7b"
 path = "udl"
 
 [grammars.objectscript_routine]
 repository = "https://github.com/intersystems/tree-sitter-objectscript"
-commit = "e492601cb5b4564fdf41e5a1800432a3ee4cf74f"
+commit = "8d1c5370c657548d3e843061462e72f8bc1e9e7b"
 path = "objectscript_routine"
 
 [grammars.objectscript]
 repository = "https://github.com/intersystems/tree-sitter-objectscript"
-commit = "e492601cb5b4564fdf41e5a1800432a3ee4cf74f"
+commit = "8d1c5370c657548d3e843061462e72f8bc1e9e7b"
 path = "objectscript"
 
 [grammars.xml]
