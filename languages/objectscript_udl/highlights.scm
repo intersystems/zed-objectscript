@@ -27,18 +27,18 @@
   (keyword_pound_pound_class)
 ] @keyword
 
-(system_defined_function) @function.builtin
+(system_defined_function) @constant.builtin
 
 ; this is because . is grouped into system_defined_function
 ; and I want the dots to be the same color
 (class_method_call
-  "." @function.builtin)
+  "." @constant.builtin)
 
 (byref_arg
-  "." @function.builtin)
+  "." @constant.builtin)
 
 (oref_chain_segment
-  "." @function.builtin)
+  "." @constant.builtin)
 
 (sql_field_modifier) @keyword
 
@@ -257,50 +257,50 @@
   (block_comment)
   (inline_comment)
   (argumentless_inline_comment)
-] @comment
-
-(tag) @label
-
-[
   (pound_if_special_case_else)
   (pound_if_special_case)
-] @comment.inactive
+] @comment
+
+(tag) @function
 
 "--" @operator
 
 (command_if_dotted_block
-  "." @punctuation.special.dots)
+  "." @string.special.symbol)
 
 (command_for_dotted_block
-  "." @punctuation.special.dots)
+  "." @string.special.symbol)
 
 (command_while_dotted_block
-  "." @punctuation.special.dots)
+  "." @string.special.symbol)
 
 (command_dowhile_dotted
-  "." @punctuation.special.dots)
+  "." @string.special.symbol)
 
 (command_trycatch_dotted
-  "." @punctuation.special.dots)
+  "." @string.special.symbol)
 
 (dotted_statement
-  "." @punctuation.special.dots)
+  "." @string.special.symbol)
 
 (else_block_dotted
-  "." @punctuation.special.dots)
+  "." @string.special.symbol)
 
 (elseif_block_dotted
-  "." @punctuation.special.dots)
+  "." @string.special.symbol)
+
+(catch_block_dotted
+  "." @string.special.symbol)
 
 (variable_datatype
-  "." @function.builtin)
+  "." @constant.builtin)
 
 (instance_method_call
-  "." @function.builtin)
+  "." @constant.builtin)
 
 ; === END CORE ===
 ; === BEGIN LOCAL ===
-(iris_username) @keyword.directive
+(iris_username) @preproc
 
 [
   (keyword_import)
