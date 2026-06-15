@@ -28,6 +28,11 @@
 ] @keyword
 
 (system_defined_function) @constant.builtin
+(bracket) @constant.builtin
+[
+  "("
+  ")"
+] @constant.builtin
 
 ; this is because . is grouped into system_defined_function
 ; and I want the dots to be the same color
@@ -129,8 +134,6 @@
   "?"
 ] @operator
 
-(bracket) @punctuation.bracket
-
 ; === END EXPR ===
 ; === BEGIN CORE ===
 (macro_arg) @variant
@@ -138,11 +141,6 @@
 (macro_value) @constant.builtin
 
 (macro_def) @preproc
-
-[
-  "("
-  ")"
-] @punctuation.bracket
 
 [
   (keyword_pound_define)
@@ -289,13 +287,12 @@
 (elseif_block_dotted
   "." @string.special.symbol)
 
-(catch_block_dotted
-  "." @string.special.symbol)
+
 
 (variable_datatype
   "." @constant.builtin)
 
-(instance_method_call
+(method_call
   "." @constant.builtin)
 
 ; === END CORE ===
