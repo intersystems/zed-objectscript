@@ -1,0 +1,10 @@
+ROUTINE x
+
+test 
+ d 
+ . set x = "hi"
+ . if x = "bye" d
+ . . w "Bye"
+ . w "goodbye"
+ q
+#; 

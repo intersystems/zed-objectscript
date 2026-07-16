@@ -4,10 +4,7 @@
 ; === BEGIN EXPR ===
 (pattern_expression) @string.regex
 
-[
-  (json_number_literal)
-  (numeric_literal)
-] @number
+(numeric_literal) @number
 
 [
   (json_boolean_literal)
@@ -23,13 +20,12 @@
 ] @string
 
 [
-  (keyword_pound_pound_super)
+  (keyword_super)
   (keyword_pound_pound_class)
 ] @keyword
 
 (system_defined_function) @constant.builtin
 
-(bracket) @constant.builtin
 [
   "("
   ")"
@@ -95,7 +91,6 @@
   "']"
   "']]"
   "\""
-  "\"\""
   "["
   "]"
   "]]"
@@ -293,9 +288,6 @@
 (variable_datatype
   "." @constant.builtin)
 
-(method_call
-  "." @constant.builtin)
-
 ; === END CORE ===
 ; === BEGIN LOCAL ===
 (iris_username) @preproc
@@ -328,7 +320,7 @@
   (class_keywords)
   (query_keywords)
   (trigger_keyword)
-  (method_keyword_language)
+  (method_keyword_external_language)
   (relationship_keyword)
   (foreignkey_keyword)
   (parameter_keyword)
@@ -357,6 +349,7 @@
   (storage_name)
   (xml_identifier)
   (index_property)
+  (column_name)
 ] @variant
 
 [

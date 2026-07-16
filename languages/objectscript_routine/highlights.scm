@@ -4,10 +4,7 @@
 ; === BEGIN EXPR ===
 (pattern_expression) @string.regex
 
-[
-  (json_number_literal)
-  (numeric_literal)
-] @number
+(numeric_literal) @number
 
 [
   (json_boolean_literal)
@@ -23,12 +20,12 @@
 ] @string
 
 [
-  (keyword_pound_pound_super)
+  (keyword_super)
   (keyword_pound_pound_class)
 ] @keyword
 
 (system_defined_function) @constant.builtin
-(bracket) @constant.builtin
+
 [
   "("
   ")"
@@ -94,7 +91,6 @@
   "']"
   "']]"
   "\""
-  "\"\""
   "["
   "]"
   "]]"
@@ -288,9 +284,6 @@
   "." @string.special.symbol)
 
 (variable_datatype
-  "." @constant.builtin)
-
-(method_call
   "." @constant.builtin)
 
 (routine_type) @type.builtin

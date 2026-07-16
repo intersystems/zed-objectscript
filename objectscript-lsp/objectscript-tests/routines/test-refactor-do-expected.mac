@@ -1,0 +1,78 @@
+ROUTINE test
+
+subroutine
+    new x 
+    set x = 1.2
+    set y = 1.2
+    w !,"goodbye"
+    quit
+
+subroutine2 
+    set x = 250
+    w !, x 
+    do check
+
+proc() [z] public  {
+    set z = 10
+}
+
+check2()
+    set x = 2
+    set y = 5
+    i x = 2 d check2Subroutine
+
+check2Subroutine1
+    set x = 1.2
+    set y = 1.2
+    w !,"this code does execute" 
+    quit
+
+check() private
+    set x = 2
+    set y = 5
+    i x = 2 d checkSubroutine1 d okay set x = 2
+    w !,"again x=",x
+    w !,"y=",y
+    w !,"leaving"
+    quit
+
+checkSubroutine1
+    set x = 1.2
+    set y = 1.2
+    w !,"goodbye"
+    do checkSubroutine2
+    quit
+
+checkSubroutine2
+    new x
+    set x = 250
+    w !, x
+    quit
+
+potentialS()
+    set x = 2
+    set y = 5
+    do proc
+    w !,"again x=",x
+    w !,"y=",y
+    w !,"leaving"
+    w !, "z= ", z
+    quit
+
+same()
+    set x = 2
+    set y = 5
+    i x = 2 d subroutine, okay
+    w !,"again x=",x
+    w !,"y=",y
+    w !,"leaving"
+    quit
+
+okay
+    new y
+    set y = -9
+    if
+    w !,"here"
+    if  w !,"okay" 
+    set x = 1.1
+    w !,1

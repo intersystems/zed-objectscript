@@ -1,0 +1,11 @@
+ROUTINE goto
+
+gotosubroutine
+ new x
+ set x = 1.2
+ set y = 1.2
+ w !,"goodbye"
+ w x
+ quit
+ set x = ##class(Demo.Person).%New();
+ d x.Introduce()
