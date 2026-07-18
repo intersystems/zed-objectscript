@@ -21,20 +21,12 @@ pub struct Scope {
     pub public_var_defs: HashMap<String, Vec<VariableRef>>,
     /// Stores variable name -> VariableRef for private variables defined in this scope.
     pub private_variable_defs: HashMap<String, Vec<VariableRef>>,
-    /// True if Scope is only new for the variables from a new command
-    pub is_new_scope: bool,
     /// Optional: Name of method that this scope is a part of
     pub method: Option<String>,
 }
 impl Scope {
     /// Create a new scope node with the given bounds and optional parent.
-    fn new(
-        start: Point,
-        end: Point,
-        parent: Option<ScopeId>,
-        is_new_scope: bool,
-        method_name: Option<String>,
-    ) -> Self {
+    fn new(start: Point, end: Point, parent: Option<ScopeId>, method_name: Option<String>) -> Self {
         Self {
             start,
             end,
@@ -43,7 +35,6 @@ impl Scope {
             variable_symbols: Vec::new(),
             public_var_defs: HashMap::new(), // HashMap var name -> GlobalSymbol
             private_variable_defs: HashMap::new(),
-            is_new_scope,
             method: method_name,
         }
     }
@@ -57,7 +48,7 @@ impl Scope {
     ///
     /// Logs a warning and returns `None` if the name is not present or the stored symbol id is
     /// out of bounds for `variable_symbols`.
-    pub fn get_variable_location(&self, variable_name: &str, point: Point) -> Vec<Range> {
+    pub fn get_variable_location(&self, variable_name: &str) -> Vec<Range> {
         let mut variable_locations = Vec::new();
         if let Some(variable_refs) = self.private_variable_defs.get(variable_name) {
             for variable_ref in variable_refs {
@@ -67,12 +58,7 @@ impl Scope {
                 if let Some(variable_id) = variable_ref.priv_id
                     && let Some(variable_symbol) = self.variable_symbols.get(variable_id.0)
                 {
-                    if (variable_symbol.location.start_point.row < point.row)
-                        || ((variable_symbol.location.start_point.row == point.row)
-                            && (variable_symbol.location.start_point.column < point.column))
-                    {
-                        variable_locations.push(variable_symbol.location);
-                    }
+                    variable_locations.push(variable_symbol.location);
                 }
             }
         }
@@ -113,9 +99,22 @@ impl Scope {
             .push(variable_reference);
     }
 
+    /// Look up if `variable_name` is defined in this scope, and return Vec<VariableRef>
+    /// that contains all the definitions.
+    ///
+    /// returns `None` if the name is not present.
+    pub fn get_variable_references(&self, variable_name: &str) -> Vec<VariableRef> {
+        if let Some(locs) = self.private_variable_defs.get(variable_name) {
+            return locs.clone();
+        } else if let Some(var_references) = self.public_var_defs.get(variable_name).cloned() {
+            return var_references;
+        }
+        Vec::new()
+    }
+
     /// Look up a public variable definition in this scope by name.
     ///
-    /// Logs a warning and returns `None` if the name is not present.
+    /// returns `None` if the name is not present.
     pub fn get_pub_variable_symbol(&self, name: &str) -> Vec<VariableRef> {
         if let Some(var_references) = self.public_var_defs.get(name).cloned() {
             return var_references;
@@ -163,7 +162,6 @@ impl ScopeTree {
                 column: usize::MAX,
             },
             None,
-            false,
             None,
         );
         let mut scopes = HashMap::new();
@@ -175,24 +173,6 @@ impl ScopeTree {
             private_method_defs: HashMap::new(),
             class_def,
         }
-    }
-
-    /// If `var_name` is a public variable visible at `pos`, return its owning class symbol id and
-    /// the variable's global symbol id.
-    pub fn pub_variable_in_scope(&self, pos: Point, var_name: &str) -> Vec<VariableRef> {
-        let Some(scope) = self.get_scope(pos) else {
-            eprintln!(
-                "Error: Failed to get scope in (scope_tree, pub_variable_in_scope) for variable {:?}",
-                var_name
-            );
-            return Vec::new();
-        };
-
-        let refs = scope.get_pub_variable_symbol(var_name);
-        if refs.is_empty() {
-            return Vec::new();
-        }
-        refs
     }
 
     /// Look up a private method symbol by name.
@@ -208,12 +188,11 @@ impl ScopeTree {
         start: Point,
         end: Point,
         parent: ScopeId,
-        is_new_scope: bool,
         method_name: Option<String>,
     ) -> ScopeId {
         let scope_id = ScopeId(self.next_scope_id);
         self.next_scope_id += 1;
-        let scope = Scope::new(start, end, Some(parent), is_new_scope, method_name);
+        let scope = Scope::new(start, end, Some(parent), method_name);
         // update parent to include this scope as a child
         if let Some(parent_scope) = self.scopes.get_mut(&parent) {
             parent_scope.children.push(scope_id);
@@ -273,7 +252,7 @@ impl ScopeTree {
     /// Get an immutable reference to the innermost scope containing `point`.
     ///
     /// Logs a warning and returns `None` if no containing scope is found.
-    fn get_scope(&self, point: Point) -> Option<&Scope> {
+    pub fn get_scope(&self, point: Point) -> Option<&Scope> {
         let Some(scope_id) = self.find_current_scope(point) else {
             eprintln!("Warning: Scope Id not found for Point {:?}", point);
             return None;
@@ -287,6 +266,17 @@ impl ScopeTree {
         };
 
         Some(scope)
+    }
+    pub fn get_scope_children(&self, scope_id: &ScopeId) -> Vec<ScopeId> {
+        let Some(scope) = self.scopes.get(&scope_id) else {
+            return Vec::new();
+        };
+        let mut children = Vec::new();
+        for child_id in &scope.children {
+            children.push(*child_id);
+            children.extend(self.get_scope_children(child_id))
+        }
+        children
     }
 
     /// Record a public variable symbol in the scope that contains `range.start_point`.
@@ -305,31 +295,93 @@ impl ScopeTree {
 
     /// Returns the method name associated with the scope containing the given position.
     pub fn get_method_name(&self, pos: Point) -> Option<String> {
-        let Some(scope) = self.get_scope(pos) else {
-            generic_exit_statements("Scope", "get_method_name");
+        let mut curr_scope = if let Some(scope) = self.get_scope(pos) {
+            scope
+        } else {
             return None;
         };
-        scope.method.clone()
+        while curr_scope.method.is_none()
+            && let Some(parent_id) = curr_scope.parent
+            && let Some(parent) = self.scopes.get(&parent_id)
+        {
+            curr_scope = parent
+        }
+        curr_scope.method.clone()
     }
 
     /// Returns a reference to a variable symbol in the scope at the given position.
-    pub fn get_variable_symbol(&self, pos: Point, variable_id: usize) -> Option<&VariableSymbol> {
-        let Some(scope) = self.get_scope(pos) else {
-            generic_exit_statements("Scope", "get_variable_definition");
+    pub fn get_variable_symbol(
+        &self,
+        variable_index: usize,
+        scope_id: &ScopeId,
+    ) -> Option<&VariableSymbol> {
+        let Some(scope) = self.scopes.get(scope_id) else {
+            generic_exit_statements("Scope", "get_variable_symbol");
             return None;
         };
 
-        scope.get_variable_symbol(variable_id)
+        scope.get_variable_symbol(variable_index)
     }
 
-    /// Look up a private variable definition visible at `pos` by name.
-    pub fn get_variable_definition(&self, pos: Point, variable_name: &str) -> Vec<Range> {
-        let Some(scope) = self.get_scope(pos) else {
-            generic_exit_statements("Scope", "get_variable_definition");
+    pub fn get_oref_references(
+        &self,
+        variable_name: &str,
+        scope_id: ScopeId,
+    ) -> Vec<(ScopeId, Vec<VariableRef>)> {
+        let mut var_defs = Vec::new();
+        let Some(scope) = self.scopes.get(&scope_id) else {
             return Vec::new();
         };
 
-        scope.get_variable_location(variable_name, pos)
+        let refs = scope.get_variable_references(variable_name);
+        if !refs.is_empty() {
+            var_defs.push((scope_id, refs));
+        }
+        for child_scope_id in &scope.children {
+            var_defs.extend(self.get_oref_references(variable_name, *child_scope_id));
+        }
+        var_defs
+    }
+
+    /// Look up a private variable definition.
+    pub fn get_variable_definition(
+        &self,
+        variable_name: &str,
+        scope_id: ScopeId,
+    ) -> Vec<(ScopeId, Vec<Range>)> {
+        let mut var_defs = Vec::new();
+        let Some(scope) = self.scopes.get(&scope_id) else {
+            return Vec::new();
+        };
+        let scopes_var_defs = scope.get_variable_location(variable_name);
+        if !scopes_var_defs.is_empty() {
+            var_defs.push((scope_id, scopes_var_defs));
+        }
+        for child_scope_id in &scope.children {
+            var_defs.extend(self.get_variable_definition(variable_name, *child_scope_id));
+        }
+        var_defs
+    }
+
+    /// Find all variable refs for public variable `var_name`
+    pub fn pub_variable_in_scope(
+        &self,
+        var_name: &str,
+        scope_id: ScopeId,
+    ) -> Vec<(ScopeId, Vec<VariableRef>)> {
+        let mut var_defs = Vec::new();
+        let Some(scope) = self.scopes.get(&scope_id) else {
+            return Vec::new();
+        };
+
+        let refs = scope.get_pub_variable_symbol(var_name);
+        if !refs.is_empty() {
+            var_defs.push((scope_id, refs));
+        }
+        for child_scope_id in &scope.children {
+            var_defs.extend(self.pub_variable_in_scope(var_name, *child_scope_id));
+        }
+        var_defs
     }
 
     /// Find the innermost scope containing `pos` by descending from the root into matching children.

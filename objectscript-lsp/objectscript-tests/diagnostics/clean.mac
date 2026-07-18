@@ -1,0 +1,6 @@
+ROUTINE clean
+
+main
+ set x = 1
+ w x
+ quit

@@ -17,7 +17,7 @@ use crate::refactor::{
     refactor_conditionals, refactor_for_statements, refactor_legacy_do_statements,
 };
 
-use crate::scope_structures::MethodGlobalSymbol;
+use crate::scope_structures::{MethodGlobalSymbol, ScopeId};
 use crate::scope_tree::ScopeTree;
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
@@ -99,7 +99,7 @@ pub struct ProjectData {
     // /// Maps Class Name -> another hashmap which maps Method Name -> MethodGlobalSymbolId for all public methods
     pub method_defs: HashMap<String, HashMap<String, MethodRef>>,
     /// Maps Var Name -> another hashmap which maps MethodRef -> Vec<VariableRef> for that variable.
-    pub pub_var_defs: HashMap<String, HashMap<MethodRef, Vec<VariableRef>>>,
+    pub pub_var_defs: HashMap<String, HashMap<MethodRef, HashMap<ScopeId, Vec<VariableRef>>>>,
     /// Holds the OverrideIndex for the workspace.
     pub override_index: OverrideIndex,
     /// Reverse inheritance index used by hierarchy-aware public variable lookup.
@@ -675,7 +675,10 @@ impl ProjectData {
             // rebuilding too — not just the target document.
             let mut changed_class_ids: Vec<usize> = Vec::new();
             for (&cls_id, class) in &self.global_semantic_model.classes {
-                let old = old_inherited.get(&cls_id).map(|v| v.as_slice()).unwrap_or(&[]);
+                let old = old_inherited
+                    .get(&cls_id)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
                 if old != class.inherited_classes.as_slice() {
                     changed_class_ids.push(cls_id.0);
                 }
@@ -685,8 +688,7 @@ impl ProjectData {
                 .classes
                 .values()
                 .filter(|&class_id| {
-                    class_id != &document_class_id
-                        && !changed_class_ids.contains(&class_id.0)
+                    class_id != &document_class_id && !changed_class_ids.contains(&class_id.0)
                 })
                 .map(|class_id| class_id.0)
                 .collect();
@@ -892,10 +894,18 @@ impl ProjectData {
                     if refs_to_other_vars.contains(&var_name) {
                         continue;
                     }
+                    let Some(scope_id) =
+                        scope_tree_snapshot.find_current_scope(variable_range.start_point)
+                    else {
+                        eprintln!(
+                            "Error: failed to find scope for variable range, skipping (build_inheritance_and_variables)"
+                        );
+                        continue;
+                    };
                     if var_is_public {
                         let variable_ref = self
                             .global_semantic_model
-                            .new_variable(variable, method_ref);
+                            .new_variable(variable, method_ref, scope_id);
                         {
                             let method = if let Some(m) =
                                 self.global_semantic_model.get_mut_method(&method_ref)
@@ -914,7 +924,7 @@ impl ProjectData {
                                 .variables
                                 .entry(var_name.clone())
                                 .or_insert_with(Vec::new)
-                                .push(variable_ref);
+                                .push((variable_ref, scope_id));
                         }
 
                         self.global_semantic_model.new_variable_symbol(
@@ -923,6 +933,7 @@ impl ProjectData {
                             refs_to_other_vars.clone(),
                             method_ref,
                             variable_ref,
+                            scope_id,
                         );
 
                         {
@@ -939,6 +950,8 @@ impl ProjectData {
                             .entry(var_name.clone())
                             .or_insert_with(HashMap::new)
                             .entry(method_ref.clone())
+                            .or_insert_with(HashMap::new)
+                            .entry(scope_id)
                             .or_insert_with(Vec::new)
                             .push(variable_ref);
                     } else {
@@ -949,7 +962,7 @@ impl ProjectData {
                             else {
                                 continue;
                             };
-                            lsm.new_variable(method_ref, variable)
+                            lsm.new_variable(method_ref, variable, scope_id)
                         };
 
                         {
@@ -970,7 +983,7 @@ impl ProjectData {
                                 .variables
                                 .entry(var_name.clone())
                                 .or_insert_with(Vec::new)
-                                .push(variable_ref);
+                                .push((variable_ref, scope_id));
                         }
 
                         {
@@ -1165,14 +1178,15 @@ impl ProjectData {
         return locations;
     }
 
-    /// Returns a Vec of `Url(s)` and `Range(s)` that correspond to the variable definition location for `variable_name`
-    /// If `variable_name` is defined in the given scope, that variable  definition is returned.
-    /// Otherwise, if `variable_name` is public:
-    /// the `DependencyGraph` is used to determine all possible paths to the current node (`MethodRef`).
-    /// For each node (`MethodRef`) on the path, the corresponding method is checked to see if a variable
-    /// definition for `variable_name` exists. If so, the `Url` and `Range` of that definition is added.
-    /// All possible locations are returned.
-    /// If `variable_name` is private and not defined in the given scope, `None` is returned.
+    /// Finds all potential variable definitons for `variable_name`
+    /// and finds the corresponding variables If there is another variable definition in the same scope
+    /// and it comes after the first definition (but before either point or method_call based on the case),
+    /// it will replace the first definition. If the definition is defined in the current class and method, then if the
+    /// definition comes after `point` it is not added. Similarly, if the definition
+    /// is from another class/method (and is connected by method calls, tracked in dependencyGraph),
+    /// if the definition comes after the method call that connects it, it is not added.
+    ///
+    /// Returns a Vec of all potential locations (`Url`, `Range`) of the associated variable definition.
     pub fn get_variable_definition(
         &self,
         url: &Url,
@@ -1195,6 +1209,12 @@ impl ProjectData {
         let Some(method_name) = document.scope_tree.get_method_name(point) else {
             return locations;
         };
+        let Some(var_ref_scope_id) = document.scope_tree.find_current_scope(point) else {
+            eprintln!(
+                "Error: failed to find scope for variable range, returning (get_variable_definition)"
+            );
+            return locations;
+        };
 
         if let Some(method_ref) = self
             .method_defs
@@ -1203,27 +1223,71 @@ impl ProjectData {
         {
             let private_var_ranges = document
                 .scope_tree
-                .get_variable_definition(point, variable_name.as_str());
+                .get_variable_definition(variable_name.as_str(), var_ref_scope_id);
             if !private_var_ranges.is_empty() {
-                for var_range in private_var_ranges {
-                    locations.push((url.clone(), var_range));
+                let mut location_hash = HashMap::new();
+                let mut seen_scope_ids = Vec::new();
+                let scope_children = document.scope_tree.get_scope_children(&var_ref_scope_id);
+                for (child_scope_id, variable_ranges) in private_var_ranges {
+                    if !scope_children.contains(&child_scope_id) {
+                        continue;
+                    }
+                    for var_range in variable_ranges {
+                        if var_range.end_point < point {
+                            if !seen_scope_ids.contains(&child_scope_id) {
+                                let index = locations.len();
+                                locations.push((url.clone(), var_range));
+                                seen_scope_ids.push(child_scope_id);
+                                location_hash.insert(child_scope_id, index);
+                            } else if let Some(&index) = location_hash.get(&child_scope_id) {
+                                let curr_indexed_sym_range = locations[index].1;
+                                if curr_indexed_sym_range.end_byte < var_range.start_byte {
+                                    locations[index] = (url.clone(), var_range);
+                                }
+                            }
+                        }
+                    }
                 }
-                return locations;
+                if !locations.is_empty() {
+                    return locations;
+                }
             }
 
             let pub_var_refs = document
                 .scope_tree
-                .pub_variable_in_scope(point, variable_name.as_str());
-            if !pub_var_refs.is_empty() {
-                for var_ref in pub_var_refs {
-                    if let Some(id) = var_ref.pub_id
-                        && let Some(var_symbol) = self
-                            .global_semantic_model
-                            .get_variable_symbol(method_ref, id.0)
+                .pub_variable_in_scope(variable_name.as_str(), var_ref_scope_id);
+            let mut location_hash = HashMap::new();
+            let mut seen_scope_ids = Vec::new();
+            let scope_children = document.scope_tree.get_scope_children(&var_ref_scope_id);
+            for (child_scope_id, variable_refs) in pub_var_refs {
+                if !scope_children.contains(&child_scope_id) {
+                    continue;
+                }
+                for variable_ref in variable_refs {
+                    if let Some(var_id) = variable_ref.pub_id
+                        && let Some(symbol) = self.global_semantic_model.get_variable_symbol(
+                            method_ref,
+                            var_id.0,
+                            &child_scope_id,
+                        )
                     {
-                        locations.push((var_symbol.url.clone(), var_symbol.location));
+                        if symbol.location.end_point < point {
+                            if !seen_scope_ids.contains(&child_scope_id) {
+                                let index = locations.len();
+                                locations.push((symbol.url.clone(), symbol.location));
+                                seen_scope_ids.push(child_scope_id);
+                                location_hash.insert(child_scope_id, index);
+                            } else if let Some(&index) = location_hash.get(&child_scope_id) {
+                                let curr_indexed_sym_range = locations[index].1;
+                                if curr_indexed_sym_range.end_byte < symbol.location.start_byte {
+                                    locations[index] = (symbol.url.clone(), symbol.location);
+                                }
+                            }
+                        }
                     }
                 }
+            }
+            if !locations.is_empty() {
                 return locations;
             }
 
@@ -1233,15 +1297,59 @@ impl ProjectData {
                 {
                     let all_potential_nodes_on_path =
                         self.dependency_graph.all_ancestors(node_index);
-                    for (def_method_ref, variable_refs) in public_var_definitions {
-                        if all_potential_nodes_on_path.contains(def_method_ref) {
-                            for variable_ref in variable_refs {
-                                if let Some(var_id) = variable_ref.pub_id
-                                    && let Some(symbol) = self
-                                        .global_semantic_model
-                                        .get_variable_symbol(&def_method_ref, var_id.0)
-                                {
-                                    locations.push((symbol.url.clone(), symbol.location));
+                    for (def_method_ref, variable_refs_hash_map) in public_var_definitions {
+                        let Some(def_cls_sym) = self
+                            .global_semantic_model
+                            .get_class_symbol(&def_method_ref.class)
+                        else {
+                            continue;
+                        };
+                        let Some(def_doc) = self.get_document(&def_cls_sym.url) else {
+                            continue;
+                        };
+                        if let Some(method_call_range) =
+                            all_potential_nodes_on_path.get(def_method_ref)
+                            && let Some(method_scope_id) = def_doc
+                                .scope_tree
+                                .find_current_scope(method_call_range.start_point)
+                        {
+                            let mut location_hash = HashMap::new();
+                            let mut seen_scope_ids = Vec::new();
+                            let scope_children =
+                                def_doc.scope_tree.get_scope_children(&method_scope_id);
+                            for (child_scope_id, variable_refs) in variable_refs_hash_map {
+                                if !scope_children.contains(child_scope_id) {
+                                    continue;
+                                }
+                                for variable_ref in variable_refs {
+                                    if let Some(var_id) = variable_ref.pub_id
+                                        && let Some(symbol) =
+                                            self.global_semantic_model.get_variable_symbol(
+                                                &def_method_ref,
+                                                var_id.0,
+                                                child_scope_id,
+                                            )
+                                    {
+                                        if symbol.location.end_byte < method_call_range.start_byte {
+                                            if !seen_scope_ids.contains(child_scope_id) {
+                                                let index = locations.len();
+                                                locations
+                                                    .push((symbol.url.clone(), symbol.location));
+                                                seen_scope_ids.push(*child_scope_id);
+                                                location_hash.insert(child_scope_id, index);
+                                            } else if let Some(&index) =
+                                                location_hash.get(child_scope_id)
+                                            {
+                                                let curr_indexed_sym_range = locations[index].1;
+                                                if curr_indexed_sym_range.end_byte
+                                                    < symbol.location.start_byte
+                                                {
+                                                    locations[index] =
+                                                        (symbol.url.clone(), symbol.location);
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1253,156 +1361,24 @@ impl ProjectData {
     }
 
     /// Resolve an object-reference method call to its definition location(s).
-    pub fn get_oref_method_definition(
+    pub fn get_oref_definitions(
         &self,
         oref_name: &str,
         oref_method_name: &str,
         curr_class: &str,
-        point: Point,
+        oref_ref_range: Range,
+        resolve_method: bool,
     ) -> Vec<(Url, Range)> {
-        let method_refs: Vec<MethodRef> =
-            self.find_classes_from_oref(oref_name, oref_method_name, curr_class, point);
-        let mut locations = Vec::new();
-        for method_ref in method_refs {
-            if let Some(sym) = self.global_semantic_model.get_method_symbol(&method_ref) {
-                locations.push((sym.url.clone(), sym.location));
-            } else if let Some(cls_sym) = self
-                .global_semantic_model
-                .get_class_symbol(&method_ref.class)
-                && let Some(method_ref_doc) = self.documents.get(&cls_sym.url)
-                && let Some(sym) = method_ref_doc
-                    .scope_tree
-                    .get_private_method_symbol(&method_ref.id)
-            {
-                locations.push((cls_sym.url.clone(), sym.location));
-            }
+        let (method_refs, locations) =
+            self.find_classes_from_oref(oref_name, oref_method_name, curr_class, oref_ref_range);
+        if !resolve_method {
+            return locations;
         }
-        locations
-    }
-
-    /// This finds the oref (variable part) definition, it does NOT take you to corresponding class and method
-    /// If you want that, use find_classes_from_oref
-    pub fn get_oref_definition(
-        &self,
-        url: &Url,
-        point: Point,
-        variable_name: String,
-        oref_method_name: String,
-    ) -> Vec<(Url, Range)> {
-        let mut locations = Vec::new();
-        let Some(document) = self.get_document(url) else {
-            eprintln!(
-                "Error: failed to get document for file {:?}. Aborting get_variable_definition",
-                url.path()
-            );
-            return locations;
-        };
-
-        let Some(class_name) = document.class_name.clone() else {
-            return locations;
-        };
-
-        let Some(method_name) = document.scope_tree.get_method_name(point) else {
-            return locations;
-        };
-
-        if let Some(method_ref) = self
-            .method_defs
-            .get(&class_name)
-            .and_then(|method_refs| method_refs.get(&method_name))
-        {
-            let Some(lsm) = self
-                .global_semantic_model
-                .get_local_semantic(&method_ref.class)
-            else {
-                return locations;
-            };
-            let method = if let Some(m) = self.global_semantic_model.get_method(&method_ref) {
-                m
-            } else if let Some(m) = lsm.get_method(&method_ref) {
-                m
-            } else {
-                return locations;
-            };
-            // true if variable is defined in current method
-            if let Some(variable_refs) = method.variables.get(&variable_name) {
-                for var_ref in variable_refs {
-                    if let Some(var_id) = var_ref.pub_id {
-                        if let Some(variable) = self
-                            .global_semantic_model
-                            .get_variable(method_ref, var_id.0)
-                            && variable.is_oref
-                        {
-                            if let Some(var_class_name) = &variable.cls
-                                && let Some(_) = self
-                                    .method_defs
-                                    .get(var_class_name)
-                                    .and_then(|methods| methods.get(&oref_method_name))
-                            {
-                                let Some(var_sym) = self
-                                    .global_semantic_model
-                                    .get_variable_symbol(method_ref, var_id.0)
-                                else {
-                                    continue;
-                                };
-                                locations.push((var_sym.url.clone(), var_sym.location));
-                            }
-                        }
-                    } else if let Some(var_id) = var_ref.priv_id {
-                        if let Some(variable) = lsm.get_variable(method_ref, var_id.0)
-                            && variable.is_oref
-                        {
-                            if let Some(var_class_name) = &variable.cls
-                                && let Some(_) = self
-                                    .method_defs
-                                    .get(var_class_name)
-                                    .and_then(|methods| methods.get(&oref_method_name))
-                            {
-                                let Some(var_sym) =
-                                    document.scope_tree.get_variable_symbol(point, var_id.0)
-                                else {
-                                    continue;
-                                };
-                                locations.push((url.clone(), var_sym.location));
-                            }
-                        }
-                    }
-                }
-                return locations;
-            } else if self.is_variable_public(*method_ref, variable_name.clone()) {
-                if let Some(&node_index) = self.dependency_graph.get_node(*method_ref)
-                    && let Some(public_var_definitions) = self.pub_var_defs.get(&variable_name)
-                {
-                    let all_potential_nodes_on_path =
-                        self.dependency_graph.all_ancestors(node_index);
-                    for (def_method_ref, variable_refs) in public_var_definitions {
-                        if all_potential_nodes_on_path.contains(def_method_ref) {
-                            for variable_ref in variable_refs {
-                                if let Some(var_id) = variable_ref.pub_id
-                                    && let Some(variable) = self
-                                        .global_semantic_model
-                                        .get_variable(def_method_ref, var_id.0)
-                                    && variable.is_oref
-                                    && let Some(symbol) = self
-                                        .global_semantic_model
-                                        .get_variable_symbol(&def_method_ref, var_id.0)
-                                {
-                                    if let Some(var_class_name) = &variable.cls
-                                        && let Some(_) = self
-                                            .method_defs
-                                            .get(var_class_name)
-                                            .and_then(|methods| methods.get(&oref_method_name))
-                                    {
-                                        locations.push((symbol.url.clone(), symbol.location));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        let mut oref_method_locations = Vec::new();
+        for (method_ref, _) in method_refs {
+            oref_method_locations.extend(self.get_method_definition(&method_ref, None))
         }
-        locations
+        oref_method_locations
     }
 
     /// Finds the method struct representing the method that `variable_name` is defined in
@@ -1614,109 +1590,237 @@ impl ProjectData {
         locations
     }
 
+    /// Finds all potential variable references for `oref_name`,
+    /// and finds the corresponding variable and checks if it is an oref.
+    /// If yes, finds the method and class that the oref is referencing, and
+    /// creates a method ref. If there is another oref definition in the same scope
+    /// and it comes after the first definition, it will replace the first definition.
+    /// If the definition is defined in the current class and method, then if the
+    /// definition comes after `point` it is not added. Similarly, if the definition
+    /// is from another class/method (and is connected by method calls, tracked in dependencyGraph),
+    /// if the definition comes after the method call that connects it, it is not added.
+    ///
+    /// The first Vec returned contains:
+    /// - `MethodRef` - a reference to the actual method and class that the oref method call was referencing.
+    /// - `Range` - the oref method call node range
+    /// The second Vec returned contains:
+    /// - `Url` - the url of the associated variable definition (where the oref was created)
+    /// - `Range` - the range of the associated variable definition (where the oref was created)
     fn find_classes_from_oref(
         &self,
         oref_name: &str,
         oref_method_name: &str,
         curr_class: &str,
-        point: Point,
-    ) -> Vec<MethodRef> {
+        original_method_call: Range, // this is a range within the current method
+    ) -> (Vec<(MethodRef, Range)>, Vec<(Url, Range)>) {
+        let point = original_method_call.start_point;
         let mut oref_method_refs = Vec::new();
-        let url = if let Some(class_id) = self.classes.get(curr_class)
+        let mut locations = Vec::new();
+        let curr_class_url = if let Some(class_id) = self.classes.get(curr_class)
             && let Some(class_sym) = self.global_semantic_model.get_class_symbol(&class_id)
         {
             &class_sym.url
         } else {
-            return oref_method_refs;
+            return (oref_method_refs, locations);
         };
-        let Some(document) = self.get_document(url) else {
+        let Some(current_document) = self.get_document(curr_class_url) else {
             eprintln!(
-                "Error: failed to get document for file {:?}. Aborting get_variable_definition",
-                url.path()
+                "Error: failed to get document for file {:?}. Aborting find_classes_from_oref",
+                curr_class_url.path()
             );
-            return oref_method_refs;
+            return (oref_method_refs, locations);
+        };
+        let Some(curr_method_name) = current_document.scope_tree.get_method_name(point) else {
+            return (oref_method_refs, locations);
         };
 
-        let Some(curr_method_name) = document.scope_tree.get_method_name(point) else {
-            return oref_method_refs;
+        let Some(var_ref_scope_id) = current_document.scope_tree.find_current_scope(point) else {
+            eprintln!(
+                "Error: failed to find scope for variable range, returning (find_classes_from_oref)"
+            );
+            return (oref_method_refs, locations);
         };
 
-        if let Some(method_ref) = self
+        if let Some(current_method_ref) = self
             .method_defs
             .get(curr_class)
             .and_then(|method_refs| method_refs.get(&curr_method_name))
         {
-            let Some(lsm) = self
-                .global_semantic_model
-                .get_local_semantic(&method_ref.class)
-            else {
-                return oref_method_refs;
-            };
-            let method = if let Some(m) = self.global_semantic_model.get_method(&method_ref) {
-                m
-            } else if let Some(m) = lsm.get_method(&method_ref) {
-                m
-            } else {
-                return oref_method_refs;
-            };
-            // true if variable is defined in current method
-            if let Some(variable_refs) = method.variables.get(oref_name) {
-                for var_ref in variable_refs {
-                    if let Some(var_id) = var_ref.pub_id {
-                        if let Some(variable) = self
-                            .global_semantic_model
-                            .get_variable(method_ref, var_id.0)
-                            && variable.is_oref
+            let is_variable_public =
+                self.is_variable_public(*current_method_ref, oref_name.to_string());
+            let potential_oref_refs = current_document
+                .scope_tree
+                .get_oref_references(oref_name, var_ref_scope_id);
+            if !potential_oref_refs.is_empty() {
+                let Some(lsm) = self
+                    .global_semantic_model
+                    .get_local_semantic(&current_method_ref.class)
+                else {
+                    return (oref_method_refs, locations);
+                };
+                let mut location_hash = HashMap::new();
+                let mut seen_scope_ids = Vec::new();
+                let scope_children = current_document
+                    .scope_tree
+                    .get_scope_children(&var_ref_scope_id);
+                for (child_scope_id, variable_refs) in potential_oref_refs {
+                    if !scope_children.contains(&child_scope_id) {
+                        continue;
+                    }
+                    for variable_ref in variable_refs {
+                        if !is_variable_public
+                            && let Some(var_id) = variable_ref.priv_id
+                            && let Some(variable) =
+                                lsm.get_variable(current_method_ref, var_id.0, &child_scope_id)
+                            && let Some(symbol) = current_document
+                                .scope_tree
+                                .get_variable_symbol(var_id.0, &child_scope_id)
                         {
-                            if let Some(oref_class) = &variable.cls {
-                                if let Some(oref_method_ref) = self
+                            if variable.is_oref
+                                && let Some(oref_class_name) = variable.cls.clone()
+                                && let Some(oref_method_ref) = self
                                     .method_defs
-                                    .get(oref_class)
+                                    .get(&oref_class_name)
                                     .and_then(|methods| methods.get(oref_method_name))
-                                {
-                                    oref_method_refs.push(*oref_method_ref)
+                            {
+                                if symbol.location.end_point < point {
+                                    if !seen_scope_ids.contains(&child_scope_id) {
+                                        let index = oref_method_refs.len();
+                                        oref_method_refs
+                                            .push((*oref_method_ref, original_method_call));
+                                        locations.push((curr_class_url.clone(), symbol.location));
+                                        seen_scope_ids.push(child_scope_id);
+                                        location_hash.insert(child_scope_id, index);
+                                    } else if let Some(&index) = location_hash.get(&child_scope_id)
+                                    {
+                                        let curr_indexed_sym_range = locations[index].1;
+                                        if curr_indexed_sym_range.end_byte
+                                            < symbol.location.start_byte
+                                        {
+                                            oref_method_refs[index] =
+                                                (*oref_method_ref, original_method_call);
+                                            locations[index] =
+                                                (curr_class_url.clone(), symbol.location);
+                                        }
+                                    }
                                 }
                             }
-                        }
-                    } else if let Some(var_id) = var_ref.priv_id {
-                        if let Some(variable) = lsm.get_variable(method_ref, var_id.0)
-                            && variable.is_oref
+                        } else if is_variable_public
+                            && let Some(var_id) = variable_ref.pub_id
+                            && let Some(variable) = self.global_semantic_model.get_variable(
+                                current_method_ref,
+                                var_id.0,
+                                &child_scope_id,
+                            )
+                            && let Some(symbol) = self.global_semantic_model.get_variable_symbol(
+                                current_method_ref,
+                                var_id.0,
+                                &child_scope_id,
+                            )
                         {
-                            if let Some(oref_class) = &variable.cls {
-                                if let Some(oref_method_ref) = self
+                            if variable.is_oref
+                                && let Some(oref_class_name) = variable.cls.clone()
+                                && let Some(oref_method_ref) = self
                                     .method_defs
-                                    .get(oref_class)
+                                    .get(&oref_class_name)
                                     .and_then(|methods| methods.get(oref_method_name))
-                                {
-                                    oref_method_refs.push(*oref_method_ref)
+                            {
+                                if symbol.location.end_point < point {
+                                    if !seen_scope_ids.contains(&child_scope_id) {
+                                        let index = oref_method_refs.len();
+                                        oref_method_refs
+                                            .push((*oref_method_ref, original_method_call));
+                                        locations.push((symbol.url.clone(), symbol.location));
+                                        seen_scope_ids.push(child_scope_id);
+                                        location_hash.insert(child_scope_id, index);
+                                    } else if let Some(&index) = location_hash.get(&child_scope_id)
+                                    {
+                                        let curr_indexed_sym_range = locations[index].1;
+                                        if curr_indexed_sym_range.end_byte
+                                            < symbol.location.start_byte
+                                        {
+                                            locations[index] =
+                                                (symbol.url.clone(), symbol.location);
+                                            oref_method_refs[index] =
+                                                (*oref_method_ref, original_method_call);
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 }
-                return oref_method_refs;
-            } else if self.is_variable_public(*method_ref, oref_method_name.to_string()) {
-                if let Some(&node_index) = self.dependency_graph.get_node(*method_ref)
+            }
+            if is_variable_public {
+                if let Some(&node_index) = self.dependency_graph.get_node(*current_method_ref)
                     && let Some(public_var_definitions) = self.pub_var_defs.get(oref_name)
                 {
                     let all_potential_nodes_on_path =
                         self.dependency_graph.all_ancestors(node_index);
-                    for (def_method_ref, variable_refs) in public_var_definitions {
-                        if all_potential_nodes_on_path.contains(def_method_ref) {
-                            for variable_ref in variable_refs {
-                                if let Some(var_id) = variable_ref.pub_id
-                                    && let Some(variable) = self
-                                        .global_semantic_model
-                                        .get_variable(def_method_ref, var_id.0)
-                                    && variable.is_oref
-                                {
-                                    if let Some(oref_class) = &variable.cls {
-                                        if let Some(oref_method_ref) = self
+                    for (def_method_ref, variable_refs_hash_map) in public_var_definitions {
+                        let Some(def_cls_sym) = self
+                            .global_semantic_model
+                            .get_class_symbol(&def_method_ref.class)
+                        else {
+                            continue;
+                        };
+                        let Some(def_doc) = self.get_document(&def_cls_sym.url) else {
+                            continue;
+                        };
+                        if let Some(method_call_range) =
+                            all_potential_nodes_on_path.get(def_method_ref)
+                            && let Some(method_scope_id) = def_doc
+                                .scope_tree
+                                .find_current_scope(method_call_range.start_point)
+                        {
+                            let mut location_hash = HashMap::new();
+                            let mut seen_scope_ids = Vec::new();
+                            let scope_children =
+                                def_doc.scope_tree.get_scope_children(&method_scope_id);
+                            for (child_scope_id, variable_refs) in variable_refs_hash_map {
+                                if !scope_children.contains(child_scope_id) {
+                                    continue;
+                                }
+                                for variable_ref in variable_refs {
+                                    if let Some(var_id) = variable_ref.pub_id
+                                        && let Some(symbol) =
+                                            self.global_semantic_model.get_variable_symbol(
+                                                &def_method_ref,
+                                                var_id.0,
+                                                child_scope_id,
+                                            )
+                                        && let Some(variable) = self
+                                            .global_semantic_model
+                                            .get_variable(def_method_ref, var_id.0, child_scope_id)
+                                        && variable.is_oref
+                                        && let Some(oref_class_name) = variable.cls.clone()
+                                        && let Some(oref_method_ref) = self
                                             .method_defs
-                                            .get(oref_class)
+                                            .get(&oref_class_name)
                                             .and_then(|methods| methods.get(oref_method_name))
-                                        {
-                                            oref_method_refs.push(*oref_method_ref)
+                                    {
+                                        if symbol.location.end_byte < method_call_range.start_byte {
+                                            if !seen_scope_ids.contains(&child_scope_id) {
+                                                let index = oref_method_refs.len();
+                                                oref_method_refs
+                                                    .push((*oref_method_ref, original_method_call));
+                                                locations
+                                                    .push((symbol.url.clone(), symbol.location));
+                                                seen_scope_ids.push(child_scope_id);
+                                                location_hash.insert(child_scope_id, index);
+                                            } else if let Some(&index) =
+                                                location_hash.get(&child_scope_id)
+                                            {
+                                                let curr_indexed_sym_range = locations[index].1;
+                                                if curr_indexed_sym_range.end_byte
+                                                    < symbol.location.start_byte
+                                                {
+                                                    locations[index] =
+                                                        (symbol.url.clone(), symbol.location);
+                                                    oref_method_refs[index] =
+                                                        (*oref_method_ref, original_method_call);
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -1726,7 +1830,7 @@ impl ProjectData {
                 }
             }
         }
-        oref_method_refs
+        return (oref_method_refs, locations);
     }
 
     fn get_method_calls(
@@ -1736,7 +1840,7 @@ impl ProjectData {
         language: &TsLanguage,
         query_str: &str,
         curr_class: &str,
-    ) -> Vec<MethodRef> {
+    ) -> Vec<(MethodRef, Range)> {
         let mut method_refs = Vec::new();
         if let Ok(query) = Query::new(language, query_str) {
             let mut cursor = QueryCursor::new();
@@ -1763,7 +1867,7 @@ impl ProjectData {
                                         .get(&class_name)
                                         .and_then(|method_refs| method_refs.get(&method_name))
                                     {
-                                        method_refs.push(*method_ref);
+                                        method_refs.push((*method_ref, matched_node.range()));
                                     }
                                 }
                             }
@@ -1809,12 +1913,15 @@ impl ProjectData {
                                 if let Some(method_name) =
                                     get_identifier_from_method_arg(method_name_node, content)
                                 {
-                                    method_refs.extend(self.find_classes_from_oref(
-                                        &instance_name,
-                                        &method_name,
-                                        &curr_class,
-                                        oref_node.start_position(),
-                                    ));
+                                    method_refs.extend(
+                                        self.find_classes_from_oref(
+                                            &instance_name,
+                                            &method_name,
+                                            &curr_class,
+                                            oref_node.range(),
+                                        )
+                                        .0,
+                                    );
                                 } else {
                                     eprintln!("Error: Couldn't get method name from $CLASSMETHOD");
                                 }
@@ -1855,7 +1962,7 @@ impl ProjectData {
                                         .get(&class_name)
                                         .and_then(|method_refs| method_refs.get(&method_name))
                                     {
-                                        method_refs.push(*method_ref);
+                                        method_refs.push((*method_ref, matched_node.range()));
                                     }
                                 }
                             } else if func_name.eq_ignore_ascii_case("$system") {
@@ -1879,7 +1986,7 @@ impl ProjectData {
                                         .get(&class_name)
                                         .and_then(|method_refs| method_refs.get(&method_name))
                                     {
-                                        method_refs.push(*method_ref);
+                                        method_refs.push((*method_ref, matched_node.range()));
                                     }
                                 }
                             }
@@ -1900,11 +2007,11 @@ impl ProjectData {
                                 .get(curr_class)
                                 .and_then(|method_refs| method_refs.get(&method_name))
                             {
-                                method_refs.push(*method_ref);
+                                method_refs.push((*method_ref, matched_node.range()));
                             }
                         }
                     }
-                    "routine_tag_call" | "goto_argument" | "print_argument" | "zbreak_location" => {
+                    "routine_tag_call" | "goto_argument" | "print_argument" => {
                         let Some(routine_tag_call_child) = matched_node.named_child(0) else {
                             eprintln!(
                                 "Error: routine tag call node should have a child at index 0, update parsing in get_method_calls"
@@ -1925,7 +2032,7 @@ impl ProjectData {
                                     .get(curr_class)
                                     .and_then(|method_refs| method_refs.get(&method_name))
                                 {
-                                    method_refs.push(*method_ref);
+                                    method_refs.push((*method_ref, matched_node.range()));
                                 }
                             }
                             "line_ref" => {
@@ -1945,7 +2052,7 @@ impl ProjectData {
                                         id: method_ref.id,
                                         offset: offset,
                                     };
-                                    method_refs.push(method_ref);
+                                    method_refs.push((method_ref, matched_node.range()));
                                 }
                             }
                             _ => continue,
@@ -1985,12 +2092,11 @@ impl ProjectData {
             (routine_tag_call)
             (goto_argument)
             (print_argument)
-            (zbreak_location)
             ] @routine "#;
         method_refs.extend(self.get_method_calls(node, content, language, query_str, curr_class));
-        for dep_method_ref in method_refs {
+        for (dep_method_ref, method_call_range) in method_refs {
             self.dependency_graph
-                .add_edge(method_ref.clone(), dep_method_ref);
+                .add_edge(method_ref.clone(), dep_method_ref, method_call_range);
         }
     }
 }

@@ -790,20 +790,887 @@ check()
             .get(&routine_url)
             .expect("routine doc exists");
 
-        eprintln!("class_id: {:?}", document.class_id);
-        eprintln!("class_name: {:?}", document.class_name);
-        eprintln!("scope_tree: {:#?}", document.scope_tree);
         // "w x" is on line 8 (0-indexed row=7), x is at column 3
         let point = Point { row: 7, column: 3 };
 
-        let method_name = document.scope_tree.get_method_name(point);
-        eprintln!("method_name at point {:?}: {:?}", point, method_name);
-
         let locations = project_data.get_variable_definition(&routine_url, point, "x".to_string());
-        eprintln!("variable locations: {:?}", locations);
         assert!(
             !locations.is_empty(),
             "should find x definition in gotosubroutine"
         );
+    }
+
+    // =========================================================================
+    // GOTO DEFINITION — CLASS METHOD CALLS (Test Suite 1.3)
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_goto_def_class_method_call_resolves_method() {
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("gotodef")
+            .join("class-method-call");
+        let (backend, uri) = setup_backend_and_workspace(project_root.clone()).await;
+        let project_state = backend.get_project(&uri).expect("missing project state");
+        let project_data = project_state.data.read();
+
+        let method_ref = project_data
+            .method_defs
+            .get("Demo.Utility")
+            .and_then(|m| m.get("Helper"))
+            .expect("Demo.Utility.Helper should exist");
+
+        let locations = project_data.get_method_definition(method_ref, None);
+        assert_eq!(locations.len(), 1);
+        assert!(locations[0].0.path().ends_with("utility.cls"));
+    }
+
+    #[tokio::test]
+    async fn test_goto_def_class_method_call_nonexistent_returns_empty() {
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("gotodef")
+            .join("class-method-call");
+        let (backend, uri) = setup_backend_and_workspace(project_root).await;
+        let project_state = backend.get_project(&uri).expect("missing project state");
+        let project_data = project_state.data.read();
+
+        let result = project_data
+            .method_defs
+            .get("Demo.Utility")
+            .and_then(|m| m.get("NonExistent"));
+        assert!(result.is_none(), "nonexistent method should not be indexed");
+    }
+
+    #[tokio::test]
+    async fn test_goto_def_class_reference_resolves_to_class() {
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("gotodef")
+            .join("class-method-call");
+        let (backend, uri) = setup_backend_and_workspace(project_root).await;
+        let project_state = backend.get_project(&uri).expect("missing project state");
+        let project_data = project_state.data.read();
+
+        let locations = project_data.get_class_definition("Demo.Utility");
+        assert_eq!(locations.len(), 1);
+        assert!(locations[0].0.path().ends_with("utility.cls"));
+    }
+
+    // =========================================================================
+    // GOTO DEFINITION — OREF CONTEXTS (Test Suite 1.4)
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_goto_def_oref_resolves_method_in_target_class() {
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("gotodef")
+            .join("oref-contexts");
+        let (backend, uri) = setup_backend_and_workspace(project_root.clone()).await;
+        let project_state = backend.get_project(&uri).expect("missing project state");
+        let project_data = project_state.data.read();
+
+        let document_url =
+            Url::from_file_path(project_root.join("oref-do-parameter.cls")).unwrap();
+        let document = project_data
+            .documents
+            .get(&document_url)
+            .expect("oref-do-parameter.cls should exist");
+        let content = document.content.as_str();
+
+        let point = point_for_substring(content, "do obj.Run()");
+        let class_name = document.class_name.as_deref().unwrap();
+
+        let locations =
+            project_data.get_oref_method_definition("obj", "Run", class_name, point);
+        assert!(
+            !locations.is_empty(),
+            "oref method call in do_parameter should resolve to Demo.Target.Run"
+        );
+        assert!(locations[0].0.path().ends_with("target.cls"));
+    }
+
+    #[tokio::test]
+    async fn test_goto_def_oref_job_argument_resolves_method() {
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("gotodef")
+            .join("oref-contexts");
+        let (backend, uri) = setup_backend_and_workspace(project_root.clone()).await;
+        let project_state = backend.get_project(&uri).expect("missing project state");
+        let project_data = project_state.data.read();
+
+        let document_url =
+            Url::from_file_path(project_root.join("oref-job-argument.cls")).unwrap();
+        let document = project_data
+            .documents
+            .get(&document_url)
+            .expect("oref-job-argument.cls should exist");
+        let content = document.content.as_str();
+
+        let point = point_for_substring(content, "job worker.Execute()");
+        let class_name = document.class_name.as_deref().unwrap();
+
+        let locations =
+            project_data.get_oref_method_definition("worker", "Execute", class_name, point);
+        assert!(
+            !locations.is_empty(),
+            "oref method call in job_argument should resolve to Demo.Target.Execute"
+        );
+        assert!(locations[0].0.path().ends_with("target.cls"));
+    }
+
+    // =========================================================================
+    // GOTO DEFINITION — MULTIPLE INHERITANCE (Test Suite 1.1.3, 1.1.4)
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_goto_def_multiple_inheritance_default_left() {
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("gotodef")
+            .join("multiple-inheritance");
+        let (backend, uri) = setup_backend_and_workspace(project_root.clone()).await;
+        let project_state = backend.get_project(&uri).expect("missing project state");
+        let project_data = project_state.data.read();
+
+        let child_class_id = project_data
+            .classes
+            .get("Demo.ChildDefault")
+            .expect("Demo.ChildDefault should exist");
+
+        let locations =
+            project_data.get_method_superclass("UseParent".to_string(), child_class_id);
+        // UseParent is not in any parent, so no superclass resolution
+        assert!(
+            locations.is_empty(),
+            "UseParent is unique to ChildDefault, no superclass def"
+        );
+
+        // Verify inheritance is recorded (left parent first)
+        let class = project_data
+            .global_semantic_model
+            .get_class(child_class_id)
+            .expect("class should exist");
+        assert!(
+            !class.inherited_classes.is_empty(),
+            "should have inherited classes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_goto_def_multiple_inheritance_right_direction() {
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("gotodef")
+            .join("multiple-inheritance");
+        let (backend, uri) = setup_backend_and_workspace(project_root.clone()).await;
+        let project_state = backend.get_project(&uri).expect("missing project state");
+        let project_data = project_state.data.read();
+
+        let child_right_id = project_data
+            .classes
+            .get("Demo.ChildRight")
+            .expect("Demo.ChildRight should exist");
+
+        let class = project_data
+            .global_semantic_model
+            .get_class(child_right_id)
+            .expect("class should exist");
+        assert_eq!(class.inheritance_direction, "right");
+        assert!(
+            !class.inherited_classes.is_empty(),
+            "should have inherited classes"
+        );
+    }
+
+    // =========================================================================
+    // GOTO IMPLEMENTATION — DEEP HIERARCHY (Test Suite 2.1)
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_goto_implementation_deep_hierarchy_from_super() {
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("implementation");
+        let (backend, uri) = setup_backend_and_workspace(project_root).await;
+        let project_state = backend.get_project(&uri).expect("missing project state");
+        let project_data = project_state.data.read();
+
+        let method_ref = project_data
+            .method_defs
+            .get("Demo.DeepSuper")
+            .and_then(|m| m.get("DeepMethod"))
+            .expect("Demo.DeepSuper.DeepMethod should exist");
+
+        let locations = project_data.get_method_overrides(method_ref);
+        // DeepMid overrides DeepSuper, and DeepLeafOne/Two override DeepMid
+        // Direct overrides of DeepSuper.DeepMethod is DeepMid
+        assert!(
+            !locations.is_empty(),
+            "DeepSuper.DeepMethod should have at least one override"
+        );
+        let paths: HashSet<String> = locations
+            .iter()
+            .map(|(url, _)| url.path().to_string())
+            .collect();
+        assert!(
+            paths.iter().any(|p| p.ends_with("deep-mid.cls")),
+            "DeepMid should override DeepSuper.DeepMethod"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_goto_implementation_deep_hierarchy_from_mid() {
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("implementation");
+        let (backend, uri) = setup_backend_and_workspace(project_root).await;
+        let project_state = backend.get_project(&uri).expect("missing project state");
+        let project_data = project_state.data.read();
+
+        let method_ref = project_data
+            .method_defs
+            .get("Demo.DeepMid")
+            .and_then(|m| m.get("DeepMethod"))
+            .expect("Demo.DeepMid.DeepMethod should exist");
+
+        let locations = project_data.get_method_overrides(method_ref);
+        assert!(
+            !locations.is_empty(),
+            "DeepMid.DeepMethod should have overrides in leaf classes"
+        );
+        let paths: HashSet<String> = locations
+            .iter()
+            .map(|(url, _)| url.path().to_string())
+            .collect();
+        assert!(paths.iter().any(|p| p.ends_with("deep-leaf-one.cls")));
+        assert!(paths.iter().any(|p| p.ends_with("deep-leaf-two.cls")));
+    }
+
+    #[tokio::test]
+    async fn test_goto_implementation_no_overrides_returns_empty() {
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("implementation");
+        let (backend, uri) = setup_backend_and_workspace(project_root).await;
+        let project_state = backend.get_project(&uri).expect("missing project state");
+        let project_data = project_state.data.read();
+
+        let method_ref = project_data
+            .method_defs
+            .get("Demo.NoOverrides")
+            .and_then(|m| m.get("Unique"))
+            .expect("Demo.NoOverrides.Unique should exist");
+
+        let locations = project_data.get_method_overrides(method_ref);
+        assert!(
+            locations.is_empty(),
+            "method with no subclasses should have no overrides"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_goto_implementation_class_subclasses() {
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("implementation");
+        let (backend, uri) = setup_backend_and_workspace(project_root).await;
+        let project_state = backend.get_project(&uri).expect("missing project state");
+        let project_data = project_state.data.read();
+
+        let class_id = project_data
+            .classes
+            .get("Demo.DeepSuper")
+            .expect("Demo.DeepSuper should exist");
+
+        let locations = project_data.get_class_implementations(class_id);
+        assert!(
+            !locations.is_empty(),
+            "Demo.DeepSuper should have subclass implementations"
+        );
+        let paths: HashSet<String> = locations
+            .iter()
+            .map(|(url, _)| url.path().to_string())
+            .collect();
+        assert!(paths.iter().any(|p| p.ends_with("deep-mid.cls")));
+    }
+
+    #[tokio::test]
+    async fn test_goto_implementation_class_with_no_subclasses() {
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("implementation");
+        let (backend, uri) = setup_backend_and_workspace(project_root).await;
+        let project_state = backend.get_project(&uri).expect("missing project state");
+        let project_data = project_state.data.read();
+
+        let class_id = project_data
+            .classes
+            .get("Demo.NoOverrides")
+            .expect("Demo.NoOverrides should exist");
+
+        let locations = project_data.get_class_implementations(class_id);
+        assert!(
+            locations.is_empty(),
+            "class with no subclasses should return no implementations"
+        );
+    }
+
+    // =========================================================================
+    // DIAGNOSTICS (Test Suite 3.1, 3.2)
+    // =========================================================================
+
+    #[test]
+    fn test_diagnostics_clean_cls_has_no_errors() {
+        use objectscript_core::common::collect_error_nodes;
+        use tree_sitter_objectscript::LANGUAGE_OBJECTSCRIPT_UDL;
+
+        let content = std::fs::read_to_string(
+            env::current_dir()
+                .unwrap()
+                .join("objectscript-tests")
+                .join("diagnostics")
+                .join("clean.cls"),
+        )
+        .unwrap();
+
+        let mut parser = Parser::new();
+        parser
+            .set_language(&LANGUAGE_OBJECTSCRIPT_UDL.into())
+            .unwrap();
+        let tree = parser.parse(&content, None).unwrap();
+        let errors = collect_error_nodes(tree.root_node());
+        assert!(errors.is_empty(), "clean .cls should have no parse errors");
+    }
+
+    #[test]
+    fn test_diagnostics_syntax_error_cls_has_errors() {
+        use objectscript_core::common::collect_error_nodes;
+        use tree_sitter_objectscript::LANGUAGE_OBJECTSCRIPT_UDL;
+
+        let content = std::fs::read_to_string(
+            env::current_dir()
+                .unwrap()
+                .join("objectscript-tests")
+                .join("diagnostics")
+                .join("syntax-error.cls"),
+        )
+        .unwrap();
+
+        let mut parser = Parser::new();
+        parser
+            .set_language(&LANGUAGE_OBJECTSCRIPT_UDL.into())
+            .unwrap();
+        let tree = parser.parse(&content, None).unwrap();
+        let errors = collect_error_nodes(tree.root_node());
+        assert!(
+            !errors.is_empty(),
+            "syntax-error.cls should produce parse errors"
+        );
+    }
+
+    #[test]
+    fn test_diagnostics_clean_routine_has_no_errors() {
+        let content = std::fs::read_to_string(
+            env::current_dir()
+                .unwrap()
+                .join("objectscript-tests")
+                .join("diagnostics")
+                .join("clean.mac"),
+        )
+        .unwrap();
+
+        let tree = parse_routine(&content);
+        let errors = objectscript_core::common::collect_error_nodes(tree.root_node());
+        assert!(
+            errors.is_empty(),
+            "clean .mac should have no parse errors"
+        );
+    }
+
+    #[test]
+    fn test_diagnostics_multiple_errors_routine() {
+        let content = std::fs::read_to_string(
+            env::current_dir()
+                .unwrap()
+                .join("objectscript-tests")
+                .join("diagnostics")
+                .join("multiple-errors.mac"),
+        )
+        .unwrap();
+
+        let tree = parse_routine(&content);
+        let errors = objectscript_core::common::collect_error_nodes(tree.root_node());
+        assert!(
+            errors.len() >= 2,
+            "multiple-errors.mac should have at least 2 parse errors, got {}",
+            errors.len()
+        );
+    }
+
+    #[test]
+    fn test_diagnostics_xml_injected_clean_has_no_errors() {
+        use objectscript_core::common::{
+            collect_error_nodes, xml_objectscript_implementation_ranges,
+        };
+        use tree_sitter_objectscript_playground::LANGUAGE_OBJECTSCRIPT;
+
+        let content = std::fs::read_to_string(
+            env::current_dir()
+                .unwrap()
+                .join("objectscript-tests")
+                .join("diagnostics")
+                .join("injected-clean.xml"),
+        )
+        .unwrap();
+
+        // Use ProjectState to parse XML (it owns the XML parser)
+        let state = ProjectState::new();
+        let uri = Url::parse("file:///tmp/injected-clean.xml").unwrap();
+        state.handle_document_opened(uri.clone(), content.clone(), FileType::Xml, 1);
+
+        let data = state.data.read();
+        let doc = data.documents.get(&uri).expect("xml doc should be tracked");
+        let xml_tree = &doc.tree;
+
+        let ranges = xml_objectscript_implementation_ranges(xml_tree.root_node(), &content);
+        let mut total_errors = 0;
+        for range in ranges {
+            let text = &content[range.start_byte..range.end_byte];
+            if text.trim().is_empty() {
+                continue;
+            }
+            let mut os_parser = Parser::new();
+            os_parser
+                .set_language(&LANGUAGE_OBJECTSCRIPT.into())
+                .unwrap();
+            os_parser.set_included_ranges(&[range]).ok();
+            if let Some(tree) = os_parser.parse(&content, None) {
+                total_errors += collect_error_nodes(tree.root_node()).len();
+            }
+        }
+        assert_eq!(
+            total_errors, 0,
+            "injected-clean.xml should have no ObjectScript errors"
+        );
+    }
+
+    #[test]
+    fn test_diagnostics_xml_injected_error_has_errors() {
+        use objectscript_core::common::{
+            collect_error_nodes, xml_objectscript_implementation_ranges,
+        };
+        use tree_sitter_objectscript_playground::LANGUAGE_OBJECTSCRIPT;
+
+        let content = std::fs::read_to_string(
+            env::current_dir()
+                .unwrap()
+                .join("objectscript-tests")
+                .join("diagnostics")
+                .join("injected-error.xml"),
+        )
+        .unwrap();
+
+        let state = ProjectState::new();
+        let uri = Url::parse("file:///tmp/injected-error.xml").unwrap();
+        state.handle_document_opened(uri.clone(), content.clone(), FileType::Xml, 1);
+
+        let data = state.data.read();
+        let doc = data.documents.get(&uri).expect("xml doc should be tracked");
+        let xml_tree = &doc.tree;
+
+        let ranges = xml_objectscript_implementation_ranges(xml_tree.root_node(), &content);
+        let mut total_errors = 0;
+        for range in ranges {
+            let text = &content[range.start_byte..range.end_byte];
+            if text.trim().is_empty() {
+                continue;
+            }
+            let mut os_parser = Parser::new();
+            os_parser
+                .set_language(&LANGUAGE_OBJECTSCRIPT.into())
+                .unwrap();
+            os_parser.set_included_ranges(&[range]).ok();
+            if let Some(tree) = os_parser.parse(&content, None) {
+                total_errors += collect_error_nodes(tree.root_node()).len();
+            }
+        }
+        assert!(
+            total_errors > 0,
+            "injected-error.xml should have ObjectScript errors in CDATA"
+        );
+    }
+
+    // =========================================================================
+    // ORDERING / TIMING (Test Suite 6.1)
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_ordering_child_opened_before_parent() {
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("ordering");
+
+        let state = ProjectState::new();
+        state
+            .project_root_path
+            .set(Some(project_root.clone()))
+            .ok();
+        let backend = BackendTester::new();
+        let uri = Url::from_file_path(project_root.clone()).unwrap();
+        backend.add_project(uri.clone(), state);
+        let project_state = backend.get_project(&uri).expect("missing project state");
+
+        let child_url = Url::from_file_path(project_root.join("child.cls")).unwrap();
+        let parent_url = Url::from_file_path(project_root.join("parent.cls")).unwrap();
+
+        // Open child FIRST (before parent is known)
+        let child_content = std::fs::read_to_string(project_root.join("child.cls")).unwrap();
+        project_state.handle_document_opened(
+            child_url.clone(),
+            child_content,
+            FileType::Cls,
+            1,
+        );
+
+        // Now open parent
+        let parent_content = std::fs::read_to_string(project_root.join("parent.cls")).unwrap();
+        project_state.handle_document_opened(
+            parent_url.clone(),
+            parent_content,
+            FileType::Cls,
+            1,
+        );
+
+        let project_data = project_state.data.read();
+
+        let child_class_id = project_data
+            .classes
+            .get("Demo.OrderChild")
+            .expect("Demo.OrderChild should be indexed");
+
+        // goto def on Greet in child should resolve to parent's Greet
+        let locations =
+            project_data.get_method_superclass("Greet".to_string(), child_class_id);
+        assert!(
+            !locations.is_empty(),
+            "child opened before parent: goto def should still resolve after parent loads"
+        );
+        assert!(locations[0].0.path().ends_with("parent.cls"));
+    }
+
+    #[tokio::test]
+    async fn test_ordering_parent_opened_before_child() {
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("ordering");
+
+        let state = ProjectState::new();
+        state
+            .project_root_path
+            .set(Some(project_root.clone()))
+            .ok();
+        let backend = BackendTester::new();
+        let uri = Url::from_file_path(project_root.clone()).unwrap();
+        backend.add_project(uri.clone(), state);
+        let project_state = backend.get_project(&uri).expect("missing project state");
+
+        let child_url = Url::from_file_path(project_root.join("child.cls")).unwrap();
+        let parent_url = Url::from_file_path(project_root.join("parent.cls")).unwrap();
+
+        // Open parent FIRST
+        let parent_content = std::fs::read_to_string(project_root.join("parent.cls")).unwrap();
+        project_state.handle_document_opened(
+            parent_url.clone(),
+            parent_content,
+            FileType::Cls,
+            1,
+        );
+
+        // Then child
+        let child_content = std::fs::read_to_string(project_root.join("child.cls")).unwrap();
+        project_state.handle_document_opened(
+            child_url.clone(),
+            child_content,
+            FileType::Cls,
+            1,
+        );
+
+        let project_data = project_state.data.read();
+
+        let child_class_id = project_data
+            .classes
+            .get("Demo.OrderChild")
+            .expect("Demo.OrderChild should be indexed");
+
+        let locations =
+            project_data.get_method_superclass("Greet".to_string(), child_class_id);
+        assert!(
+            !locations.is_empty(),
+            "parent opened before child: goto def should resolve"
+        );
+        assert!(locations[0].0.path().ends_with("parent.cls"));
+    }
+
+    #[tokio::test]
+    async fn test_ordering_missing_class_reference_returns_empty() {
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("ordering");
+        let (backend, uri) = setup_backend_and_workspace(project_root).await;
+        let project_state = backend.get_project(&uri).expect("missing project state");
+        let project_data = project_state.data.read();
+
+        // Reference a class that doesn't exist in the workspace
+        let locations = project_data.get_class_definition("NonExistent.Class");
+        assert!(
+            locations.is_empty(),
+            "referencing a class not in workspace should return empty, not crash"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ordering_duplicate_open_is_idempotent() {
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("ordering");
+
+        let state = ProjectState::new();
+        state
+            .project_root_path
+            .set(Some(project_root.clone()))
+            .ok();
+        let backend = BackendTester::new();
+        let uri = Url::from_file_path(project_root.clone()).unwrap();
+        backend.add_project(uri.clone(), state);
+        let project_state = backend.get_project(&uri).expect("missing project state");
+
+        let parent_url = Url::from_file_path(project_root.join("parent.cls")).unwrap();
+        let parent_content = std::fs::read_to_string(project_root.join("parent.cls")).unwrap();
+
+        // Open same file twice
+        project_state.handle_document_opened(
+            parent_url.clone(),
+            parent_content.clone(),
+            FileType::Cls,
+            1,
+        );
+        project_state.handle_document_opened(
+            parent_url.clone(),
+            parent_content,
+            FileType::Cls,
+            2,
+        );
+
+        let project_data = project_state.data.read();
+        // Should still have exactly 1 class (not duplicated)
+        assert!(
+            project_data.classes.contains_key("Demo.OrderParent"),
+            "class should still be indexed after duplicate open"
+        );
+        let doc = project_data
+            .documents
+            .get(&parent_url)
+            .expect("document should exist");
+        assert_eq!(doc.version, Some(2), "version should be updated to latest");
+    }
+
+    // =========================================================================
+    // GOTO DEFINITION — EDGE CASES (Test Suite 1.8)
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_goto_def_undefined_symbol_returns_empty() {
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("gotodef")
+            .join("class-method-call");
+        let (backend, uri) = setup_backend_and_workspace(project_root.clone()).await;
+        let project_state = backend.get_project(&uri).expect("missing project state");
+        let project_data = project_state.data.read();
+
+        let document_url = Url::from_file_path(project_root.join("caller.cls")).unwrap();
+
+        // Try to resolve a variable that was never defined
+        let point = Point { row: 4, column: 10 };
+        let locations = project_data.get_variable_definition(
+            &document_url,
+            point,
+            "nonexistent_var".to_string(),
+        );
+        assert!(
+            locations.is_empty(),
+            "undefined variable should return empty, not crash"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_goto_def_nonexistent_class_returns_empty() {
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("gotodef")
+            .join("class-method-call");
+        let (backend, uri) = setup_backend_and_workspace(project_root).await;
+        let project_state = backend.get_project(&uri).expect("missing project state");
+        let project_data = project_state.data.read();
+
+        let locations = project_data.get_class_definition("Does.Not.Exist");
+        assert!(
+            locations.is_empty(),
+            "class not in workspace should return empty"
+        );
+    }
+
+    // =========================================================================
+    // DOCUMENT SYNC — didOpen behavior (Test Suite 5.1)
+    // =========================================================================
+
+    #[test]
+    fn test_did_open_cls_populates_class_id_and_name() {
+        let state = ProjectState::new();
+        let uri = Url::parse("file:///tmp/Demo.Hello.cls").unwrap();
+        let content = "Class Demo.Hello\n{\nClassMethod Run()\n{\n    Write \"hi\"\n}\n}\n";
+        state.handle_document_opened(uri.clone(), content.to_string(), FileType::Cls, 1);
+
+        let data = state.data.read();
+        let doc = data.documents.get(&uri).expect("document should be tracked");
+        assert_eq!(doc.file_type, FileType::Cls);
+        assert!(doc.class_id.is_some(), "class_id should be set for .cls");
+        assert_eq!(doc.class_name.as_deref(), Some("Demo.Hello"));
+    }
+
+    #[test]
+    fn test_did_open_routine_populates_class_name_as_routine() {
+        let state = ProjectState::new();
+        let uri = Url::parse("file:///tmp/mytest.mac").unwrap();
+        let content = "ROUTINE mytest\n\nmain\n set x = 1\n quit\n";
+        state.handle_document_opened(uri.clone(), content.to_string(), FileType::Routine, 1);
+
+        let data = state.data.read();
+        let doc = data.documents.get(&uri).expect("document should be tracked");
+        assert_eq!(doc.file_type, FileType::Routine);
+        assert!(doc.class_id.is_some(), "class_id should be set for routines");
+        assert_eq!(doc.class_name.as_deref(), Some("mytest"));
+    }
+
+    #[test]
+    fn test_did_open_xml_no_class_id() {
+        let state = ProjectState::new();
+        let uri = Url::parse("file:///tmp/export.xml").unwrap();
+        let content = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Export generator="IRIS" version="26">
+<Class name="Demo.Xml">
+<Method name="Test">
+<Implementation><![CDATA[
+ set x = 1
+]]></Implementation>
+</Method>
+</Class>
+</Export>"#;
+        state.handle_document_opened(uri.clone(), content.to_string(), FileType::Xml, 1);
+
+        let data = state.data.read();
+        let doc = data.documents.get(&uri).expect("document should be tracked");
+        assert_eq!(doc.file_type, FileType::Xml);
+        assert!(doc.class_id.is_none(), "XML docs should not have class_id");
+        assert!(
+            doc.class_name.is_none(),
+            "XML docs should not have class_name"
+        );
+    }
+
+    // =========================================================================
+    // DOCUMENT SYNC — update_document (Test Suite 5.2)
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_update_document_rebuilds_semantics() {
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("ordering");
+        let (backend, uri) = setup_backend_and_workspace(project_root.clone()).await;
+        let project_state = backend.get_project(&uri).expect("missing project state");
+
+        let parent_url = Url::from_file_path(project_root.join("parent.cls")).unwrap();
+
+        // Get the current tree, then simulate an update
+        let (file_type, content, version, tree) = {
+            let data = project_state.data.read();
+            data.get_document_info(&parent_url).unwrap()
+        };
+
+        project_state.update_document(
+            parent_url.clone(),
+            tree,
+            file_type,
+            version + 1,
+            content.as_str(),
+        );
+
+        // Verify the document is still consistent
+        let data = project_state.data.read();
+        let doc = data.documents.get(&parent_url).unwrap();
+        assert_eq!(doc.version, Some(version + 1));
+        assert!(data.classes.contains_key("Demo.OrderParent"));
+        assert!(data.method_defs.contains_key("Demo.OrderParent"));
+    }
+
+    // =========================================================================
+    // REFACTORING (Test Suite 4.1, 4.2)
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_refactor_no_changes_returns_none() {
+        let state = ProjectState::new();
+        let uri = Url::parse("file:///tmp/modern.mac").unwrap();
+        let content = "ROUTINE modern\n\nmain\n    set x = 1\n    quit\n";
+        state.handle_document_opened(uri.clone(), content.to_string(), FileType::Routine, 1);
+
+        let data = state.data.read();
+        let result = data.refactor_document(&uri, RefactorLevel::DoCommands);
+        assert!(
+            result.is_none(),
+            "document with no legacy syntax should return None"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_refactor_workspace_excludes_xml() {
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("diagnostics");
+        let (backend, uri) = setup_backend_and_workspace(project_root).await;
+        let project_state = backend.get_project(&uri).expect("missing project state");
+        let project_data = project_state.data.read();
+
+        let changes = project_data.refactor(RefactorLevel::All);
+        for (_, url) in &changes {
+            assert!(
+                !url.path().ends_with(".xml"),
+                "XML files should not be included in workspace refactor results"
+            );
+        }
     }
 }

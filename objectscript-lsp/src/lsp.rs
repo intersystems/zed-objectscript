@@ -762,18 +762,18 @@ impl LanguageServer for BackendWrapper {
                         return Ok(None);
                     };
                     if let Some(class_ref) = method_name_parent.named_child(0)
-                        && let Some(class_name_node) = class_ref.named_child(1)
+                        && let Some(class_name_node_outer) = class_ref.named_child(1)
                     {
                         // this part will remove the strings and such (it grabs the actual $.identifier node)
-                        if let Some(class_name) = class_name_node.named_child(0) {
-                            if let Some(class_name) =
-                                get_string_at_byte_range(content, class_name.byte_range())
+                        if let Some(class_name_node) = class_name_node_outer.named_child(0) {
+                            if let Some(class_name_str) =
+                                get_string_at_byte_range(content, class_name_node.byte_range())
                             {
                                 definitions = {
                                     let data = project.data.read();
                                     let method_ref = if let Some(m_ref) = data
                                         .method_defs
-                                        .get(&class_name)
+                                        .get(&class_name_str)
                                         .and_then(|methods| methods.get(&name_string))
                                     {
                                         m_ref
@@ -786,41 +786,56 @@ impl LanguageServer for BackendWrapper {
                         }
                     }
                 }
-                MemberType::RoutineMethodCall => match name.kind() {
-                    "method_name" => {
-                        definitions = {
-                            let data = project.data.read();
-                            let method_ref = if let Some(m_ref) = data
-                                .method_defs
-                                .get(&class_name)
-                                .and_then(|methods| methods.get(&name_string))
-                            {
-                                m_ref
-                            } else {
-                                return Ok(None);
-                            };
-                            data.get_method_definition(method_ref, None)
-                        }
+                MemberType::RoutineMethodCall => {
+                    if name.kind() != "method_name" {
+                        eprintln!(
+                            "Error: Expected node with MemberType::RoutineMethodCall to be method_name, but got {:?}, aborting (goto_definition)",
+                            name.kind()
+                        );
                     }
-                    "line_ref" => {
-                        definitions = {
-                            let data = project.data.read();
-                            let (method_name, routine_name, offset) =
-                                parse_line_ref(name, content, class_name.clone());
-                            let method_ref = if let Some(m_ref) = data
-                                .method_defs
-                                .get(&routine_name)
-                                .and_then(|methods| methods.get(&method_name))
-                            {
-                                m_ref
-                            } else {
-                                return Ok(None);
-                            };
-                            data.get_method_definition(method_ref, offset)
+                    if let Some(method_name_parent) = name.parent() {
+                        match method_name_parent.kind() {
+                            "routine_tag_call" | "print_argument" | "goto_argument" => {
+                                definitions = {
+                                    let data = project.data.read();
+                                    let method_ref = if let Some(m_ref) = data
+                                        .method_defs
+                                        .get(&class_name)
+                                        .and_then(|methods| methods.get(&name_string))
+                                    {
+                                        m_ref
+                                    } else {
+                                        return Ok(None);
+                                    };
+                                    data.get_method_definition(method_ref, None)
+                                }
+                            }
+                            "extrinsic_function" | "line_ref" => {
+                                definitions = {
+                                    let data = project.data.read();
+                                    let (routine_name, method_name, offset) = parse_line_ref(
+                                        method_name_parent,
+                                        content,
+                                        class_name.clone(),
+                                    );
+                                    let method_ref = if let Some(m_ref) = data
+                                        .method_defs
+                                        .get(&routine_name)
+                                        .and_then(|methods| methods.get(&method_name))
+                                    {
+                                        m_ref
+                                    } else {
+                                        return Ok(None);
+                                    };
+                                    data.get_method_definition(method_ref, offset)
+                                }
+                            }
+                            _ => return Ok(None),
                         }
+                    } else {
+                        return Ok(None);
                     }
-                    _ => return Ok(None),
-                },
+                }
                 MemberType::OrefMethod => match name.kind() {
                     "method_name" => {
                         if let Some(oref_method) = name.parent()
@@ -858,11 +873,12 @@ impl LanguageServer for BackendWrapper {
                                 {
                                     definitions = {
                                         let data = project.data.read();
-                                        data.get_oref_method_definition(
+                                        data.get_oref_definitions(
                                             &var_name_str,
                                             &name_string,
                                             &class_name,
-                                            point,
+                                            name.range(),
+                                            true,
                                         )
                                     }
                                 } else if var_name_node.kind() == "class_method_call" {
@@ -929,11 +945,12 @@ impl LanguageServer for BackendWrapper {
                                                 {
                                                     definitions = {
                                                         let data = project.data.read();
-                                                        data.get_oref_definition(
-                                                            &uri,
-                                                            point,
-                                                            name_string,
-                                                            method_name_str,
+                                                        data.get_oref_definitions(
+                                                            &name_string,
+                                                            &method_name_str,
+                                                            &class_name,
+                                                            name.range(),
+                                                            false,
                                                         )
                                                     }
                                                 }
@@ -961,11 +978,12 @@ impl LanguageServer for BackendWrapper {
                                                 {
                                                     definitions = {
                                                         let data = project.data.read();
-                                                        data.get_oref_definition(
-                                                            &uri,
-                                                            point,
-                                                            name_string,
-                                                            method_name_str,
+                                                        data.get_oref_definitions(
+                                                            &name_string,
+                                                            &method_name_str,
+                                                            &class_name,
+                                                            name.range(),
+                                                            false,
                                                         )
                                                     }
                                                 }
@@ -979,14 +997,14 @@ impl LanguageServer for BackendWrapper {
                                         }
                                     }
                                 }
-                                "do_parameter" => {
-                                    if lvn_parent.named_child_count() > 2 {
-                                        eprintln!(
-                                            "Error: Right now, analysis only supports 2 children for oref expression, aborting goto_definition"
-                                        );
-                                        return Ok(None);
-                                    }
-                                    if let Some(method_name_node) = lvn_parent.named_child(1)
+                                "do_parameter" | "job_argument" => {
+                                    // _method_call node
+                                    if let Some(oref_method_node) = lvn_parent.named_child(1)
+                                        && oref_method_node.kind() == "oref_method"
+                                        && let Some(outer_method_name_node) =
+                                            oref_method_node.named_child(0)
+                                        && let Some(method_name_node) =
+                                            outer_method_name_node.named_child(0)
                                         && let Some(method_name_str) = get_string_at_byte_range(
                                             content,
                                             method_name_node.byte_range(),
@@ -994,11 +1012,12 @@ impl LanguageServer for BackendWrapper {
                                     {
                                         definitions = {
                                             let data = project.data.read();
-                                            data.get_oref_definition(
-                                                &uri,
-                                                point,
-                                                name_string,
-                                                method_name_str,
+                                            data.get_oref_definitions(
+                                                &name_string,
+                                                &method_name_str,
+                                                &class_name,
+                                                name.range(),
+                                                false,
                                             )
                                         }
                                     }
@@ -1022,11 +1041,12 @@ impl LanguageServer for BackendWrapper {
                                     {
                                         definitions = {
                                             let data = project.data.read();
-                                            data.get_oref_definition(
-                                                &uri,
-                                                point,
-                                                name_string,
-                                                method_name_str,
+                                            data.get_oref_definitions(
+                                                &name_string,
+                                                &method_name_str,
+                                                &class_name,
+                                                name.range(),
+                                                false,
                                             )
                                         }
                                     }
@@ -1099,8 +1119,7 @@ impl LanguageServer for BackendWrapper {
             }
         } else if node.kind() == "numeric_literal" {
             if let Some(parent) = node.parent() {
-                if parent.kind() == "zbreak_location"
-                    || parent.kind() == "routine_tag_call"
+                if parent.kind() == "routine_tag_call"
                     || parent.kind() == "print_argument"
                     || parent.kind() == "goto_argument"
                 {

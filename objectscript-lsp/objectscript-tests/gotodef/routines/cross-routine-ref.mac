@@ -1,0 +1,5 @@
+ROUTINE crossref
+
+entry
+ do helper^tagcalls
+ quit

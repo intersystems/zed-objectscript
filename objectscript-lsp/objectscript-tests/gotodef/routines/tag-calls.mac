@@ -1,0 +1,16 @@
+ROUTINE tagcalls
+
+main
+ set x = 1
+ do helper
+ do helper^tagcalls
+ goto finish
+ quit
+
+helper
+ w !, "helping"
+ quit
+
+finish
+ w !, "done"
+ quit

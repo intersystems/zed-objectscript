@@ -1,8 +1,8 @@
+use crate::scope_structures::ScopeId;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::hash::Hasher;
 use tree_sitter::Range;
-
 /// Stores the Index into `GlobalSemanticModel::classes`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ClassId(pub usize);
@@ -188,7 +188,7 @@ pub struct Method {
     /// Method Name.
     pub name: String,
     /// Stores variable name -> VariableRef for all variable definitions in this method.
-    pub variables: HashMap<String, Vec<VariableRef>>,
+    pub variables: HashMap<String, Vec<(VariableRef, ScopeId)>>,
     /// Whether method is public or not.
     pub is_public: bool,
     /// Whether method is a procedure block or not. If None, method defaults to procedure block.

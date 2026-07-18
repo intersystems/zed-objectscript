@@ -1,6 +1,7 @@
 use crate::parse_structures::{
     ClassProperty, Method, MethodRef, PrivateVarId, Variable, VariableRef,
 };
+use crate::scope_structures::ScopeId;
 use std::collections::HashMap;
 /// Per-document private semantic state (methods, properties, variables).
 ///
@@ -9,7 +10,7 @@ use std::collections::HashMap;
 pub struct LocalSemanticModel {
     pub methods: HashMap<MethodRef, Method>,
     pub properties: Vec<ClassProperty>,
-    pub variables: HashMap<MethodRef, Vec<Variable>>,
+    pub variables: HashMap<MethodRef, HashMap<ScopeId, Vec<Variable>>>,
     pub active: bool,
 }
 
@@ -33,10 +34,18 @@ impl LocalSemanticModel {
     }
 
     /// Returns a reference to a private variable by method ref and index.
-    pub fn get_variable(&self, method_ref: &MethodRef, variable_index: usize) -> Option<&Variable> {
-        self.variables
-            .get(method_ref)
-            .and_then(|variables| variables.get(variable_index))
+    pub fn get_variable(
+        &self,
+        method_ref: &MethodRef,
+        variable_index: usize,
+        scope_id: &ScopeId,
+    ) -> Option<&Variable> {
+        if let Some(scopes_to_vars) = self.variables.get(method_ref)
+            && let Some(variables) = scopes_to_vars.get(scope_id)
+        {
+            return variables.get(variable_index);
+        }
+        None
     }
 
     /// Clears all stored methods/properties/variables and marks the model as inactive.
@@ -50,13 +59,19 @@ impl LocalSemanticModel {
     /// Adds a new private/local variable to this model and returns its `PrivateVarId`.
     ///
     /// The returned id is the index of the variable in the internal `variables` vector.
-    pub fn new_variable(&mut self, method_ref: MethodRef, variable: Variable) -> VariableRef {
-        let curr_method_vars = self.variables.entry(method_ref).or_insert(Vec::new());
+    pub fn new_variable(
+        &mut self,
+        method_ref: MethodRef,
+        variable: Variable,
+        scope_id: ScopeId,
+    ) -> VariableRef {
+        let scopes_to_vars = self.variables.entry(method_ref).or_insert(HashMap::new());
+        let vars = scopes_to_vars.entry(scope_id).or_insert(Vec::new());
         let var_ref = VariableRef {
             pub_id: None,
-            priv_id: Some(PrivateVarId(curr_method_vars.len())),
+            priv_id: Some(PrivateVarId(vars.len())),
         };
-        curr_method_vars.push(variable);
+        vars.push(variable);
         var_ref
     }
 

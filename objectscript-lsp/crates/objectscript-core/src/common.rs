@@ -630,7 +630,10 @@ fn build_scope_skeleton(
     if is_scope {
         let scope_start;
         let scope_end;
-        if !is_rtn {
+        if method_name.is_none() {
+            let scope_range = get_scope_range(node);
+            (scope_start, scope_end) = (scope_range.start_point, scope_range.end_point)
+        } else if !is_rtn {
             scope_start = node.start_position();
             scope_end = node.end_position();
         } else {
@@ -642,7 +645,7 @@ fn build_scope_skeleton(
             );
             return;
         };
-        let scope_id = scope_tree.add_scope(scope_start, scope_end, parent, false, method_name);
+        let scope_id = scope_tree.add_scope(scope_start, scope_end, parent, method_name);
         scope_stack.push(scope_id);
     }
 
@@ -669,117 +672,171 @@ pub fn point_in_range(pos: Point, start: Point, end: Point) -> bool {
 /// Returns `false` otherwise.
 pub fn cls_is_scope_node(node: Node, content: &str) -> (bool, Option<String>) {
     let mut method_name_str = None;
-    let mut is_scope = false;
-    if node.kind() == "classmethod" || node.kind() == "method" {
-        if let Some(method_definition) = node.named_child(1)
-            && let Some(method_name) = method_definition.named_child(0)
-            && method_name.kind() == "method_name"
-            && let Some(method_id) = method_name.named_child(0)
-        {
-            method_name_str = get_string_at_byte_range(content, method_id.byte_range());
+    let is_scope;
+    match node.kind() {
+        "method" | "classmethod" => {
+            if let Some(method_definition) = node.named_child(1)
+                && let Some(method_name) = method_definition.named_child(0)
+                && method_name.kind() == "method_name"
+                && let Some(method_id) = method_name.named_child(0)
+            {
+                method_name_str = get_string_at_byte_range(content, method_id.byte_range());
+            }
+            is_scope = true;
         }
-        is_scope = true;
+        "command_if"
+        | "else_block"
+        | "elseif_block"
+        | "else_block_dotted"
+        | "elseif_block_dotted"
+        | "command_if_dotted_block"
+        | "command_else" => is_scope = true,
+        _ => is_scope = false,
     }
     (is_scope, method_name_str)
+}
+
+fn get_scope_range(node: Node) -> Range {
+    if node.kind() == "command_else"
+        || node.kind() == "else_block"
+        || node.kind() == "elseif_block"
+        || node.kind() == "else_block_dotted"
+        || node.kind() == "elseif_block_dotted"
+    {
+        return node.range();
+    }
+    let children = get_node_children(node);
+    let mut end_point = node.end_position();
+    let mut end_byte = node.end_byte();
+    for child in children {
+        match child.kind() {
+            "else_block" | "elseif_block" | "else_block_dotted" | "elseif_block_dotted" => break,
+            _ => {
+                end_byte = child.end_byte();
+                end_point = child.end_position();
+            }
+        }
+    }
+
+    Range {
+        start_byte: node.start_byte(),
+        start_point: node.start_position(),
+        end_byte,
+        end_point,
+    }
 }
 
 /// Determines if a tree-sitter node starts a new subroutine scope in a routine file.
 pub fn rtn_is_scope_node(node: Node, content: &str) -> (bool, Option<String>) {
     let mut method_name_str = None;
     let mut is_scope = false;
-    if node.kind() == "tag_statement" {
-        let mut sib = node.parent().and_then(|p| p.prev_named_sibling());
-        while let Some(sibling) = sib {
-            let Some(command) = sibling.named_child(0) else {
-                eprintln!(
-                    "Sibling node did not have a child at index 0, skipping (rtn_is_scope_node)"
-                );
-                sib = sibling.prev_named_sibling();
-                continue;
-            };
-            if command.kind() == "tag_statement" {
-                return (false, None);
-            } else if command.kind() == "procedure" || command.kind() == "command_quit" {
+    match node.kind() {
+        "command_if"
+        | "else_block"
+        | "elseif_block"
+        | "else_block_dotted"
+        | "elseif_block_dotted"
+        | "command_if_dotted_block"
+        | "command_else" => return (true, None),
+        _ => {
+            if node.kind() == "tag_statement" {
+                let mut sib = node.parent().and_then(|p| p.prev_named_sibling());
+                while let Some(sibling) = sib {
+                    let Some(command) = sibling.named_child(0) else {
+                        eprintln!(
+                            "Sibling node did not have a child at index 0, skipping (rtn_is_scope_node)"
+                        );
+                        sib = sibling.prev_named_sibling();
+                        continue;
+                    };
+                    if command.kind() == "tag_statement" {
+                        return (false, None);
+                    } else if command.kind() == "procedure" || command.kind() == "command_quit" {
+                        if let Some(tag) = node.named_child(0) {
+                            method_name_str = get_string_at_byte_range(content, tag.byte_range());
+                        }
+                        return (true, method_name_str);
+                    }
+                    sib = sibling.prev_named_sibling();
+                }
+                // No previous tag or quit found — first subroutine in the file.
                 if let Some(tag) = node.named_child(0) {
                     method_name_str = get_string_at_byte_range(content, tag.byte_range());
                 }
                 return (true, method_name_str);
             }
-            sib = sibling.prev_named_sibling();
-        }
-        // No previous tag or quit found — first subroutine in the file.
-        if let Some(tag) = node.named_child(0) {
-            method_name_str = get_string_at_byte_range(content, tag.byte_range());
-        }
-        return (true, method_name_str);
-    }
-    if node.kind() == "procedure" {
-        if let Some(tag) = node.named_child(0) {
-            method_name_str = get_string_at_byte_range(content, tag.byte_range());
-        }
-        is_scope = true;
-    } else if node.kind() == "dotted_statement" {
-        if let Some(sibling) = node.prev_named_sibling()
-            && sibling.kind() == "dotted_statement"
-        {
-            let Some(dotted_statement_line) = get_string_at_byte_range(content, node.byte_range())
-            else {
-                return (is_scope, method_name_str);
-            };
-            let depth = count_leading_dots_in_line(&dotted_statement_line);
-            let Some(sib_dotted_statement_line) =
-                get_string_at_byte_range(content, sibling.byte_range())
-            else {
-                return (is_scope, method_name_str);
-            };
-            let sib_depth = count_leading_dots_in_line(&sib_dotted_statement_line);
-            if depth > sib_depth {
-                is_scope = true;
-            }
-        } else {
-            is_scope = true;
-        }
-        if is_scope {
-            let mut curr_parent = node.parent();
-            while let Some(parent) = curr_parent
-                && let Some(_) = parent.parent()
-            {
-                if parent.kind() == "procedure" {
-                    if let Some(tag) = parent.named_child(0) {
-                        method_name_str = get_string_at_byte_range(content, tag.byte_range());
-                    }
-                    break;
+            if node.kind() == "procedure" {
+                if let Some(tag) = node.named_child(0) {
+                    method_name_str = get_string_at_byte_range(content, tag.byte_range());
                 }
-                curr_parent = parent.parent();
-            }
-
-            if method_name_str.is_none() {
-                if let Some(parent) = curr_parent {
-                    let mut curr_sib = parent.prev_named_sibling();
-                    while let Some(sibling) = curr_sib {
-                        let Some(command) = sibling.named_child(0) else {
-                            eprintln!(
-                                "Sibling node did not have a child at index 0, skipping (rtn_is_scope_node)"
-                            );
-                            curr_sib = sibling.prev_named_sibling();
-                            continue;
-                        };
-                        if command.kind() == "tag_statement" {
-                            if let Some(tag) = sibling.named_child(0) {
+                is_scope = true;
+            } else if node.kind() == "dotted_statement" {
+                if let Some(sibling) = node.prev_named_sibling()
+                    && sibling.kind() == "dotted_statement"
+                {
+                    let Some(dotted_statement_line) =
+                        get_string_at_byte_range(content, node.byte_range())
+                    else {
+                        return (is_scope, method_name_str);
+                    };
+                    let depth = count_leading_dots_in_line(&dotted_statement_line);
+                    let Some(sib_dotted_statement_line) =
+                        get_string_at_byte_range(content, sibling.byte_range())
+                    else {
+                        return (is_scope, method_name_str);
+                    };
+                    let sib_depth = count_leading_dots_in_line(&sib_dotted_statement_line);
+                    if depth > sib_depth {
+                        is_scope = true;
+                    }
+                } else {
+                    is_scope = true;
+                }
+                if is_scope {
+                    let mut curr_parent = node.parent();
+                    while let Some(parent) = curr_parent
+                        && let Some(_) = parent.parent()
+                    {
+                        if parent.kind() == "procedure" {
+                            if let Some(tag) = parent.named_child(0) {
                                 method_name_str =
                                     get_string_at_byte_range(content, tag.byte_range());
                             }
-                        } else if command.kind() == "command_quit" || command.kind() == "procedure"
-                        {
                             break;
                         }
-                        curr_sib = sibling.prev_named_sibling();
+                        curr_parent = parent.parent();
+                    }
+
+                    if method_name_str.is_none() {
+                        if let Some(parent) = curr_parent {
+                            let mut curr_sib = parent.prev_named_sibling();
+                            while let Some(sibling) = curr_sib {
+                                let Some(command) = sibling.named_child(0) else {
+                                    eprintln!(
+                                        "Sibling node did not have a child at index 0, skipping (rtn_is_scope_node)"
+                                    );
+                                    curr_sib = sibling.prev_named_sibling();
+                                    continue;
+                                };
+                                if command.kind() == "tag_statement" {
+                                    if let Some(tag) = sibling.named_child(0) {
+                                        method_name_str =
+                                            get_string_at_byte_range(content, tag.byte_range());
+                                    }
+                                } else if command.kind() == "command_quit"
+                                    || command.kind() == "procedure"
+                                {
+                                    break;
+                                }
+                                curr_sib = sibling.prev_named_sibling();
+                            }
+                        }
                     }
                 }
             }
+            (is_scope, method_name_str)
         }
     }
-    (is_scope, method_name_str)
 }
 
 /// Given either a tag_statement, procedure, or dotted_statement node,
@@ -887,9 +944,8 @@ pub fn get_outer_type_from_identifier(node: &Node) -> Option<MemberType> {
                         return Some(MemberType::OrefMethod);
                     }
                 }
-                "routine_tag_call" | "print_argument" | "goto_argument" | "zbreak_location" => {
-                    Some(MemberType::RoutineMethodCall)
-                }
+                "routine_tag_call" | "print_argument" | "goto_argument" | "extrinsic_function"
+                | "line_ref" => Some(MemberType::RoutineMethodCall),
                 "class_method_call" | "system_defined_function" => {
                     Some(MemberType::ClassMethodCall)
                 }
@@ -910,7 +966,6 @@ pub fn get_outer_type_from_identifier(node: &Node) -> Option<MemberType> {
         "ssvn" => Some(MemberType::SystemMember),
         "gvn" => Some(MemberType::GlobalVariable),
         "routine_name" => Some(MemberType::Routine),
-        "line_ref" => Some(MemberType::RoutineMethodCall),
         _ => None,
     };
 }

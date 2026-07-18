@@ -1360,7 +1360,7 @@ fn build_generated_dotted_do(
         body.push_str(format!("{base_indent}quit{newline}").as_str());
     }
 
-    let text = format!("{newline}{sub_name}{newline}{body}");
+    let text = format!("{newline}{sub_name} Private{newline}{body}");
 
     Some(GeneratedDoSubroutine {
         name: sub_name,

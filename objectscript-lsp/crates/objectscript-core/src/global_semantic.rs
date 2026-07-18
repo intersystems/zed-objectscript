@@ -5,7 +5,9 @@ use crate::override_index::OverrideIndex;
 use crate::parse_structures::{
     Class, ClassId, DfsState, Language, Method, MethodRef, PublicVarId, Variable, VariableRef,
 };
-use crate::scope_structures::{ClassGlobalSymbol, MethodGlobalSymbol, VariableGlobalSymbol};
+use crate::scope_structures::{
+    ClassGlobalSymbol, MethodGlobalSymbol, ScopeId, VariableGlobalSymbol,
+};
 use std::collections::{HashMap, HashSet};
 use tower_lsp::lsp_types::Url;
 use tree_sitter::Range;
@@ -14,7 +16,7 @@ use tree_sitter::Range;
 #[derive(Clone, Debug)]
 pub struct GlobalSemanticModel {
     /// Stores public variables per class.
-    pub variables: HashMap<MethodRef, Vec<Variable>>,
+    pub variables: HashMap<MethodRef, HashMap<ScopeId, Vec<Variable>>>,
     /// Stores all classes in a workspace.
     pub classes: HashMap<ClassId, Class>,
     /// Stores public methods per class.
@@ -26,7 +28,7 @@ pub struct GlobalSemanticModel {
     /// Stores Method Global Symbols per Class Global Symbol
     pub method_defs: HashMap<MethodRef, MethodGlobalSymbol>,
     /// Stores Variable Global Symbols per Class Global Symbol
-    pub variable_defs: HashMap<MethodRef, Vec<VariableGlobalSymbol>>,
+    pub variable_defs: HashMap<MethodRef, HashMap<ScopeId, Vec<VariableGlobalSymbol>>>,
     next_class_id: usize,
 }
 
@@ -50,8 +52,14 @@ impl GlobalSemanticModel {
 
     /// Given a Variable, adds the variable to the vec corresponding to the class and method the variable is defined in.
     /// Returns PublicVarId, which corresponds to the index which the Variable is stored.
-    pub fn new_variable(&mut self, variable: Variable, method_ref: MethodRef) -> VariableRef {
-        let vars = self.variables.entry(method_ref).or_insert(Vec::new());
+    pub fn new_variable(
+        &mut self,
+        variable: Variable,
+        method_ref: MethodRef,
+        scope_id: ScopeId,
+    ) -> VariableRef {
+        let scopes_to_vars = self.variables.entry(method_ref).or_insert(HashMap::new());
+        let vars = scopes_to_vars.entry(scope_id).or_insert(Vec::new());
         let var_ref = VariableRef {
             pub_id: Some(PublicVarId(vars.len())),
             priv_id: None,
@@ -149,21 +157,31 @@ impl GlobalSemanticModel {
         &self,
         method_symbol_ref: &MethodRef,
         index: usize,
+        scope_id: &ScopeId,
     ) -> Option<&VariableGlobalSymbol> {
-        let Some(var_symbols) = self.variable_defs.get(method_symbol_ref) else {
-            return None;
-        };
-        var_symbols.get(index)
+        if let Some(scopes_to_var_symbols) = self.variable_defs.get(method_symbol_ref)
+            && let Some(var_symbols) = scopes_to_var_symbols.get(scope_id)
+        {
+            return var_symbols.get(index);
+        }
+        None
     }
 
     /// Returns the `VariableGlobalSymbol` for a MethodRef by symbol index.
     ///
     /// Logs and returns `None` if the class has no variable symbols recorded or `index` is out of bounds.
-    pub fn get_variable(&self, method_ref: &MethodRef, index: usize) -> Option<&Variable> {
-        let Some(variables) = self.variables.get(method_ref) else {
-            return None;
-        };
-        variables.get(index)
+    pub fn get_variable(
+        &self,
+        method_ref: &MethodRef,
+        index: usize,
+        scope_id: &ScopeId,
+    ) -> Option<&Variable> {
+        if let Some(scopes_to_vars) = self.variables.get(method_ref)
+            && let Some(variables) = scopes_to_vars.get(scope_id)
+        {
+            return variables.get(index);
+        }
+        None
     }
 
     /// Clears all semantic state associated with a re-parsed document.
@@ -302,11 +320,13 @@ impl GlobalSemanticModel {
         var_dependencies: Vec<String>,
         method_symbol_ref: MethodRef,
         variable_ref: VariableRef,
+        scope_id: ScopeId,
     ) {
-        let defs = self
+        let scopes_to_vars = self
             .variable_defs
             .entry(method_symbol_ref)
-            .or_insert(Vec::new());
+            .or_insert(HashMap::new());
+        let defs = scopes_to_vars.entry(scope_id).or_insert(Vec::new());
         if let Some(id) = variable_ref.pub_id {
             if defs.len() != id.0 {
                 eprintln!(
