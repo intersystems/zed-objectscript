@@ -4,7 +4,7 @@ dotted
     if 1 do dottedSubroutine1
 #; comment
 
-dottedSubroutine1
+dottedSubroutine1 Private
     if 1 {
        w "hi"
     }
@@ -13,7 +13,7 @@ dottedSubroutine1
 dottedComment
     do dottedCommentSubroutine1
 
-dottedCommentSubroutine1
+dottedCommentSubroutine1 Private
     /*w hi*/
     set x = 1
     if x {

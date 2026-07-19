@@ -62,7 +62,17 @@
   (macro_constant)
 ] @constant
 
-(objectscript_identifier) @variable
+(lvn
+  (objectscript_identifier) @variable)
+
+(lvn
+  (objectscript_identifier_special) @variant)
+
+(ole_object_reference
+  (objectscript_identifier) @variable)
+
+(ole_object_reference
+  (objectscript_identifier_special) @variant)
 
 [
   (ssvn)
@@ -72,7 +82,6 @@
 
 [
   (gvn)
-  (objectscript_identifier_special)
   (instance_variable)
 ] @variant
 

@@ -884,7 +884,7 @@ impl ProjectData {
                     } else {
                         continue;
                     };
-                    method.build_method_variable_defs(method_definition_node, content)
+                    method.build_variables(method_definition_node, content, is_rtn)
                 };
 
                 for (variable, variable_range, refs_to_other_vars) in var_results {
@@ -1227,7 +1227,8 @@ impl ProjectData {
             if !private_var_ranges.is_empty() {
                 let mut location_hash = HashMap::new();
                 let mut seen_scope_ids = Vec::new();
-                let scope_children = document.scope_tree.get_scope_children(&var_ref_scope_id);
+                let mut scope_children = document.scope_tree.get_scope_children(&var_ref_scope_id);
+                scope_children.push(var_ref_scope_id);
                 for (child_scope_id, variable_ranges) in private_var_ranges {
                     if !scope_children.contains(&child_scope_id) {
                         continue;
@@ -1258,7 +1259,8 @@ impl ProjectData {
                 .pub_variable_in_scope(variable_name.as_str(), var_ref_scope_id);
             let mut location_hash = HashMap::new();
             let mut seen_scope_ids = Vec::new();
-            let scope_children = document.scope_tree.get_scope_children(&var_ref_scope_id);
+            let mut scope_children = document.scope_tree.get_scope_children(&var_ref_scope_id);
+            scope_children.push(var_ref_scope_id);
             for (child_scope_id, variable_refs) in pub_var_refs {
                 if !scope_children.contains(&child_scope_id) {
                     continue;
@@ -1295,64 +1297,80 @@ impl ProjectData {
                 if let Some(&node_index) = self.dependency_graph.get_node(*method_ref)
                     && let Some(public_var_definitions) = self.pub_var_defs.get(&variable_name)
                 {
-                    let all_potential_nodes_on_path =
-                        self.dependency_graph.all_ancestors(node_index);
-                    for (def_method_ref, variable_refs_hash_map) in public_var_definitions {
+                    let all_ancestors = self.dependency_graph.all_ancestors(node_index);
+                    let mut found_depth: Option<usize> = None;
+                    for (ancestor_ref, method_call_range, depth) in &all_ancestors {
+                        if let Some(fd) = found_depth {
+                            if *depth > fd {
+                                break;
+                            }
+                        }
+                        let Some(variable_refs_hash_map) =
+                            public_var_definitions.get(ancestor_ref)
+                        else {
+                            continue;
+                        };
                         let Some(def_cls_sym) = self
                             .global_semantic_model
-                            .get_class_symbol(&def_method_ref.class)
+                            .get_class_symbol(&ancestor_ref.class)
                         else {
                             continue;
                         };
                         let Some(def_doc) = self.get_document(&def_cls_sym.url) else {
                             continue;
                         };
-                        if let Some(method_call_range) =
-                            all_potential_nodes_on_path.get(def_method_ref)
-                            && let Some(method_scope_id) = def_doc
-                                .scope_tree
-                                .find_current_scope(method_call_range.start_point)
-                        {
-                            let mut location_hash = HashMap::new();
-                            let mut seen_scope_ids = Vec::new();
-                            let scope_children =
-                                def_doc.scope_tree.get_scope_children(&method_scope_id);
-                            for (child_scope_id, variable_refs) in variable_refs_hash_map {
-                                if !scope_children.contains(child_scope_id) {
-                                    continue;
-                                }
-                                for variable_ref in variable_refs {
-                                    if let Some(var_id) = variable_ref.pub_id
-                                        && let Some(symbol) =
-                                            self.global_semantic_model.get_variable_symbol(
-                                                &def_method_ref,
-                                                var_id.0,
-                                                child_scope_id,
-                                            )
-                                    {
-                                        if symbol.location.end_byte < method_call_range.start_byte {
-                                            if !seen_scope_ids.contains(child_scope_id) {
-                                                let index = locations.len();
-                                                locations
-                                                    .push((symbol.url.clone(), symbol.location));
-                                                seen_scope_ids.push(*child_scope_id);
-                                                location_hash.insert(child_scope_id, index);
-                                            } else if let Some(&index) =
-                                                location_hash.get(child_scope_id)
+                        let Some(method_scope_id) = def_doc
+                            .scope_tree
+                            .find_current_scope(method_call_range.start_point)
+                        else {
+                            continue;
+                        };
+                        let mut location_hash = HashMap::new();
+                        let mut seen_scope_ids = Vec::new();
+                        let mut scope_children =
+                            def_doc.scope_tree.get_scope_children(&method_scope_id);
+                        scope_children.push(method_scope_id);
+                        for (child_scope_id, variable_refs) in variable_refs_hash_map {
+                            if !scope_children.contains(child_scope_id) {
+                                continue;
+                            }
+                            for variable_ref in variable_refs {
+                                if let Some(var_id) = variable_ref.pub_id
+                                    && let Some(symbol) =
+                                        self.global_semantic_model.get_variable_symbol(
+                                            ancestor_ref,
+                                            var_id.0,
+                                            child_scope_id,
+                                        )
+                                {
+                                    if symbol.location.end_byte < method_call_range.start_byte {
+                                        if !seen_scope_ids.contains(child_scope_id) {
+                                            let index = locations.len();
+                                            locations
+                                                .push((symbol.url.clone(), symbol.location));
+                                            seen_scope_ids.push(*child_scope_id);
+                                            location_hash.insert(child_scope_id, index);
+                                        } else if let Some(&index) =
+                                            location_hash.get(child_scope_id)
+                                        {
+                                            let curr_indexed_sym_range = locations[index].1;
+                                            if curr_indexed_sym_range.end_byte
+                                                < symbol.location.start_byte
                                             {
-                                                let curr_indexed_sym_range = locations[index].1;
-                                                if curr_indexed_sym_range.end_byte
-                                                    < symbol.location.start_byte
-                                                {
-                                                    locations[index] =
-                                                        (symbol.url.clone(), symbol.location);
-                                                }
+                                                locations[index] =
+                                                    (symbol.url.clone(), symbol.location);
                                             }
                                         }
                                     }
                                 }
                             }
                         }
+                        if !locations.is_empty() {
+                            found_depth = Some(*depth);
+                        }
+                    }
+                    if !locations.is_empty() {
+                        return locations;
                     }
                 }
             }
@@ -1660,9 +1678,10 @@ impl ProjectData {
                 };
                 let mut location_hash = HashMap::new();
                 let mut seen_scope_ids = Vec::new();
-                let scope_children = current_document
+                let mut scope_children = current_document
                     .scope_tree
                     .get_scope_children(&var_ref_scope_id);
+                scope_children.push(var_ref_scope_id);
                 for (child_scope_id, variable_refs) in potential_oref_refs {
                     if !scope_children.contains(&child_scope_id) {
                         continue;
@@ -1755,77 +1774,93 @@ impl ProjectData {
                 if let Some(&node_index) = self.dependency_graph.get_node(*current_method_ref)
                     && let Some(public_var_definitions) = self.pub_var_defs.get(oref_name)
                 {
-                    let all_potential_nodes_on_path =
-                        self.dependency_graph.all_ancestors(node_index);
-                    for (def_method_ref, variable_refs_hash_map) in public_var_definitions {
+                    let all_ancestors = self.dependency_graph.all_ancestors(node_index);
+                    let mut found_depth: Option<usize> = None;
+                    for (ancestor_ref, method_call_range, depth) in &all_ancestors {
+                        if let Some(fd) = found_depth {
+                            if *depth > fd {
+                                break;
+                            }
+                        }
+                        let Some(variable_refs_hash_map) =
+                            public_var_definitions.get(ancestor_ref)
+                        else {
+                            continue;
+                        };
                         let Some(def_cls_sym) = self
                             .global_semantic_model
-                            .get_class_symbol(&def_method_ref.class)
+                            .get_class_symbol(&ancestor_ref.class)
                         else {
                             continue;
                         };
                         let Some(def_doc) = self.get_document(&def_cls_sym.url) else {
                             continue;
                         };
-                        if let Some(method_call_range) =
-                            all_potential_nodes_on_path.get(def_method_ref)
-                            && let Some(method_scope_id) = def_doc
-                                .scope_tree
-                                .find_current_scope(method_call_range.start_point)
-                        {
-                            let mut location_hash = HashMap::new();
-                            let mut seen_scope_ids = Vec::new();
-                            let scope_children =
-                                def_doc.scope_tree.get_scope_children(&method_scope_id);
-                            for (child_scope_id, variable_refs) in variable_refs_hash_map {
-                                if !scope_children.contains(child_scope_id) {
-                                    continue;
-                                }
-                                for variable_ref in variable_refs {
-                                    if let Some(var_id) = variable_ref.pub_id
-                                        && let Some(symbol) =
-                                            self.global_semantic_model.get_variable_symbol(
-                                                &def_method_ref,
-                                                var_id.0,
-                                                child_scope_id,
-                                            )
-                                        && let Some(variable) = self
-                                            .global_semantic_model
-                                            .get_variable(def_method_ref, var_id.0, child_scope_id)
-                                        && variable.is_oref
-                                        && let Some(oref_class_name) = variable.cls.clone()
-                                        && let Some(oref_method_ref) = self
-                                            .method_defs
-                                            .get(&oref_class_name)
-                                            .and_then(|methods| methods.get(oref_method_name))
-                                    {
-                                        if symbol.location.end_byte < method_call_range.start_byte {
-                                            if !seen_scope_ids.contains(&child_scope_id) {
-                                                let index = oref_method_refs.len();
-                                                oref_method_refs
-                                                    .push((*oref_method_ref, original_method_call));
-                                                locations
-                                                    .push((symbol.url.clone(), symbol.location));
-                                                seen_scope_ids.push(child_scope_id);
-                                                location_hash.insert(child_scope_id, index);
-                                            } else if let Some(&index) =
-                                                location_hash.get(&child_scope_id)
+                        let Some(method_scope_id) = def_doc
+                            .scope_tree
+                            .find_current_scope(method_call_range.start_point)
+                        else {
+                            continue;
+                        };
+                        let mut location_hash = HashMap::new();
+                        let mut seen_scope_ids = Vec::new();
+                        let mut scope_children =
+                            def_doc.scope_tree.get_scope_children(&method_scope_id);
+                        scope_children.push(method_scope_id);
+                        for (child_scope_id, variable_refs) in variable_refs_hash_map {
+                            if !scope_children.contains(child_scope_id) {
+                                continue;
+                            }
+                            for variable_ref in variable_refs {
+                                if let Some(var_id) = variable_ref.pub_id
+                                    && let Some(symbol) =
+                                        self.global_semantic_model.get_variable_symbol(
+                                            ancestor_ref,
+                                            var_id.0,
+                                            child_scope_id,
+                                        )
+                                    && let Some(variable) = self
+                                        .global_semantic_model
+                                        .get_variable(ancestor_ref, var_id.0, child_scope_id)
+                                    && variable.is_oref
+                                    && let Some(oref_class_name) = variable.cls.clone()
+                                    && let Some(oref_method_ref) = self
+                                        .method_defs
+                                        .get(&oref_class_name)
+                                        .and_then(|methods| methods.get(oref_method_name))
+                                {
+                                    if symbol.location.end_byte < method_call_range.start_byte {
+                                        if !seen_scope_ids.contains(child_scope_id) {
+                                            let index = oref_method_refs.len();
+                                            oref_method_refs
+                                                .push((*oref_method_ref, original_method_call));
+                                            locations
+                                                .push((symbol.url.clone(), symbol.location));
+                                            seen_scope_ids.push(*child_scope_id);
+                                            location_hash.insert(child_scope_id, index);
+                                        } else if let Some(&index) =
+                                            location_hash.get(child_scope_id)
+                                        {
+                                            let curr_indexed_sym_range = locations[index].1;
+                                            if curr_indexed_sym_range.end_byte
+                                                < symbol.location.start_byte
                                             {
-                                                let curr_indexed_sym_range = locations[index].1;
-                                                if curr_indexed_sym_range.end_byte
-                                                    < symbol.location.start_byte
-                                                {
-                                                    locations[index] =
-                                                        (symbol.url.clone(), symbol.location);
-                                                    oref_method_refs[index] =
-                                                        (*oref_method_ref, original_method_call);
-                                                }
+                                                locations[index] =
+                                                    (symbol.url.clone(), symbol.location);
+                                                oref_method_refs[index] =
+                                                    (*oref_method_ref, original_method_call);
                                             }
                                         }
                                     }
                                 }
                             }
                         }
+                        if !oref_method_refs.is_empty() {
+                            found_depth = Some(*depth);
+                        }
+                    }
+                    if !oref_method_refs.is_empty() {
+                        return (oref_method_refs, locations);
                     }
                 }
             }

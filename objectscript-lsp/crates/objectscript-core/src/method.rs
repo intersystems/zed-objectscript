@@ -5,7 +5,9 @@ use crate::common::{
 use crate::parse_structures::{CodeMode, Language, Method, MethodType, ReturnType, Variable};
 
 use std::collections::HashMap;
-use tree_sitter::{Node, Range};
+use tree_sitter::{Language as TsLanguage, Node, Query, QueryCursor, Range, StreamingIterator};
+use tree_sitter_objectscript::LANGUAGE_OBJECTSCRIPT_UDL;
+use tree_sitter_objectscript_routine::LANGUAGE_OBJECTSCRIPT_ROUTINE;
 
 /// Builds a `Method` from its header/definition node (first-pass parse).
 ///
@@ -186,83 +188,159 @@ impl Method {
         }
     }
 
-    /// Parses a method definition node to extract variables and their dependencies.
-    ///
-    /// Collects:
-    /// - argument variables from the `arguments` node
-    /// - variables assigned via `set` statements in the core body
-    ///
-    /// Returns a list of `(variable, definition_range, var_dependencies)`.
-    /// Visibility (public vs private) is inferred from ProcedureBlock and `public_variables_declared`.
-    pub fn build_method_variable_defs(
+    pub fn build_variables(
         &self,
         node: Node,
         content: &str,
+        is_rtn: bool,
     ) -> Vec<(Variable, Range, Vec<String>)> {
-        let mut variables: Vec<(Variable, Range, Vec<String>)> = Vec::new();
-        let children = get_node_children(node.clone());
-        for node in children.iter().skip(1) {
-            if node.kind() == "arguments" {
-                let children = get_node_children(node.clone());
-                for node in children {
-                    // each node is an argument
-                    let argument_children = get_node_children(node);
+        let mut variables = Vec::new();
+        let language: TsLanguage;
+        if is_rtn {
+            language = LANGUAGE_OBJECTSCRIPT_ROUTINE.into()
+        } else {
+            language = LANGUAGE_OBJECTSCRIPT_UDL.into();
+        }
+        let query_str = "(argument (method_arg) @arg (return_type (typename) @return)?)";
+        variables.extend(self.get_method_arguments(&language, query_str, node, content));
 
-                    let (variable_name, var_name_range, arg_type) = {
-                        let mut name = None;
-                        let mut var_range = None;
-                        let mut arg_type = None;
-                        for arg_child in argument_children {
-                            if arg_child.kind() == "method_arg" {
-                                if let Some(method_arg_type) = arg_child.named_child(0) {
-                                    let Some(variable_name_node) = method_arg_type.named_child(0)
-                                    else {
-                                        eprintln!(
-                                            "Error: Expression,byref_arg, and variadic_arg nodes all have a child at index 0, but this does not {:?}",
-                                            method_arg_type.kind()
-                                        );
-                                        break;
-                                    };
-                                    name = get_string_at_byte_range(
-                                        content,
-                                        variable_name_node.byte_range(),
-                                    );
-                                    var_range = Some(variable_name_node.range());
-                                } else {
-                                    eprintln!(
-                                        "Error: Method arg node should have named children. This node didn't {:?}",
-                                        arg_child.kind()
-                                    );
-                                    break;
-                                }
-                            } else if arg_child.kind() == "return_type" {
-                                let Some(typename) = arg_child.named_child(1) else {
-                                    eprintln!(
-                                        "Error: expected return_type node to have typename at index 1"
-                                    );
-                                    continue;
-                                };
-                                if let Some(return_type_str) =
-                                    get_string_at_byte_range(content, typename.byte_range())
-                                    && typename.kind() == "typename"
-                                {
-                                    arg_type = Some(find_return_type(return_type_str));
-                                } else {
-                                    eprintln!(
-                                        "Error: expected return_type node to have typename at index 1"
-                                    );
-                                    continue;
+        let query_str = "(command_set (set_argument [(set_target) (set_target_list)] @settarget (expression) @value ))";
+        variables.extend(self.get_set_command_variable_defs(&language, query_str, node, content));
+        variables
+    }
+
+    fn get_set_command_variable_defs(
+        &self,
+        language: &TsLanguage,
+        query_str: &str,
+        node: Node,
+        content: &str,
+    ) -> Vec<(Variable, Range, Vec<String>)> {
+        let mut variables = Vec::new();
+        if let Ok(query) = Query::new(language, query_str) {
+            let mut cursor = QueryCursor::new();
+            let mut iter = cursor.matches(&query, node, content.as_bytes());
+            while let Some(query_match) = iter.next() {
+                let mut var_defs = Vec::new();
+                let mut var_deps = Vec::new();
+                let set_target_node = query_match.captures[0].node;
+                let var_value = query_match.captures[1].node;
+                let children;
+                if set_target_node.kind() == "set_target_list" {
+                    children = get_node_children(set_target_node);
+                } else {
+                    children = vec![set_target_node];
+                }
+                for set_target in children {
+                    let Some(set_target_child) = set_target.named_child(0) else {
+                        eprintln!(
+                            "Error: Expected child at index 0 for set_target node {:?}",
+                            set_target.kind()
+                        );
+                        continue;
+                    };
+                    let var_range = set_target_child.range();
+                    match set_target_child.kind() {
+                        "gvn" => {
+                            let gvn_children = get_node_children(set_target_child);
+                            for gvn_child in gvn_children {
+                                if gvn_child.kind() == "identifier" {
+                                    if let Some(gvn_id) =
+                                        get_string_at_byte_range(content, gvn_child.byte_range())
+                                    {
+                                        var_defs.push((gvn_id, var_range));
+                                    }
                                 }
                             }
                         }
-                        (name, var_range, arg_type)
+                        "lvn" => {
+                            let Some(lvn_id_node) = set_target_child.named_child(0) else {
+                                eprintln!(
+                                    "Parsing Error: lvn must have a child at index 0, update parsing"
+                                );
+                                continue;
+                            };
+                            if let Some(lvn_id) =
+                                get_string_at_byte_range(content, lvn_id_node.byte_range())
+                            {
+                                var_defs.push((lvn_id, var_range));
+                            }
+                        }
+                        _ => {
+                            eprintln!(
+                                "Warning: set target case: {:?} not yet implemented, skipping.",
+                                set_target_child.kind()
+                            );
+                        }
+                    }
+                }
+                let (is_oref, curr_class) =
+                    find_var_dependencies(var_value, content, &mut var_deps);
+                for (var_name, v_range) in &var_defs {
+                    let is_public = self.is_procedure_block.unwrap_or(true) == false
+                        || self.public_variables_declared.contains(var_name);
+                    let variable = Variable::new(
+                        var_name.clone(),
+                        None,
+                        is_public,
+                        is_oref,
+                        curr_class.clone(),
+                    );
+                    variables.push((variable, *v_range, var_deps.clone()));
+                }
+            }
+        }
+        variables
+    }
+
+    fn get_method_arguments(
+        &self,
+        language: &TsLanguage,
+        query_str: &str,
+        node: Node,
+        content: &str,
+    ) -> Vec<(Variable, Range, Vec<String>)> {
+        let mut variables = Vec::new();
+        if let Ok(query) = Query::new(language, query_str) {
+            let mut cursor = QueryCursor::new();
+            let mut iter = cursor.matches(&query, node, content.as_bytes());
+            while let Some(query_match) = iter.next() {
+                let name;
+                let var_range;
+                let mut arg_type = None;
+                let method_arg;
+                let mut return_type = None;
+                method_arg = query_match.captures[0].node;
+                if query_match.captures.len() > 1 {
+                    return_type = Some(query_match.captures[1].node);
+                }
+                if let Some(method_arg_type) = method_arg.named_child(0) {
+                    let Some(variable_name_node) = method_arg_type.named_child(0) else {
+                        eprintln!(
+                            "Error: Expression,byref_arg, and variadic_arg nodes all have a child at index 0, but this does not {:?}",
+                            method_arg_type.kind()
+                        );
+                        break;
                     };
-                    let Some(var_name) = variable_name else {
-                        continue;
-                    };
-                    let Some(var_name_range) = var_name_range else {
-                        continue;
-                    };
+                    name = get_string_at_byte_range(content, variable_name_node.byte_range());
+                    var_range = Some(variable_name_node.range());
+                } else {
+                    eprintln!(
+                        "Error: Method arg node should have named children. This node didn't {:?}",
+                        method_arg.kind()
+                    );
+                    continue;
+                }
+                if let Some(return_type) = return_type
+                    && let Some(return_type_str) =
+                        get_string_at_byte_range(content, return_type.byte_range())
+                    && return_type.kind() == "typename"
+                {
+                    arg_type = Some(find_return_type(return_type_str));
+                }
+                if let Some(var_name) = name
+                    && let Some(var_name_range) = var_range
+                {
                     if self.is_procedure_block.unwrap_or(true) == false
                         || self.public_variables_declared.contains(&var_name)
                     {
@@ -271,99 +349,6 @@ impl Method {
                     } else {
                         let var = Variable::new(var_name, arg_type, false, false, None);
                         variables.push((var, var_name_range, Vec::new()));
-                    }
-                }
-            } else if node.kind() == "statement" {
-                let Some(command) = node.named_child(0) else {
-                    eprintln!("Error: failed to get child node (index 0) from statement node");
-                    continue;
-                };
-                match command.kind() {
-                    "command_set" => {
-                        let Some(set_argument) = command.named_child(1) else {
-                            eprintln!(
-                                "Error: failed to get child node (index 1) from command_set node"
-                            );
-                            continue;
-                        };
-                        let mut var_defs = Vec::new();
-                        let set_argument_children = get_node_children(set_argument);
-                        for set_arg_child in set_argument_children {
-                            match set_arg_child.kind() {
-                                "set_target" => {
-                                    let Some(set_target_child) = set_arg_child.named_child(0)
-                                    else {
-                                        eprintln!(
-                                            "Error: Expected child at index 0 for set_target node {:?}",
-                                            set_arg_child.kind()
-                                        );
-                                        continue;
-                                    };
-                                    let var_range = set_target_child.range();
-                                    match set_target_child.kind() {
-                                        "gvn" => {
-                                            let gvn_children = get_node_children(set_target_child);
-                                            for gvn_child in gvn_children {
-                                                if gvn_child.kind() == "identifier" {
-                                                    if let Some(gvn_id) = get_string_at_byte_range(
-                                                        content,
-                                                        gvn_child.byte_range(),
-                                                    ) {
-                                                        var_defs.push((gvn_id, var_range));
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        "lvn" => {
-                                            let Some(lvn_id_node) = set_target_child.named_child(0)
-                                            else {
-                                                eprintln!(
-                                                    "Parsing Error: lvn must have a child at index 0, update parsing"
-                                                );
-                                                continue;
-                                            };
-                                            if let Some(lvn_id) = get_string_at_byte_range(
-                                                content,
-                                                lvn_id_node.byte_range(),
-                                            ) {
-                                                var_defs.push((lvn_id, var_range));
-                                            }
-                                        }
-                                        _ => {
-                                            eprintln!(
-                                                "Warning: set target case: {:?} not yet implemented, skipping.",
-                                                set_target_child.kind()
-                                            );
-                                        }
-                                    }
-                                }
-                                "expression" => {
-                                    let mut var_deps = Vec::new();
-                                    let (is_oref, curr_class) = find_var_dependencies(
-                                        set_arg_child,
-                                        content,
-                                        &mut var_deps,
-                                    );
-                                    for (var_name, v_range) in &var_defs {
-                                        let is_public = self.is_procedure_block.unwrap_or(true)
-                                            == false
-                                            || self.public_variables_declared.contains(var_name);
-                                        let variable = Variable::new(
-                                            var_name.clone(),
-                                            None,
-                                            is_public,
-                                            is_oref,
-                                            curr_class.clone(),
-                                        );
-                                        variables.push((variable, *v_range, var_deps.clone()));
-                                    }
-                                }
-                                _ => continue,
-                            }
-                        }
-                    }
-                    _ => {
-                        continue;
                     }
                 }
             }

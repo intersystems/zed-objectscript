@@ -5,12 +5,12 @@ test
     q
 #; 
 
-testSubroutine1
+testSubroutine1 Private
     set x = "hi"
     if x = "bye" do testSubroutine2
     w "goodbye"
     quit
 
-testSubroutine2
+testSubroutine2 Private
     w "Bye"
     quit

@@ -3,7 +3,7 @@ use crate::parse_structures::MethodRef;
 use petgraph::Direction;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use tree_sitter::Range;
 
 /// Stores all subclasses that depend on a given class through inheritance.
@@ -53,19 +53,21 @@ impl DependencyGraph {
         idx
     }
 
-    /// Returns all transitive callers of a method via reverse DFS.
-    pub fn all_ancestors(&self, target: NodeIndex) -> HashMap<MethodRef, Range> {
-        let mut ancestors = HashMap::new();
+    /// Returns all transitive callers of a method via BFS (closest ancestors first).
+    /// Each entry includes the ancestor's MethodRef, the edge Range, and the BFS depth.
+    pub fn all_ancestors(&self, target: NodeIndex) -> Vec<(MethodRef, Range, usize)> {
+        let mut ancestors = Vec::new();
         let mut visited = HashSet::new();
-        let mut stack = vec![target];
+        let mut queue = VecDeque::new();
+        queue.push_back((target, 0usize));
         visited.insert(target);
 
-        while let Some(node) = stack.pop() {
+        while let Some((node, depth)) = queue.pop_front() {
             for edge in self.graph.edges_directed(node, Direction::Incoming) {
                 let parent = edge.source();
                 if visited.insert(parent) {
-                    ancestors.insert(self.graph[parent], *edge.weight());
-                    stack.push(parent);
+                    ancestors.push((self.graph[parent], *edge.weight(), depth + 1));
+                    queue.push_back((parent, depth + 1));
                 }
             }
         }

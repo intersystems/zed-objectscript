@@ -21,7 +21,7 @@ check2()
     set y = 5
     i x = 2 do check2Subroutine1
 
-check2Subroutine1
+check2Subroutine1 Private
     set x = 1.2
     set y = 1.2
     w !,"this code does execute"
@@ -36,14 +36,14 @@ check() private
     w !,"leaving"
     quit
 
-checkSubroutine1
+checkSubroutine1 Private
     set x = 1.2
     set y = 1.2
     w !,"goodbye"
     do checkSubroutine2
     quit
 
-checkSubroutine2
+checkSubroutine2 Private
     new x
     set x = 250
     w !, x

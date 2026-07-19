@@ -9,7 +9,7 @@ mod tests {
     use std::env;
     use std::path::PathBuf;
     use tower_lsp::lsp_types::Url;
-    use tree_sitter::{Parser, Point};
+    use tree_sitter::{Parser, Point, Range};
     use tree_sitter_objectscript_routine::LANGUAGE_OBJECTSCRIPT_ROUTINE;
 
     fn parse_routine(code: &str) -> tree_sitter::Tree {
@@ -58,6 +58,36 @@ mod tests {
 
     fn point_for_substring(content: &str, needle: &str) -> Point {
         point_for_substring_n(content, needle, 1)
+    }
+
+    fn range_for_substring(content: &str, needle: &str) -> Range {
+        range_for_substring_n(content, needle, 1)
+    }
+
+    fn range_for_substring_n(content: &str, needle: &str, occurrence: usize) -> Range {
+        assert!(occurrence > 0, "occurrence must be >= 1");
+        let mut start = 0usize;
+        let mut found_at = None;
+        for _ in 0..occurrence {
+            let Some(idx) = content[start..].find(needle) else {
+                panic!(
+                    "failed to find occurrence {} of substring {:?}",
+                    occurrence, needle
+                );
+            };
+            found_at = Some(start + idx);
+            start = start + idx + needle.len();
+        }
+        let start_byte = found_at.expect("occurrence lookup should set found_at");
+        let end_byte = start_byte + needle.len();
+        let start_point = point_from_byte_index(content, start_byte);
+        let end_point = point_from_byte_index(content, end_byte);
+        Range {
+            start_byte,
+            end_byte,
+            start_point,
+            end_point,
+        }
     }
 
     fn point_from_byte_index(content: &str, byte_index: usize) -> Point {
@@ -142,14 +172,16 @@ mod tests {
             )
         };
 
-        assert_eq!(before_classes.len(), 3);
+        assert_eq!(before_classes.len(), 4);
         assert!(before_classes.contains_key("SuperClass"));
         assert!(before_classes.contains_key("SubClassOne"));
         assert!(before_classes.contains_key("SubClassTwo"));
+        assert!(before_classes.contains_key("ScopeResolution"));
 
         let superclass_id = before_classes.get("SuperClass").unwrap();
         let subclassone_id = before_classes.get("SubClassOne").unwrap();
         let subclasstwo_id = before_classes.get("SubClassTwo").unwrap();
+
         let mut superclass_count = 0;
         let mut subclassone_count = 0;
         let mut subclasstwo_count = 0;
@@ -179,7 +211,7 @@ mod tests {
                 superclass_count += 1;
             }
         }
-        assert_eq!(before_y.len(), 2);
+        assert_eq!(before_y.len(), 3);
         assert_eq!(superclass_count, 2);
 
         project_state.update_document(document_url, tree, FileType::Cls, 1, content.as_str());
@@ -215,10 +247,11 @@ mod tests {
             )
         };
 
-        assert_eq!(after_classes.len(), 3);
+        assert_eq!(after_classes.len(), 4);
         assert!(after_classes.contains_key("SuperClass"));
         assert!(after_classes.contains_key("SubClassOne"));
         assert!(after_classes.contains_key("SubClassTwo"));
+        assert!(after_classes.contains_key("ScopeResolution"));
 
         let after_x = after_public_variables
             .get("x")
@@ -247,7 +280,7 @@ mod tests {
                 superclass_count += 1;
             }
         }
-        assert_eq!(after_y.len(), 2);
+        assert_eq!(after_y.len(), 3);
         assert_eq!(superclass_count, 2);
         let Some(sub_one_class_inherited) = gsm_classes.get(&sub_one_class_id) else {
             panic!("Error: subclass one DNE in classes");
@@ -293,17 +326,17 @@ mod tests {
                     assert_eq!(method.variables.len(), 1);
                     let variable_refs = method.variables.get("x").unwrap();
                     assert_eq!(variable_refs.len(), 1);
-                    for variable_ref in variable_refs {
+                    for (variable_ref, _scope_id) in variable_refs {
                         assert!(variable_ref.pub_id.is_none());
                         assert!(variable_ref.priv_id.is_some());
                     }
                     assert_eq!(method.is_procedure_block, Some(true));
                     assert_eq!(method.language, Some(Language::Objectscript));
                 } else {
-                    let all_var_refs: Vec<Vec<VariableRef>> =
-                        method.variables.values().cloned().collect();
+                    let all_var_refs: Vec<&Vec<(VariableRef, _)>> =
+                        method.variables.values().collect();
                     for variable_refs in all_var_refs {
-                        for variable_ref in variable_refs {
+                        for (variable_ref, _scope_id) in variable_refs {
                             assert!(variable_ref.pub_id.is_some());
                             assert!(variable_ref.priv_id.is_none());
                         }
@@ -553,14 +586,14 @@ check() private
     w !,"leaving"
     quit
 
-checkSubroutine1
+checkSubroutine1 Private
     set x = 1.2
     set y = 1.2
     w !,"goodbye"
     do checkSubroutine2
     quit
 
-checkSubroutine2
+checkSubroutine2 Private
     new x
     set x = 250
     quit
@@ -661,8 +694,6 @@ check()
             .get("Demo.NavSuper")
             .and_then(|m| m.get("Overridden"))
             .unwrap();
-        // eprintln!("METHOD: {:#?}", method);
-        // eprintln!("OVERRIDE INDEX: {:#?}", project_data.override_index);
         let locations = project_data.get_method_overrides(method_ref);
 
         assert_eq!(locations.len(), 2);
@@ -785,7 +816,7 @@ check()
         let project_data = project_state.data.read();
 
         let routine_url = Url::from_file_path(project_root.join("test-routine-goto.mac")).unwrap();
-        let document = project_data
+        let _document = project_data
             .documents
             .get(&routine_url)
             .expect("routine doc exists");
@@ -875,19 +906,18 @@ check()
         let project_state = backend.get_project(&uri).expect("missing project state");
         let project_data = project_state.data.read();
 
-        let document_url =
-            Url::from_file_path(project_root.join("oref-do-parameter.cls")).unwrap();
+        let document_url = Url::from_file_path(project_root.join("oref-do-parameter.cls")).unwrap();
         let document = project_data
             .documents
             .get(&document_url)
             .expect("oref-do-parameter.cls should exist");
         let content = document.content.as_str();
 
-        let point = point_for_substring(content, "do obj.Run()");
+        let oref_range = range_for_substring(content, "do obj.Run()");
         let class_name = document.class_name.as_deref().unwrap();
 
         let locations =
-            project_data.get_oref_method_definition("obj", "Run", class_name, point);
+            project_data.get_oref_definitions("obj", "Run", class_name, oref_range, true);
         assert!(
             !locations.is_empty(),
             "oref method call in do_parameter should resolve to Demo.Target.Run"
@@ -906,19 +936,18 @@ check()
         let project_state = backend.get_project(&uri).expect("missing project state");
         let project_data = project_state.data.read();
 
-        let document_url =
-            Url::from_file_path(project_root.join("oref-job-argument.cls")).unwrap();
+        let document_url = Url::from_file_path(project_root.join("oref-job-argument.cls")).unwrap();
         let document = project_data
             .documents
             .get(&document_url)
             .expect("oref-job-argument.cls should exist");
         let content = document.content.as_str();
 
-        let point = point_for_substring(content, "job worker.Execute()");
+        let oref_range = range_for_substring(content, "job worker.Execute()");
         let class_name = document.class_name.as_deref().unwrap();
 
         let locations =
-            project_data.get_oref_method_definition("worker", "Execute", class_name, point);
+            project_data.get_oref_definitions("worker", "Execute", class_name, oref_range, true);
         assert!(
             !locations.is_empty(),
             "oref method call in job_argument should resolve to Demo.Target.Execute"
@@ -946,8 +975,7 @@ check()
             .get("Demo.ChildDefault")
             .expect("Demo.ChildDefault should exist");
 
-        let locations =
-            project_data.get_method_superclass("UseParent".to_string(), child_class_id);
+        let locations = project_data.get_method_superclass("UseParent".to_string(), child_class_id);
         // UseParent is not in any parent, so no superclass resolution
         assert!(
             locations.is_empty(),
@@ -1196,10 +1224,7 @@ check()
 
         let tree = parse_routine(&content);
         let errors = objectscript_core::common::collect_error_nodes(tree.root_node());
-        assert!(
-            errors.is_empty(),
-            "clean .mac should have no parse errors"
-        );
+        assert!(errors.is_empty(), "clean .mac should have no parse errors");
     }
 
     #[test]
@@ -1327,10 +1352,7 @@ check()
             .join("ordering");
 
         let state = ProjectState::new();
-        state
-            .project_root_path
-            .set(Some(project_root.clone()))
-            .ok();
+        state.project_root_path.set(Some(project_root.clone())).ok();
         let backend = BackendTester::new();
         let uri = Url::from_file_path(project_root.clone()).unwrap();
         backend.add_project(uri.clone(), state);
@@ -1341,21 +1363,11 @@ check()
 
         // Open child FIRST (before parent is known)
         let child_content = std::fs::read_to_string(project_root.join("child.cls")).unwrap();
-        project_state.handle_document_opened(
-            child_url.clone(),
-            child_content,
-            FileType::Cls,
-            1,
-        );
+        project_state.handle_document_opened(child_url.clone(), child_content, FileType::Cls, 1);
 
         // Now open parent
         let parent_content = std::fs::read_to_string(project_root.join("parent.cls")).unwrap();
-        project_state.handle_document_opened(
-            parent_url.clone(),
-            parent_content,
-            FileType::Cls,
-            1,
-        );
+        project_state.handle_document_opened(parent_url.clone(), parent_content, FileType::Cls, 1);
 
         let project_data = project_state.data.read();
 
@@ -1365,8 +1377,7 @@ check()
             .expect("Demo.OrderChild should be indexed");
 
         // goto def on Greet in child should resolve to parent's Greet
-        let locations =
-            project_data.get_method_superclass("Greet".to_string(), child_class_id);
+        let locations = project_data.get_method_superclass("Greet".to_string(), child_class_id);
         assert!(
             !locations.is_empty(),
             "child opened before parent: goto def should still resolve after parent loads"
@@ -1382,10 +1393,7 @@ check()
             .join("ordering");
 
         let state = ProjectState::new();
-        state
-            .project_root_path
-            .set(Some(project_root.clone()))
-            .ok();
+        state.project_root_path.set(Some(project_root.clone())).ok();
         let backend = BackendTester::new();
         let uri = Url::from_file_path(project_root.clone()).unwrap();
         backend.add_project(uri.clone(), state);
@@ -1396,21 +1404,11 @@ check()
 
         // Open parent FIRST
         let parent_content = std::fs::read_to_string(project_root.join("parent.cls")).unwrap();
-        project_state.handle_document_opened(
-            parent_url.clone(),
-            parent_content,
-            FileType::Cls,
-            1,
-        );
+        project_state.handle_document_opened(parent_url.clone(), parent_content, FileType::Cls, 1);
 
         // Then child
         let child_content = std::fs::read_to_string(project_root.join("child.cls")).unwrap();
-        project_state.handle_document_opened(
-            child_url.clone(),
-            child_content,
-            FileType::Cls,
-            1,
-        );
+        project_state.handle_document_opened(child_url.clone(), child_content, FileType::Cls, 1);
 
         let project_data = project_state.data.read();
 
@@ -1419,8 +1417,7 @@ check()
             .get("Demo.OrderChild")
             .expect("Demo.OrderChild should be indexed");
 
-        let locations =
-            project_data.get_method_superclass("Greet".to_string(), child_class_id);
+        let locations = project_data.get_method_superclass("Greet".to_string(), child_class_id);
         assert!(
             !locations.is_empty(),
             "parent opened before child: goto def should resolve"
@@ -1454,10 +1451,7 @@ check()
             .join("ordering");
 
         let state = ProjectState::new();
-        state
-            .project_root_path
-            .set(Some(project_root.clone()))
-            .ok();
+        state.project_root_path.set(Some(project_root.clone())).ok();
         let backend = BackendTester::new();
         let uri = Url::from_file_path(project_root.clone()).unwrap();
         backend.add_project(uri.clone(), state);
@@ -1473,12 +1467,7 @@ check()
             FileType::Cls,
             1,
         );
-        project_state.handle_document_opened(
-            parent_url.clone(),
-            parent_content,
-            FileType::Cls,
-            2,
-        );
+        project_state.handle_document_opened(parent_url.clone(), parent_content, FileType::Cls, 2);
 
         let project_data = project_state.data.read();
         // Should still have exactly 1 class (not duplicated)
@@ -1553,7 +1542,10 @@ check()
         state.handle_document_opened(uri.clone(), content.to_string(), FileType::Cls, 1);
 
         let data = state.data.read();
-        let doc = data.documents.get(&uri).expect("document should be tracked");
+        let doc = data
+            .documents
+            .get(&uri)
+            .expect("document should be tracked");
         assert_eq!(doc.file_type, FileType::Cls);
         assert!(doc.class_id.is_some(), "class_id should be set for .cls");
         assert_eq!(doc.class_name.as_deref(), Some("Demo.Hello"));
@@ -1567,9 +1559,15 @@ check()
         state.handle_document_opened(uri.clone(), content.to_string(), FileType::Routine, 1);
 
         let data = state.data.read();
-        let doc = data.documents.get(&uri).expect("document should be tracked");
+        let doc = data
+            .documents
+            .get(&uri)
+            .expect("document should be tracked");
         assert_eq!(doc.file_type, FileType::Routine);
-        assert!(doc.class_id.is_some(), "class_id should be set for routines");
+        assert!(
+            doc.class_id.is_some(),
+            "class_id should be set for routines"
+        );
         assert_eq!(doc.class_name.as_deref(), Some("mytest"));
     }
 
@@ -1590,7 +1588,10 @@ check()
         state.handle_document_opened(uri.clone(), content.to_string(), FileType::Xml, 1);
 
         let data = state.data.read();
-        let doc = data.documents.get(&uri).expect("document should be tracked");
+        let doc = data
+            .documents
+            .get(&uri)
+            .expect("document should be tracked");
         assert_eq!(doc.file_type, FileType::Xml);
         assert!(doc.class_id.is_none(), "XML docs should not have class_id");
         assert!(
@@ -1672,5 +1673,173 @@ check()
                 "XML files should not be included in workspace refactor results"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_same_scope_last_definition_wins() {
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("variables");
+        let document_url = Url::from_file_path(
+            env::current_dir()
+                .unwrap()
+                .join("objectscript-tests")
+                .join("variables")
+                .join("scope-resolution.cls"),
+        )
+        .unwrap();
+        let (backend, uri) = setup_backend_and_workspace(project_root).await;
+        let project_state = backend.get_project(&uri).unwrap();
+        let project_data = project_state.data.read();
+
+        let document = project_data
+            .documents
+            .get(&document_url)
+            .expect("missing scope-resolution document");
+        let content = document.content.as_str();
+
+        // In sameScope: two `set z` in the same scope, reference `w z` after both.
+        // The last definition before the reference should win.
+        let z_use_point = point_for_substring(content, "w z");
+        let z_def_point = point_for_substring(content, "set z = 20");
+        let z_locations =
+            project_data.get_variable_definition(&document_url, z_use_point, "z".to_string());
+        assert_eq!(z_locations.len(), 1);
+        assert_eq!(z_locations[0].0, document_url);
+        assert_eq!(z_locations[0].1.start_point.row, z_def_point.row);
+    }
+
+    #[tokio::test]
+    async fn test_conditional_creates_new_scope() {
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("variables");
+        let document_url = Url::from_file_path(
+            env::current_dir()
+                .unwrap()
+                .join("objectscript-tests")
+                .join("variables")
+                .join("scope-resolution.cls"),
+        )
+        .unwrap();
+        let (backend, uri) = setup_backend_and_workspace(project_root).await;
+        let project_state = backend.get_project(&uri).unwrap();
+        let project_data = project_state.data.read();
+
+        let document = project_data
+            .documents
+            .get(&document_url)
+            .expect("missing scope-resolution document");
+        let content = document.content.as_str();
+
+        // In conditionalScope: set y=1, then set y=2 inside if block (child scope),
+        // then set y=3 after if block (same scope as y=1), then w y.
+        // Two results: one per scope (method scope picks last def = "set y = 3",
+        // if scope picks "set y = 2"). Both are before the reference.
+        let y_use_point = point_for_substring(content, "w y");
+        let y_def_method_scope = point_for_substring(content, "set y = 3");
+        let y_def_if_scope = point_for_substring(content, "set y = 2");
+        let y_locations =
+            project_data.get_variable_definition(&document_url, y_use_point, "y".to_string());
+        assert_eq!(y_locations.len(), 2);
+        let y_rows: Vec<usize> = y_locations.iter().map(|(_, r)| r.start_point.row).collect();
+        assert!(y_rows.contains(&y_def_method_scope.row));
+        assert!(y_rows.contains(&y_def_if_scope.row));
+    }
+
+    #[tokio::test]
+    async fn test_public_variable_resolution_via_call_path() {
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("variables");
+        let document_url = Url::from_file_path(
+            env::current_dir()
+                .unwrap()
+                .join("objectscript-tests")
+                .join("variables")
+                .join("scope-resolution.cls"),
+        )
+        .unwrap();
+        let (backend, uri) = setup_backend_and_workspace(project_root).await;
+        let project_state = backend.get_project(&uri).unwrap();
+        let project_data = project_state.data.read();
+
+        let document = project_data
+            .documents
+            .get(&document_url)
+            .expect("missing scope-resolution document");
+        let content = document.content.as_str();
+
+        // m1 uses x but doesn't define it. m2 calls m1 and defines x. m3 calls m2 and defines x.
+        // Resolving x in m1 should find the definition in m2 (closest ancestor in call path).
+        let x_use_point = point_for_substring(content, "w x");
+        let x_def_point = point_for_substring(content, "set x = 200");
+
+        let m1_ref = *project_data
+            .method_defs
+            .get("ScopeResolution")
+            .unwrap()
+            .get("m1")
+            .unwrap();
+        let m2_ref = *project_data
+            .method_defs
+            .get("ScopeResolution")
+            .unwrap()
+            .get("m2")
+            .unwrap();
+        let m3_ref = *project_data
+            .method_defs
+            .get("ScopeResolution")
+            .unwrap()
+            .get("m3")
+            .unwrap();
+        eprintln!("m1_ref: {:?}", m1_ref);
+        eprintln!("m2_ref: {:?}", m2_ref);
+        eprintln!("m3_ref: {:?}", m3_ref);
+
+        if let Some(&m1_node) = project_data.dependency_graph.get_node(m1_ref) {
+            eprintln!("m1 node index: {:?}", m1_node);
+            let ancestors = project_data.dependency_graph.all_ancestors(m1_node);
+            eprintln!("all_ancestors of m1 count: {:?}", ancestors.len());
+            for (mref, range, depth) in &ancestors {
+                eprintln!(
+                    "  ancestor: {:?}, range: {:?}, depth: {:?}",
+                    mref, range, depth
+                );
+            }
+        } else {
+            eprintln!("m1 NOT in dependency graph!");
+        }
+
+        eprintln!(
+            "graph edge count: {:?}",
+            project_data.dependency_graph.graph.edge_count()
+        );
+        eprintln!(
+            "graph node count: {:?}",
+            project_data.dependency_graph.graph.node_count()
+        );
+        for edge in project_data.dependency_graph.graph.raw_edges() {
+            eprintln!(
+                "edge: {:?} -> {:?} (weight: {:?})",
+                edge.source(),
+                edge.target(),
+                edge.weight
+            );
+        }
+
+        eprintln!(
+            "is_variable_public for m1/x: {:?}",
+            project_data.is_variable_public(m1_ref, "x".to_string())
+        );
+
+        let x_locations =
+            project_data.get_variable_definition(&document_url, x_use_point, "x".to_string());
+        assert_eq!(x_locations.len(), 1);
+        assert_eq!(x_locations[0].0, document_url);
+        assert_eq!(x_locations[0].1.start_point.row, x_def_point.row);
     }
 }

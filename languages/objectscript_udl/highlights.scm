@@ -60,7 +60,17 @@
   (macro_constant)
 ] @constant
 
-(objectscript_identifier) @variable
+(lvn
+  (objectscript_identifier) @variable)
+
+(lvn
+  (objectscript_identifier_special) @variant)
+
+(ole_object_reference
+  (objectscript_identifier) @variable)
+
+(ole_object_reference
+  (objectscript_identifier_special) @variant)
 
 [
   (ssvn)
@@ -70,7 +80,6 @@
 
 [
   (gvn)
-  (objectscript_identifier_special)
   (instance_variable)
 ] @variant
 
@@ -294,7 +303,6 @@
   (keyword_includegenerator)
   (keyword_method)
   (keyword_classmethod)
-  (keyword_class)
   (keyword_extends)
   (keyword_property)
   (keyword_relationship)

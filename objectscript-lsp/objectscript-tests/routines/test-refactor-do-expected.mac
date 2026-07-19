@@ -1,15 +1,15 @@
 ROUTINE test
 
 subroutine
-    new x 
+    new x
     set x = 1.2
     set y = 1.2
     w !,"goodbye"
     quit
 
-subroutine2 
+subroutine2
     set x = 250
-    w !, x 
+    w !, x
     do check
 
 proc() [z] public  {
@@ -19,31 +19,31 @@ proc() [z] public  {
 check2()
     set x = 2
     set y = 5
-    i x = 2 d check2Subroutine
+    i x = 2 do check2Subroutine1
 
-check2Subroutine1
+check2Subroutine1 Private
     set x = 1.2
     set y = 1.2
-    w !,"this code does execute" 
+    w !,"this code does execute"
     quit
 
 check() private
     set x = 2
     set y = 5
-    i x = 2 d checkSubroutine1 d okay set x = 2
+    i x = 2 do checkSubroutine1 d okay set x = 2
     w !,"again x=",x
     w !,"y=",y
     w !,"leaving"
     quit
 
-checkSubroutine1
+checkSubroutine1 Private
     set x = 1.2
     set y = 1.2
     w !,"goodbye"
     do checkSubroutine2
     quit
 
-checkSubroutine2
+checkSubroutine2 Private
     new x
     set x = 250
     w !, x
@@ -73,6 +73,6 @@ okay
     set y = -9
     if
     w !,"here"
-    if  w !,"okay" 
+    if  w !,"okay"
     set x = 1.1
     w !,1
