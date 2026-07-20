@@ -1,0 +1,6 @@
+ROUTINE errors
+
+broken
+ set =
+ w !, "hello
+ quit

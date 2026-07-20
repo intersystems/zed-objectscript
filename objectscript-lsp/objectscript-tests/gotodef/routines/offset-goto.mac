@@ -1,0 +1,8 @@
+ROUTINE offsetgoto
+
+main
+ set x = 1
+ do main+2
+ w !, "line after main"
+ w !, "target of main+2"
+ quit

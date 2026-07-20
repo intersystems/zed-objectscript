@@ -1,4 +1,4 @@
-name = "ObjectScript XML"
+name = "xml"
 grammar = "xml"
 path_suffixes = ["xml"]
 first_line_pattern = '^<.*xml'

@@ -1,0 +1,12 @@
+[package]
+name = "zed-objectscript"
+version = "1.5.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+path = "src/objectscript.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.7.0"

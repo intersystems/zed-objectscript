@@ -1,4 +1,13 @@
 /*.wasm
-/target
+target/
 grammars/
-
+**/*.rs.bk
+Cargo.lock
+# Optional: common local/IDE files
+.DS_Store
+.vscode/
+.idea/
+.tabnine/
+vscode/
+objectscript-lsp/objectscript-tests/local/
+objectscript-lsp/documentation/

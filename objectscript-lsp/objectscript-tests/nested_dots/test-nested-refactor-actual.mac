@@ -1,0 +1,16 @@
+ROUTINE x
+
+test
+    do testSubroutine1
+    q
+#; 
+
+testSubroutine1 Private
+    set x = "hi"
+    if x = "bye" do testSubroutine2
+    w "goodbye"
+    quit
+
+testSubroutine2 Private
+    w "Bye"
+    quit

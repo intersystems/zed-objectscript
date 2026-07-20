@@ -1,0 +1,22 @@
+ROUTINE test
+
+dotted
+    if 1 do dottedSubroutine1
+#; comment
+
+dottedSubroutine1 Private
+    if 1 {
+       w "hi"
+    }
+    quit
+
+dottedComment
+    do dottedCommentSubroutine1
+
+dottedCommentSubroutine1 Private
+    /*w hi*/
+    set x = 1
+    if x {
+       w "bye"
+    }
+    quit

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Export generator="IRIS" version="26">
+<Class name="Demo.XmlError">
+<Method name="Broken">
+<Implementation><![CDATA[
+ set =
+ w !, "hello
+]]></Implementation>
+</Method>
+</Class>
+</Export>

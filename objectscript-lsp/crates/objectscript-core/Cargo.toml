@@ -1,0 +1,22 @@
+[package]
+name = "objectscript-core"
+version = "0.1.1"
+edition = "2024"
+authors = ["Hannah Kimura <hannah.kimura@intersystems.com>"]
+license = "MIT"
+description = "Language Server for ObjectScript"
+
+[dependencies]
+tower-lsp = "0.20.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "fs"] }
+tree-sitter = "0.26.6"
+tree-sitter-objectscript = "1.9.13"
+tree-sitter-objectscript-routine = "1.9.13"
+tree-sitter-xml = "0.7.0"
+serde = "1.0.228"
+serde_json = "1.0.145"
+parking_lot = "0.12.5"
+walkdir = "2.5.0"
+regex = "1.12.3"
+petgraph = "0.8.3"
+evalexpr = "13.1.0"

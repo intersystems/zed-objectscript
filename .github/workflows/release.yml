@@ -1,0 +1,128 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  BIN_NAME: objectscript-lsp
+
+jobs:
+  build-and-upload:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux (glibc)
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x64
+            build: cargo
+
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            platform: linux-arm64
+            build: cross
+
+          # Linux (musl / Alpine)
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            platform: alpine-x64
+            build: cross
+
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            platform: alpine-arm64
+            build: cross
+
+          # macOS
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            platform: darwin-x64
+            build: cargo
+
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            platform: darwin-arm64
+            build: cargo
+
+          # Windows
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: win32-x64
+            build: cargo
+
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            platform: win32-arm64
+            build: cargo
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+          workspaces: objectscript-lsp -> target
+
+      - name: Build (native)
+        if: matrix.build == 'cargo'
+        working-directory: objectscript-lsp
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.build == 'cross'
+        run: cargo install cross
+
+      - name: Build (cross)
+        if: matrix.build == 'cross'
+        working-directory: objectscript-lsp
+        run: cross build --release --target ${{ matrix.target }}
+
+      # Package for macOS/Linux
+      - name: Package (tar.gz)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          OUT="${{ env.BIN_NAME }}-${TAG}-${{ matrix.platform }}"
+          BIN="${{ env.BIN_NAME }}"
+
+          mkdir -p "${OUT}/bin"
+          cp "objectscript-lsp/target/${{ matrix.target }}/release/${BIN}" "${OUT}/bin/"
+          chmod +x "${OUT}/bin/${BIN}"
+
+          tar -czf "${OUT}.tar.gz" -C "${OUT}" .
+          echo "ASSET=${OUT}.tar.gz" >> "$GITHUB_ENV"
+
+      # Package for Windows
+      - name: Package (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $out = "${{ env.BIN_NAME }}-$tag-${{ matrix.platform }}"
+          $bin = "${{ env.BIN_NAME }}.exe"
+
+          New-Item -ItemType Directory -Force "$out/bin" | Out-Null
+          Copy-Item "objectscript-lsp\target\${{ matrix.target }}\release\$bin" "$out\bin\"
+          Compress-Archive -Path "$out\*" -DestinationPath "$out.zip"
+          "ASSET=$out.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload asset to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET }}

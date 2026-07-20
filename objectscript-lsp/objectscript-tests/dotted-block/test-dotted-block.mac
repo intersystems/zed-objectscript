@@ -1,0 +1,17 @@
+ROUTINE test
+
+dotted
+ if 1 d 
+ . if 1 { 
+ .   w "hi"
+ . }
+#; comment
+
+
+dottedComment
+ do 
+ . /*w hi*/ 
+ . set x = 1
+ . if x  {
+ .    w "bye"
+ . }

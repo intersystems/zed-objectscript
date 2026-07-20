@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Export generator="IRIS" version="26">
+<Class name="Demo.XmlClean">
+<Method name="Working">
+<Implementation><![CDATA[
+ set x = 1
+ w !, x
+ quit
+]]></Implementation>
+</Method>
+</Class>
+</Export>

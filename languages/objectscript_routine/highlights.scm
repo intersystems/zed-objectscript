@@ -4,10 +4,7 @@
 ; === BEGIN EXPR ===
 (pattern_expression) @string.regex
 
-[
-  (json_number_literal)
-  (numeric_literal)
-] @number
+(numeric_literal) @number
 
 [
   (json_boolean_literal)
@@ -23,11 +20,16 @@
 ] @string
 
 [
-  (keyword_pound_pound_super)
+  (keyword_super)
   (keyword_pound_pound_class)
 ] @keyword
 
 (system_defined_function) @constant.builtin
+
+[
+  "("
+  ")"
+] @constant.builtin
 
 ; this is because . is grouped into system_defined_function
 ; and I want the dots to be the same color
@@ -60,7 +62,17 @@
   (macro_constant)
 ] @constant
 
-(objectscript_identifier) @variable
+(lvn
+  (objectscript_identifier) @variable)
+
+(lvn
+  (objectscript_identifier_special) @variant)
+
+(ole_object_reference
+  (objectscript_identifier) @variable)
+
+(ole_object_reference
+  (objectscript_identifier_special) @variant)
 
 [
   (ssvn)
@@ -70,7 +82,6 @@
 
 [
   (gvn)
-  (objectscript_identifier_special)
   (instance_variable)
 ] @variant
 
@@ -89,7 +100,6 @@
   "']"
   "']]"
   "\""
-  "\"\""
   "["
   "]"
   "]]"
@@ -129,8 +139,6 @@
   "?"
 ] @operator
 
-(bracket) @punctuation.bracket
-
 ; === END EXPR ===
 ; === BEGIN CORE ===
 (macro_arg) @variant
@@ -138,11 +146,6 @@
 (macro_value) @constant.builtin
 
 (macro_def) @preproc
-
-[
-  "("
-  ")"
-] @punctuation.bracket
 
 [
   (keyword_pound_define)
@@ -289,13 +292,7 @@
 (elseif_block_dotted
   "." @string.special.symbol)
 
-(catch_block_dotted
-  "." @string.special.symbol)
-
 (variable_datatype
-  "." @constant.builtin)
-
-(instance_method_call
   "." @constant.builtin)
 
 (routine_type) @type.builtin
