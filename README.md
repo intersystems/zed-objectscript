@@ -11,7 +11,7 @@ This Zed extension uses the [tree-sitter-objectscript](https://github.com/inters
 - [SQL](https://zed.dev/extensions/sql)
 - [HTML](https://zed.dev/extensions/html)
 
-The current features supported in the `ObjectScript language server` are `goto_definition`, `goto_implementation` and `diagnostics`. These features are described in detail in the `objectscript-lsp/documentation/features` folder.
+The current features supported in the `ObjectScript language server` are `goto_definition`, `goto_implementation`, `refactor`, and `diagnostics`. These features are described in detail in the `objectscript-lsp/documentation/features` folder.
 
 ## Reporting Issues
 
