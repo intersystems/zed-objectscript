@@ -6,19 +6,12 @@ An [ObjectScript](https://docs.intersystems.com/latest/csp/docbook/DocBook.UI.Pa
 
 # Introduction
 
-This Zed extension uses the [tree-sitter-objectscript](https://github.com/intersystems/tree-sitter-objectscript) grammar to provide syntax highlighting and code injections for `.cls` files containing ObjectScript.  Since ObjectScripts supports a number of embedded languages, you should install grammars for the following languages otherwise you may see areas that appear to lack syntax coloring.
+This Zed extension uses the [tree-sitter-objectscript](https://github.com/intersystems/tree-sitter-objectscript) grammars and the `objectscript-lsp` crate (local to this repo) to provide syntax highlighting, code injections, and language support for `.cls`, `.mac`, `.rtn`, `.inc`, `.int` and `.xml` files containing ObjectScript.  Install the following extensions below to get syntax highlighting for any code injected into objectscript that is `sql` or `html`. 
 
-- SQL
-- HTML
-- Python
-- JavaScript
-- CSS
-- XML
-- Markdown
+- [SQL](https://zed.dev/extensions/sql)
+- [HTML](https://zed.dev/extensions/html)
 
-**NOTE**: The ObjectScript `.cls` syntax supports some sophisticated constructs and as such it can take 15-60 seconds for Zed's WASM machinery to build the parser before syntax coloring becomes available.
-
-Currently this extension only provides syntax coloring support.
+The current features supported in the `ObjectScript language server` are `goto_definition`, `goto_implementation`, `refactor`, and `diagnostics`. These features are described in detail in the `objectscript-lsp/documentation/features` folder.
 
 ## Reporting Issues
 
@@ -46,4 +39,3 @@ RUST_LOG = "language,extension=trace"
 
 Cloning and the building a debug Zed with these `RUST_LOG` settings gives fairly detailed log output including diagnosing
 bad `.scm` rules.
-

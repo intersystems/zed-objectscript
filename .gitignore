@@ -10,4 +10,4 @@ Cargo.lock
 .tabnine/
 vscode/
 objectscript-lsp/objectscript-tests/local/
-objectscript-lsp/documentation/
+objectscript-lsp/documentation/code-changes-AI

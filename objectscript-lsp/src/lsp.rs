@@ -1361,7 +1361,6 @@ impl LanguageServer for BackendWrapper {
     }
 
     async fn shutdown(&self) -> Result<()> {
-        // need to look more into if this is good for doing nothing
         Ok(())
     }
 
@@ -1577,8 +1576,6 @@ impl LanguageServer for BackendWrapper {
             project.update_document(uri, new_tree, file_type, new_version, old_text.as_str());
         }
     }
-
-    // async fn did_close(&self, params: DidCloseTextDocumentParams) {}
 }
 
 #[cfg(test)]
