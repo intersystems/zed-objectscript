@@ -745,7 +745,16 @@ impl LanguageServer for BackendWrapper {
                         {
                             m_ref
                         } else {
-                            return Ok(None);
+                            if let Some(m_ref) = data
+                                .override_index
+                                .effective_public_methods
+                                .get(&class_id)
+                                .and_then(|methods| methods.get(&name_string))
+                            {
+                                m_ref
+                            } else {
+                                return Ok(None);
+                            }
                         };
                         data.get_method_definition(method_ref, None)
                     }

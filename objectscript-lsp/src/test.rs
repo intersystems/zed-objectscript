@@ -145,6 +145,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_goto_def_inherited_method_relative() {
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("gotodef")
+            .join("relative-method-call");
+        let (backend, uri) = setup_backend_and_workspace(project_root).await;
+        let project_state = backend.get_project(&uri).unwrap();
+        let project_data = project_state.data.read();
+        let class_id = project_data.classes.get("hksubclass").unwrap();
+        let superclass_id = project_data.classes.get("hk").unwrap();
+        let superclass = project_data
+            .global_semantic_model
+            .get_class(superclass_id)
+            .unwrap();
+        let superclass_method_ref = superclass.get_method_ref("print2").unwrap();
+        let methods = project_data
+            .override_index
+            .effective_public_methods
+            .get(&class_id)
+            .unwrap();
+        let method_ref = methods.get("print2").unwrap();
+        assert_eq!(method_ref, superclass_method_ref);
+    }
+
+    #[tokio::test]
     async fn test_variables() {
         let project_root = env::current_dir()
             .unwrap()
