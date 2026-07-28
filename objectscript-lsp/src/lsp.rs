@@ -1321,6 +1321,12 @@ impl LanguageServer for BackendWrapper {
                         }
                     };
                 }
+                MemberType::ClassDef => {
+                    overrides = {
+                        let data = project.data.read();
+                        data.get_class_implementations(&class_id)
+                    }
+                }
                 _ => return Ok(None),
             }
         }
