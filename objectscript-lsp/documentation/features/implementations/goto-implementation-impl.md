@@ -109,7 +109,7 @@ Input: class_id
 ```
 Input: method_ref (the superclass method)
 
-1. Look up override_index.overridden_by[method_ref] → Vec<MethodRef>
+1. Look up override_index.method_overridden_by[method_ref] → Vec<MethodRef>
 2. For each overriding MethodRef:
    a. Try GlobalSemanticModel.get_method_symbol → (url, range) [public methods]
    b. Fallback: get document by class url → scope_tree.get_private_method_symbol → (url, range) [private methods]
@@ -130,10 +130,10 @@ Maps each class to all classes that directly inherit from it. Built during works
 
 ### OverrideIndex (`override_index.rs`)
 
-The `overridden_by` field is the key structure for this feature:
+The `method_overridden_by` field is the key structure for this feature:
 
 ```rust
-pub overridden_by: HashMap<MethodRef, Vec<MethodRef>>
+pub method_overridden_by: HashMap<MethodRef, Vec<MethodRef>>
 ```
 
 Maps a superclass method → all subclass methods that override it. This is the inverse of the `overrides` map used by goto-definition.

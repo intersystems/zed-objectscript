@@ -20,7 +20,7 @@ pub struct Document {
     /// An ID that maps the the corresponding class for this file, if this is a `.cls` file.
     pub class_id: Option<ClassId>,
     /// Name of class for `.cls` files.
-    pub class_name: Option<String>,
+    pub class_name: String,
 }
 
 impl Document {
@@ -33,7 +33,8 @@ impl Document {
         content: String,
         tree: Tree,
         file_type: FileType,
-        class_name: Option<String>,
+        class_name: String,
+        class_id: Option<ClassId>,
         scope_tree: ScopeTree,
         version: Option<i32>,
     ) -> Self {
@@ -43,7 +44,7 @@ impl Document {
             version,
             file_type,
             scope_tree,
-            class_id: None,
+            class_id: class_id,
             class_name,
         }
     }

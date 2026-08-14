@@ -1,42 +1,54 @@
-use crate::parse_structures::{ClassId, MethodRef};
+use crate::parse_structures::{MethodRef, ParameterRef, PropertyRef};
 use std::collections::HashMap;
 
 /// Stores information about what superclass methods get overwritten, and by which subclass.
-/// Stores the public methods available for each class.
+/// Stores the methods available for each class.
 /// For completion / resolution, this must be built after inheritance + overrides
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct OverrideIndex {
-    /// Stores the Method Id that a class sees for each public method name
-    pub effective_public_methods: HashMap<ClassId, HashMap<String, MethodRef>>,
+    /// Stores the MethodRef that a class sees for each method name (keyed by class name)
+    pub effective_methods: HashMap<String, HashMap<String, MethodRef>>,
+
+    /// Stores the PropertyRef that a class sees for each property name (keyed by class name)
+    pub effective_properties: HashMap<String, HashMap<String, PropertyRef>>,
+
+    /// Stores the ParameterRef that a class sees for each parameter name (keyed by class name)
+    pub effective_parameters: HashMap<String, HashMap<String, ParameterRef>>,
 
     /// subclass method ref (the method that overwites the superclass one) -> superclass method ref
-    pub overrides: HashMap<MethodRef, MethodRef>,
+    pub method_overrides: HashMap<MethodRef, MethodRef>,
 
     /// superclass method ref -> subclass method refs (subclass methods that overwrote the superclass)
-    pub overridden_by: HashMap<MethodRef, Vec<MethodRef>>,
+    pub method_overridden_by: HashMap<MethodRef, Vec<MethodRef>>,
+
+    /// subclass property ref (the property that overwites the superclass one) -> superclass property ref
+    pub property_overrides: HashMap<PropertyRef, PropertyRef>,
+
+    /// superclass property ref -> subclass property refs (subclass property that overwrote the superclass)
+    pub property_overridden_by: HashMap<PropertyRef, Vec<PropertyRef>>,
+
+    /// subclass parameter ref (the parameter that overwites the superclass one) -> superclass parameter ref
+    pub parameter_overrides: HashMap<ParameterRef, ParameterRef>,
+
+    /// superclass parameter ref -> subclass ParameterRef (subclass parameter that overwrote the superclass)
+    pub parameter_overridden_by: HashMap<ParameterRef, Vec<ParameterRef>>,
 }
 
 impl OverrideIndex {
     /// Creates an empty `OverrideIndex` with all maps initialized.
     ///
-    /// This index is typically populated after computing inheritance and resolving overrides.
+    /// This index is typically populated after computing inheritance and resolving class member overrides.
     pub fn new() -> Self {
         Self {
-            effective_public_methods: HashMap::new(),
-            overrides: HashMap::new(),
-            overridden_by: HashMap::new(),
-        }
-    }
-
-    /// Returns a deep clone of the override index.
-    ///
-    /// Clones all internal maps (`effective_public_methods`, `overrides`, `overridden_by`).
-    /// Note: this duplicates `Clone` behavior; consider deriving `Clone` on `OverrideIndex` instead.
-    pub fn clone(&self) -> OverrideIndex {
-        Self {
-            effective_public_methods: self.effective_public_methods.clone(),
-            overrides: self.overrides.clone(),
-            overridden_by: self.overridden_by.clone(),
+            effective_methods: HashMap::new(),
+            method_overrides: HashMap::new(),
+            method_overridden_by: HashMap::new(),
+            property_overrides: HashMap::new(),
+            property_overridden_by: HashMap::new(),
+            effective_properties: HashMap::new(),
+            parameter_overridden_by: HashMap::new(),
+            parameter_overrides: HashMap::new(),
+            effective_parameters: HashMap::new(),
         }
     }
 }

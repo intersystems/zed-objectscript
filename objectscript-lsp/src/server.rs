@@ -1,4 +1,4 @@
-use objectscript_core::common::get_member_name_from_root;
+use objectscript_core::common::get_member_name_and_range_from_root;
 use objectscript_core::parse_structures::FileType;
 use objectscript_core::workspace::ProjectState;
 use parking_lot::RwLock;
@@ -185,15 +185,21 @@ impl Backend {
                     }
                 };
 
-                let member_name = get_member_name_from_root(&content, tree.root_node(), is_rtn);
-
-                if member_name.is_none() {
-                    eprintln!(
-                        "Error: Failed to get name from root node for file url: {:?}",
-                        url.path()
-                    );
-                    continue;
-                }
+                let (class_range, class_name) = if filetype == FileType::Xml {
+                    (tree.root_node().range(), "XML".to_string())
+                } else {
+                    if let Some((class_range, class_name)) =
+                        get_member_name_and_range_from_root(&content, tree.root_node(), is_rtn)
+                    {
+                        (class_range, class_name)
+                    } else {
+                        eprintln!(
+                            "Error: Failed to get name from root node for file url: {:?}",
+                            url.path()
+                        );
+                        continue;
+                    }
+                };
 
                 // Commit inside the ProjectData lock
                 {
@@ -201,19 +207,16 @@ impl Backend {
                     let already_exists = data.add_document_if_absent(
                         url.clone(),
                         content,
-                        tree,
+                        &tree,
                         filetype,
-                        member_name,
+                        class_name,
+                        class_range,
                         None,
                     );
                     if already_exists {
                         documents_already_existing.push(url);
                     }
                 }
-            }
-            {
-                let mut data = project.data.write();
-                data.build_inheritance_and_variables(None, documents_already_existing);
             }
         });
         // Wait for completion (and handle join errors)

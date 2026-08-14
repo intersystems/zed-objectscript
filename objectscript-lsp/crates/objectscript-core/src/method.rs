@@ -1,165 +1,17 @@
 use crate::common::{
-    find_return_type, find_var_dependencies, generic_skipping_statements, get_keyword_and_value,
-    get_node_children, get_string_at_byte_range,
+    find_return_type, find_var_dependencies, get_keyword_and_value, get_node_children,
+    get_string_at_byte_range, parse_line_ref, range_within_range,
 };
-use crate::parse_structures::{CodeMode, Language, Method, MethodType, ReturnType, Variable};
+use crate::parse_structures::{
+    CodeMode, Language, Method, MethodType, TypeName, UnresolvedMethodRef, Variable,
+};
 
-use std::collections::HashMap;
+use crate::scope_structures::ScopeId;
+use crate::scope_tree::ScopeTree;
+use std::collections::{HashMap, HashSet};
 use tree_sitter::{Language as TsLanguage, Node, Query, QueryCursor, Range, StreamingIterator};
 use tree_sitter_objectscript::LANGUAGE_OBJECTSCRIPT_UDL;
 use tree_sitter_objectscript_routine::LANGUAGE_OBJECTSCRIPT_ROUTINE;
-
-/// Builds a `Method` from its header/definition node (first-pass parse).
-///
-/// Parses the method name, return type, and method keywords (ProcedureBlock/Language/CodeMode,
-/// visibility, and public variable list). Does **not** parse the method body statements; those
-/// are handled in a later pass.
-///
-/// Returns the constructed `Method` and the source `Range` for the definition node.
-pub fn initial_build_method(
-    node: Node,
-    method_type: MethodType,
-    content: &str,
-) -> Option<(Method, Range)> {
-    let Some(method_name_node) = node.named_child(0) else {
-        eprintln!(
-            "Error: Expected method definition node to have child at index 0, aborting initial_build_method"
-        );
-        return None;
-    };
-    let Some(method_name) = get_string_at_byte_range(content, method_name_node.byte_range()) else {
-        return None;
-    };
-    let method_range = node.range();
-    let mut method_return_type = None;
-    let mut is_procedure_block = None;
-    let mut language = None;
-    let mut codemode = None;
-    let mut is_public = true;
-    let mut public_variables = Vec::new();
-    let children = get_node_children(node.clone());
-    if children.len() <= 1 {
-        eprintln!(
-            "Error: Expected method definition node to have more than one child, aborting initial_build_method"
-        );
-        return None;
-    }
-    for node in children[1..].iter() {
-        match node.kind() {
-            "return_type" => {
-                let Some(type_name_node) = node.named_child(1) else {
-                    eprintln!(
-                        "Warning: Expected node of kind ({:?}) to have a child at index 1, but it doesn't",
-                        node.kind()
-                    );
-                    generic_skipping_statements("initial_build_method", node.kind(), "node");
-                    continue;
-                };
-                let Some(typename) = get_string_at_byte_range(content, type_name_node.byte_range())
-                else {
-                    continue;
-                };
-                method_return_type = Some(find_return_type(typename));
-            }
-            "method_keyword"
-            | "method_keyword_codemode_expression"
-            | "call_method_keyword"
-            | "method_keyword_external_language" => {
-                let Some(keyword_str) = get_string_at_byte_range(content, node.byte_range()) else {
-                    eprintln!("Error: Failed to get keyword string from byte range");
-                    continue;
-                };
-                let (not, keyword_name, values) = get_keyword_and_value(keyword_str.as_str());
-                if keyword_name == "procedureblock" {
-                    if values.get(0).copied().is_none() {
-                        is_procedure_block = Some(true);
-                        continue;
-                    }
-                    let Some(value) = values.get(0).copied() else {
-                        eprintln!("Error: Expected a value for procedureblock keyword, got: None");
-                        continue;
-                    };
-                    if value == "1" {
-                        is_procedure_block = Some(true);
-                    } else if value == "0" {
-                        is_procedure_block = Some(false);
-                    } else {
-                        eprintln!(
-                            "Error: Expected procedureblock value to be '1' or '0', got: {}",
-                            value
-                        );
-                        continue;
-                    }
-                } else if keyword_name == "language" {
-                    let Some(value) = values.get(0).copied() else {
-                        eprintln!("Error: Expected a value for language keyword, got: None");
-                        continue;
-                    };
-                    if value == "objectscript" {
-                        language = Some(Language::Objectscript);
-                    } else if value == "tsql" {
-                        language = Some(Language::TSql);
-                    } else if value == "ispl" {
-                        language = Some(Language::ISpl);
-                    } else if value == "python" {
-                        language = Some(Language::Python);
-                    } else {
-                        eprintln!(
-                            "Error: Expected class keyword language to be 'objectscript' or 'tsql', got: {}",
-                            value
-                        );
-                        continue;
-                    }
-                } else if keyword_name == "private" {
-                    if not {
-                        is_public = true;
-                    } else {
-                        is_public = false;
-                    }
-                } else if keyword_name == "codemode" {
-                    let Some(value) = values.get(0).copied() else {
-                        eprintln!("Expected a value for language keyword, got: None");
-                        continue;
-                    };
-                    if value == "call" {
-                        codemode = Some(CodeMode::Call);
-                    } else if value == "code" {
-                        codemode = Some(CodeMode::Code);
-                    } else if value == "expression" {
-                        codemode = Some(CodeMode::Expression);
-                    } else if value == "objectgenerator" {
-                        codemode = Some(CodeMode::ObjectGenerator);
-                    } else {
-                        eprintln!(
-                            "Expected class keyword codemode to be 'call', 'code', 'expression', or 'objectgenerator', got: {}",
-                            value
-                        );
-                        continue;
-                    }
-                } else if keyword_name == "publiclist" {
-                    for variable in values {
-                        public_variables.push(variable.to_string());
-                    }
-                }
-            }
-            _ => {
-                // only parse the header for initial build
-                continue;
-            }
-        }
-    }
-    let method = Method::new(
-        method_name.clone(),
-        is_procedure_block,
-        language,
-        codemode.unwrap_or(CodeMode::Code),
-        is_public,
-        method_return_type,
-        public_variables,
-        method_type,
-    );
-    Some((method, method_range))
-}
 
 impl Method {
     /// Creates a new `Method` from parsed header information.
@@ -167,60 +19,167 @@ impl Method {
     /// Initializes empty variable tables and stores declared keywords/visibility/type metadata.
     pub fn new(
         method_name: String,
-        is_procedure_block: Option<bool>,
-        language: Option<Language>,
-        code_mode: CodeMode,
-        is_public: bool,
-        return_type: Option<ReturnType>,
-        public_variables: Vec<String>,
+        public_variables: HashSet<String>,
         method_type: MethodType,
     ) -> Self {
-        Self {
-            method_type,
-            return_type,
-            name: method_name,
-            variables: HashMap::new(),
-            is_public,
-            is_procedure_block,
-            language,
-            code_mode,
-            public_variables_declared: public_variables,
-        }
+        return match method_type {
+            MethodType::Routine => Self {
+                method_type,
+                return_type: None,
+                name: method_name,
+                variables: HashMap::new(),
+                is_public: true,
+                is_procedure_block: Some(false),
+                language: None,
+                public_variables_declared: public_variables,
+                code_mode: CodeMode::Code,
+                is_final: Some(true),
+            },
+            MethodType::Subroutine(is_public) => Self {
+                method_type,
+                return_type: None,
+                name: method_name,
+                variables: HashMap::new(),
+                is_public: is_public,
+                is_procedure_block: Some(false),
+                language: None,
+                public_variables_declared: public_variables,
+                code_mode: CodeMode::Code,
+                is_final: Some(true),
+            },
+            MethodType::Procedure(is_public) => Self {
+                method_type,
+                return_type: None,
+                name: method_name,
+                variables: HashMap::new(),
+                is_public: is_public,
+                is_procedure_block: Some(true),
+                language: None,
+                public_variables_declared: public_variables,
+                code_mode: CodeMode::Code,
+                is_final: Some(true),
+            },
+            MethodType::ClassMethod | MethodType::InstanceMethod => Self {
+                method_type,
+                return_type: None,
+                name: method_name,
+                variables: HashMap::new(),
+                is_public: true,
+                is_procedure_block: None,
+                language: None,
+                public_variables_declared: public_variables,
+                code_mode: CodeMode::Code,
+                is_final: None,
+            },
+        };
     }
 
-    pub fn build_variables(
+    fn build_subroutine_set_variables(
         &self,
         node: Node,
         content: &str,
-        is_rtn: bool,
-    ) -> Vec<(Variable, Range, Vec<String>)> {
-        let mut variables = Vec::new();
-        let language: TsLanguage;
-        if is_rtn {
-            language = LANGUAGE_OBJECTSCRIPT_ROUTINE.into()
-        } else {
-            language = LANGUAGE_OBJECTSCRIPT_UDL.into();
-        }
-        let query_str = "(argument (method_arg) @arg (return_type (typename) @return)?)";
-        variables.extend(self.get_method_arguments(&language, query_str, node, content));
-
+        scope_tree: &ScopeTree,
+        variables_in_method: &mut Vec<(Variable, Range, Vec<String>, ScopeId)>,
+        method_range: Range,
+    ) {
+        let language = &LANGUAGE_OBJECTSCRIPT_ROUTINE.into();
         let query_str = "(command_set (set_argument [(set_target) (set_target_list)] @settarget (expression) @value ))";
-        variables.extend(self.get_set_command_variable_defs(&language, query_str, node, content));
-        variables
-    }
-
-    fn get_set_command_variable_defs(
-        &self,
-        language: &TsLanguage,
-        query_str: &str,
-        node: Node,
-        content: &str,
-    ) -> Vec<(Variable, Range, Vec<String>)> {
-        let mut variables = Vec::new();
         if let Ok(query) = Query::new(language, query_str) {
             let mut cursor = QueryCursor::new();
             let mut iter = cursor.matches(&query, node, content.as_bytes());
             while let Some(query_match) = iter.next() {
+                let set_target_node = query_match.captures[0].node;
+                if !range_within_range(&set_target_node.range(), &method_range) {
+                    continue;
+                }
+                let mut var_defs = Vec::new();
+                let mut var_deps = Vec::new();
+                let var_value = query_match.captures[1].node;
+                let children;
+                if set_target_node.kind() == "set_target_list" {
+                    children = get_node_children(set_target_node);
+                } else {
+                    children = vec![set_target_node];
+                }
+                for set_target in children {
+                    let Some(set_target_child) = set_target.named_child(0) else {
+                        eprintln!(
+                            "Error: Expected child at index 0 for set_target node {:?}",
+                            set_target.kind()
+                        );
+                        continue;
+                    };
+                    let var_range = set_target_child.range();
+                    match set_target_child.kind() {
+                        "gvn" => {
+                            let gvn_children = get_node_children(set_target_child);
+                            for gvn_child in gvn_children {
+                                if gvn_child.kind() == "identifier" {
+                                    if let Some(gvn_id) =
+                                        get_string_at_byte_range(content, gvn_child.byte_range())
+                                    {
+                                        var_defs.push((gvn_id, var_range));
+                                    }
+                                }
+                            }
+                        }
+                        "lvn" => {
+                            let Some(lvn_id_node) = set_target_child.named_child(0) else {
+                                eprintln!(
+                                    "Parsing Error: lvn must have a child at index 0, update parsing"
+                                );
+                                continue;
+                            };
+                            if let Some(lvn_id) =
+                                get_string_at_byte_range(content, lvn_id_node.byte_range())
+                            {
+                                var_defs.push((lvn_id, var_range));
+                            }
+                        }
+                        _ => {
+                            eprintln!(
+                                "Warning: set target case: {:?} not yet implemented, skipping.",
+                                set_target_child.kind()
+                            );
+                        }
+                    }
+                }
+                let (is_oref, curr_class) =
+                    find_var_dependencies(var_value, content, &mut var_deps);
+                for (variable_name, var_range) in &var_defs {
+                    let var = Variable::new(
+                        variable_name.clone(),
+                        None,
+                        true,
+                        is_oref,
+                        curr_class.clone(),
+                    );
+                    if let Some(scope_id) = scope_tree
+                        .find_current_scope_for_range(var_range.start_point, var_range.end_point)
+                    {
+                        variables_in_method.push((var, *var_range, var_deps.clone(), scope_id));
+                    }
+                }
+            }
+        }
+    }
+
+    fn build_procedure_set_variables(
+        &self,
+        node: Node,
+        content: &str,
+        scope_tree: &ScopeTree,
+        variables_in_method: &mut Vec<(Variable, Range, Vec<String>, ScopeId)>,
+        class_is_procedure_block: Option<bool>,
+        language: &TsLanguage,
+        is_class_method: bool,
+    ) {
+        let query_str = "(command_set (set_argument [(set_target) (set_target_list)] @settarget (expression) @value ))";
+        if let Ok(query) = Query::new(language, query_str) {
+            let mut cursor = QueryCursor::new();
+            let mut iter = cursor.matches(&query, node, content.as_bytes());
+            while let Some(query_match) = iter.next() {
+                eprintln!("CAPTURE {:?}", query_match.captures);
                 let mut var_defs = Vec::new();
                 let mut var_deps = Vec::new();
                 let set_target_node = query_match.captures[0].node;
@@ -276,100 +235,717 @@ impl Method {
                 }
                 let (is_oref, curr_class) =
                     find_var_dependencies(var_value, content, &mut var_deps);
-                for (var_name, v_range) in &var_defs {
-                    let is_public = self.is_procedure_block.unwrap_or(true) == false
-                        || self.public_variables_declared.contains(var_name);
-                    let variable = Variable::new(
-                        var_name.clone(),
+                for (variable_name, var_range) in &var_defs {
+                    let variable_is_public = if !is_class_method {
+                        if self.public_variables_declared.contains(variable_name) {
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        self.is_procedure_block
+                            .unwrap_or(class_is_procedure_block.unwrap_or(true))
+                            == false
+                            || self.public_variables_declared.contains(variable_name)
+                    };
+                    let var = Variable::new(
+                        variable_name.clone(),
                         None,
-                        is_public,
+                        variable_is_public,
                         is_oref,
                         curr_class.clone(),
                     );
-                    variables.push((variable, *v_range, var_deps.clone()));
+                    if let Some(scope_id) = scope_tree
+                        .find_current_scope_for_range(var_range.start_point, var_range.end_point)
+                    {
+                        variables_in_method.push((var, *var_range, var_deps.clone(), scope_id));
+                    }
                 }
             }
         }
-        variables
     }
 
-    fn get_method_arguments(
+    /// Given tag node, parse the arguments
+    fn build_routine_method_arguments(
         &self,
-        language: &TsLanguage,
-        query_str: &str,
-        node: Node,
+        tag_node: Node,
         content: &str,
-    ) -> Vec<(Variable, Range, Vec<String>)> {
-        let mut variables = Vec::new();
+        scope_tree: &ScopeTree,
+        variables_in_method: &mut Vec<(Variable, Range, Vec<String>, ScopeId)>,
+        is_procedure: bool, // false if subroutine
+    ) {
+        let query_str = "(tag_parameter (method_arg) @arg)";
+        let language: &TsLanguage = &LANGUAGE_OBJECTSCRIPT_ROUTINE.into();
         if let Ok(query) = Query::new(language, query_str) {
             let mut cursor = QueryCursor::new();
-            let mut iter = cursor.matches(&query, node, content.as_bytes());
+            let mut iter = cursor.matches(&query, tag_node, content.as_bytes());
             while let Some(query_match) = iter.next() {
-                let name;
-                let var_range;
-                let mut arg_type = None;
-                let method_arg;
-                let mut return_type = None;
-                method_arg = query_match.captures[0].node;
-                if query_match.captures.len() > 1 {
-                    return_type = Some(query_match.captures[1].node);
-                }
+                let method_arg = query_match.captures[0].node;
                 if let Some(method_arg_type) = method_arg.named_child(0) {
                     let Some(variable_name_node) = method_arg_type.named_child(0) else {
                         eprintln!(
-                            "Error: Expression,byref_arg, and variadic_arg nodes all have a child at index 0, but this does not {:?}",
+                            "Error: Expression, byref_arg, and variadic_arg nodes all have a child at index 0, but this does not {:?}",
                             method_arg_type.kind()
                         );
                         break;
                     };
-                    name = get_string_at_byte_range(content, variable_name_node.byte_range());
-                    var_range = Some(variable_name_node.range());
+                    if let Some(var_name) =
+                        get_string_at_byte_range(content, variable_name_node.byte_range())
+                    {
+                        let var_range = variable_name_node.range();
+                        let variable_is_public = if !is_procedure
+                            || self.public_variables_declared.contains(&var_name)
+                        {
+                            true
+                        } else {
+                            false
+                        };
+                        let var = Variable::new(var_name, None, variable_is_public, false, None);
+                        if let Some(scope_id) = scope_tree.find_current_scope_for_range(
+                            var_range.start_point,
+                            var_range.end_point,
+                        ) {
+                            variables_in_method.push((var, var_range, Vec::new(), scope_id));
+                        }
+                    }
                 } else {
                     eprintln!(
                         "Error: Method arg node should have named children. This node didn't {:?}",
                         method_arg.kind()
                     );
-                    continue;
                 }
-                if let Some(return_type) = return_type
-                    && let Some(return_type_str) =
-                        get_string_at_byte_range(content, return_type.byte_range())
-                    && return_type.kind() == "typename"
-                {
-                    arg_type = Some(find_return_type(return_type_str));
+                continue;
+            }
+        }
+    }
+
+    fn build_class_method_arguments(
+        &self,
+        node: Node,
+        content: &str,
+        scope_tree: &ScopeTree,
+        variables_in_method: &mut Vec<(Variable, Range, Vec<String>, ScopeId)>,
+        class_is_procedure_block: Option<bool>,
+    ) {
+        let language: &TsLanguage = &LANGUAGE_OBJECTSCRIPT_UDL.into();
+        let query_str = "(argument (method_arg) @arg (return_type (typename) @typename)?)";
+        if let Ok(query) = Query::new(language, query_str) {
+            let mut cursor = QueryCursor::new();
+            let mut iter = cursor.matches(&query, node, content.as_bytes());
+            let arg_idx = query.capture_index_for_name("arg");
+            let typename_idx = query.capture_index_for_name("typename");
+            let mut return_type_parameters = Vec::new();
+            let mut return_type_id = None;
+            let mut var_range = None;
+            let mut var_name = None;
+            while let Some(query_match) = iter.next() {
+                let mut i = 0;
+                let mut arg_type = None;
+                while i < query_match.captures.len() {
+                    let capture = &query_match.captures[i];
+                    if arg_idx == Some(capture.index) {
+                        let method_arg = capture.node;
+                        if let Some(method_arg_type) = method_arg.named_child(0) {
+                            let Some(variable_name_node) = method_arg_type.named_child(0) else {
+                                eprintln!(
+                                    "Error: Expression,byref_arg, and variadic_arg nodes all have a child at index 0, but this does not {:?}",
+                                    method_arg_type.kind()
+                                );
+                                break;
+                            };
+                            var_name =
+                                get_string_at_byte_range(content, variable_name_node.byte_range());
+                            var_range = Some(variable_name_node.range());
+                        } else {
+                            eprintln!(
+                                "Error: Method arg node should have named children. This node didn't {:?}",
+                                method_arg.kind()
+                            );
+                        }
+                        i += 1;
+                        continue;
+                    } else if typename_idx == Some(capture.index) {
+                        let typename = capture.node;
+                        let identifiers = get_node_children(typename);
+                        let mut j = 0;
+                        while j < identifiers.len() {
+                            let identifier_node = &identifiers[j];
+                            let Some(typename_identifier) =
+                                get_string_at_byte_range(content, identifier_node.byte_range())
+                            else {
+                                j += 1;
+                                continue;
+                            };
+                            if j == 0 {
+                                return_type_id = Some(find_return_type(typename_identifier));
+                            } else {
+                                return_type_parameters.push(typename_identifier);
+                            }
+                            j += 1;
+                            continue;
+                        }
+                        if let Some(typename_id) = &return_type_id {
+                            arg_type = Some(TypeName {
+                                ret_type: typename_id.clone(),
+                                parameters: return_type_parameters.clone(),
+                            })
+                        }
+
+                        i += 1;
+                        continue;
+                    }
+                    i += 1;
                 }
-                if let Some(var_name) = name
-                    && let Some(var_name_range) = var_range
+                if let Some(var_name) = &var_name
+                    && let Some(var_range) = var_range
                 {
-                    if self.is_procedure_block.unwrap_or(true) == false
-                        || self.public_variables_declared.contains(&var_name)
+                    let variable_is_public = self
+                        .is_procedure_block
+                        .unwrap_or(class_is_procedure_block.unwrap_or(true))
+                        == false
+                        || self.public_variables_declared.contains(var_name);
+                    let var =
+                        Variable::new(var_name.clone(), arg_type, variable_is_public, false, None);
+                    if let Some(scope_id) = scope_tree
+                        .find_current_scope_for_range(var_range.start_point, var_range.end_point)
                     {
-                        let var = Variable::new(var_name, arg_type, true, false, None);
-                        variables.push((var, var_name_range, Vec::new()));
-                    } else {
-                        let var = Variable::new(var_name, arg_type, false, false, None);
-                        variables.push((var, var_name_range, Vec::new()));
+                        variables_in_method.push((var, var_range, Vec::new(), scope_id));
                     }
                 }
             }
         }
-        variables
     }
 
-    /// Applies inherited class keywords to this method when not explicitly set.
-    ///
-    /// - Inherits `ProcedureBlock=false` only when the method has no explicit setting.
-    /// - Inherits the class `default_language` when the method language is unset.
-    pub fn update_keywords(&mut self, is_procedure_block: bool, default_language: Language) {
-        // inherit class keywords if not specified and class keyword isn't the default value
-        if self.is_procedure_block.is_none() && is_procedure_block == false {
-            // inherit the class keyword when it isn't the default
-            self.is_procedure_block = Some(is_procedure_block);
-        }
+    fn get_method_dependencies(
+        &mut self,
+        node: Node,
+        content: &str,
+        language: &TsLanguage,
+        class_name: &str,
+        method_range: Range,
+    ) -> (
+        HashSet<UnresolvedMethodRef>,
+        HashSet<(String, String, Range, String)>,
+    ) {
+        let mut unresolved_method_refs = HashSet::new();
+        let mut unresolved_oref_method_refs = HashSet::new();
+        let query_str = r#"[(class_method_call) @classmethodcall
+        (system_defined_function) @systemfunc
+        (relative_dot_method) @relativemethod
+        (routine_tag_call) @routine
+        (goto_argument) @routine
+        (print_argument) @routine
+        ]"#;
+        if let Ok(query) = Query::new(language, query_str) {
+            let mut cursor = QueryCursor::new();
+            let mut iter = cursor.matches(&query, node, content.as_bytes());
+            let classmethod_idx = query.capture_index_for_name("classmethodcall");
+            let systemfunc_idx = query.capture_index_for_name("systemfunc");
+            let relativemethod_idx = query.capture_index_for_name("relativemethod");
+            let routine_idx = query.capture_index_for_name("routine");
+            while let Some(query_match) = iter.next() {
+                let mut i = 0;
+                while i < query_match.captures.len() {
+                    let capture = &query_match.captures[i];
+                    let matched_node = capture.node;
+                    if !range_within_range(&matched_node.range(), &method_range) {
+                        i += 1;
+                        continue;
+                    }
+                    if classmethod_idx == Some(capture.index) {
+                        if let Some(class_ref) = matched_node.named_child(0)
+                            && let Some(method_name_outer) = matched_node.named_child(1)
+                            && let Some(class_name_outer) = class_ref.named_child(1)
+                            && let Some(method_name_node) = method_name_outer.named_child(0)
+                            && let Some(class_name_node) = class_name_outer.named_child(0)
+                            && let Some(method_name) =
+                                get_string_at_byte_range(content, method_name_node.byte_range())
+                            && let Some(class_name) =
+                                get_string_at_byte_range(content, class_name_node.byte_range())
+                        {
+                            unresolved_method_refs.insert(UnresolvedMethodRef {
+                                class: class_name,
+                                method: method_name,
+                                offset: None,
+                                method_call_range: matched_node.range(),
+                            });
+                        }
+                    } else if systemfunc_idx == Some(capture.index) {
+                        let Some(node_str) =
+                            get_string_at_byte_range(content, matched_node.byte_range())
+                        else {
+                            i += 1;
+                            continue;
+                        };
+                        let (before, method_args) = (
+                            node_str.split('(').nth(0),
+                            node_str.split('(').nth(1).unwrap_or(""),
+                        );
+                        if let Some(func_name) = before {
+                            if func_name.eq_ignore_ascii_case("$zobjmethod")
+                                || func_name.eq_ignore_ascii_case("$method")
+                            {
+                                if let Some(oref_method_arg) = matched_node.named_child(0)
+                                    && let Some(oref_method_arg_type) =
+                                        oref_method_arg.named_child(0)
+                                    && let Some(oref_name_node) =
+                                        oref_method_arg_type.named_child(0)
+                                    && let Some(oref_var_name) = get_string_at_byte_range(
+                                        content,
+                                        oref_name_node.byte_range(),
+                                    )
+                                    && let Some(method_name_method_arg) =
+                                        matched_node.named_child(1)
+                                    && let Some(method_name_arg_type) =
+                                        method_name_method_arg.named_child(0)
+                                    && let Some(method_name_node) =
+                                        method_name_arg_type.named_child(0)
+                                    && let Some(method_name) = get_string_at_byte_range(
+                                        content,
+                                        method_name_node.byte_range(),
+                                    )
+                                {
+                                    unresolved_oref_method_refs.insert((
+                                        oref_var_name,
+                                        method_name,
+                                        matched_node.range(),
+                                        self.name.clone(),
+                                    ));
+                                }
+                            } else if func_name.eq_ignore_ascii_case("$classmethod")
+                                || func_name.eq_ignore_ascii_case("$zobjclassmethod")
+                            {
+                                if method_args.trim_start().chars().next() == Some(',') {
+                                    // class is current one
+                                    if let Some(method_name_method_arg) =
+                                        matched_node.named_child(0)
+                                        && let Some(method_name_arg_type) =
+                                            method_name_method_arg.named_child(0)
+                                        && let Some(method_name_node) =
+                                            method_name_arg_type.named_child(0)
+                                        && let Some(method_name) = get_string_at_byte_range(
+                                            content,
+                                            method_name_node.byte_range(),
+                                        )
+                                    {
+                                        unresolved_method_refs.insert(UnresolvedMethodRef {
+                                            class: class_name.to_string(),
+                                            method: method_name,
+                                            offset: None,
+                                            method_call_range: matched_node.range(),
+                                        });
+                                    }
+                                } else {
+                                    if let Some(classname_method_arg) = matched_node.named_child(0)
+                                        && let Some(classname_method_arg_type) =
+                                            classname_method_arg.named_child(0)
+                                        && let Some(classname_node) =
+                                            classname_method_arg_type.named_child(0)
+                                        && let Some(classname_var) = get_string_at_byte_range(
+                                            content,
+                                            classname_node.byte_range(),
+                                        )
+                                        && let Some(method_name_method_arg) =
+                                            matched_node.named_child(1)
+                                        && let Some(method_name_arg_type) =
+                                            method_name_method_arg.named_child(0)
+                                        && let Some(method_name_node) =
+                                            method_name_arg_type.named_child(0)
+                                        && let Some(method_name) = get_string_at_byte_range(
+                                            content,
+                                            method_name_node.byte_range(),
+                                        )
+                                    {
+                                        unresolved_method_refs.insert(UnresolvedMethodRef {
+                                            class: classname_var,
+                                            method: method_name,
+                                            offset: None,
+                                            method_call_range: matched_node.range(),
+                                        });
+                                    }
+                                }
+                            } else if func_name.eq_ignore_ascii_case("$system") {
+                                if let Some(class_name_node) = matched_node.named_child(0)
+                                    && let Some(method_name_node) = matched_node.named_child(1)
+                                    && let Some(classname) = get_string_at_byte_range(
+                                        content,
+                                        class_name_node.byte_range(),
+                                    )
+                                    && let Some(method_name) = get_string_at_byte_range(
+                                        content,
+                                        method_name_node.byte_range(),
+                                    )
+                                {
+                                    unresolved_method_refs.insert(UnresolvedMethodRef {
+                                        class: classname,
+                                        method: method_name,
+                                        offset: None,
+                                        method_call_range: matched_node.range(),
+                                    });
+                                }
+                            }
+                        }
+                    } else if relativemethod_idx == Some(capture.index) {
+                        if let Some(oref_method) = matched_node.named_child(0)
+                            && let Some(method_name_node) = oref_method.named_child(0)
+                            && let Some(method_identifier) = method_name_node.named_child(0)
+                            && let Some(method_name) =
+                                get_string_at_byte_range(content, method_identifier.byte_range())
+                        {
+                            unresolved_method_refs.insert(UnresolvedMethodRef {
+                                class: class_name.to_string(),
+                                method: method_name,
+                                offset: None,
+                                method_call_range: matched_node.range(),
+                            });
+                        }
+                    } else if routine_idx == Some(capture.index) {
+                        if let Some(routine_tag_call_child) = matched_node.named_child(0) {
+                            match routine_tag_call_child.kind() {
+                                "method_name" => {
+                                    // this version doesn't have wrapped in quotes option
+                                    if let Some(method_name) =
+                                        get_string_at_byte_range(content, matched_node.byte_range())
+                                    {
+                                        unresolved_method_refs.insert(UnresolvedMethodRef {
+                                            class: class_name.to_string(),
+                                            method: method_name,
+                                            offset: None,
+                                            method_call_range: matched_node.range(),
+                                        });
+                                    }
+                                }
+                                "line_ref" => {
+                                    let (method_name, routine_name, _) = parse_line_ref(
+                                        routine_tag_call_child,
+                                        content,
+                                        class_name.to_string(),
+                                    );
 
-        if self.language.is_none() {
-            // inherit the class keyword when it isn't the default
-            self.language = Some(default_language.clone());
+                                    unresolved_method_refs.insert(UnresolvedMethodRef {
+                                        class: routine_name,
+                                        method: method_name,
+                                        offset: None,
+                                        method_call_range: matched_node.range(),
+                                    });
+                                }
+                                _ => {
+                                    i += 1;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    i += 1;
+                    continue;
+                }
+            }
         }
+        (unresolved_method_refs, unresolved_oref_method_refs)
+    }
+
+    /// Build Method Keywords and Body
+    pub fn rebuild_method(
+        &mut self,
+        node: Node,
+        content: &str,
+        scope_tree: &ScopeTree,
+        method_type: MethodType,
+        method_range: Range,
+        public_variables_declared: HashSet<String>, // only procedure passes this
+        class_is_final: Option<bool>,
+        old_class_is_final: Option<bool>,
+        class_is_procedure_block: Option<bool>,
+        class_name: &str,
+    ) -> (
+        bool,
+        bool,
+        Vec<(Variable, Range, Vec<String>, ScopeId)>,
+        HashSet<UnresolvedMethodRef>,
+        HashSet<(String, String, Range, String)>,
+    ) {
+        self.reset_method_keywords(method_type, public_variables_declared);
+        let mut variables_in_method = Vec::new();
+        match method_type {
+            MethodType::Routine => {
+                self.build_routine_method_arguments(
+                    node,
+                    content,
+                    scope_tree,
+                    &mut variables_in_method,
+                    false,
+                );
+                self.build_subroutine_set_variables(
+                    node,
+                    content,
+                    scope_tree,
+                    &mut variables_in_method,
+                    method_range,
+                );
+                let language: &TsLanguage = &LANGUAGE_OBJECTSCRIPT_ROUTINE.into();
+                let (unresolved_method_refs, unresolved_oref_method_refs) =
+                    self.get_method_dependencies(node, content, language, class_name, method_range);
+                (
+                    false,
+                    false,
+                    variables_in_method,
+                    unresolved_method_refs,
+                    unresolved_oref_method_refs,
+                )
+            }
+            MethodType::Subroutine(is_public) => {
+                let is_public_changed = self.is_public != is_public;
+                self.build_routine_method_arguments(
+                    node,
+                    content,
+                    scope_tree,
+                    &mut variables_in_method,
+                    false,
+                );
+                self.build_subroutine_set_variables(
+                    node,
+                    content,
+                    scope_tree,
+                    &mut variables_in_method,
+                    method_range,
+                );
+                let language: &TsLanguage = &LANGUAGE_OBJECTSCRIPT_ROUTINE.into();
+                let (unresolved_method_refs, unresolved_oref_method_refs) =
+                    self.get_method_dependencies(node, content, language, class_name, method_range);
+
+                (
+                    false,
+                    is_public_changed,
+                    variables_in_method,
+                    unresolved_method_refs,
+                    unresolved_oref_method_refs,
+                )
+            }
+            MethodType::Procedure(is_public) => {
+                let is_public_changed = self.is_public != is_public;
+                let language: &TsLanguage = &LANGUAGE_OBJECTSCRIPT_ROUTINE.into();
+                self.build_procedure_set_variables(
+                    node,
+                    content,
+                    scope_tree,
+                    &mut variables_in_method,
+                    class_is_procedure_block,
+                    language,
+                    false,
+                );
+                self.build_routine_method_arguments(
+                    node,
+                    content,
+                    scope_tree,
+                    &mut variables_in_method,
+                    true,
+                );
+                let language: &TsLanguage = &LANGUAGE_OBJECTSCRIPT_ROUTINE.into();
+                let (unresolved_method_refs, unresolved_oref_method_refs) =
+                    self.get_method_dependencies(node, content, language, class_name, method_range);
+                (
+                    false,
+                    is_public_changed,
+                    variables_in_method,
+                    unresolved_method_refs,
+                    unresolved_oref_method_refs,
+                )
+            }
+            MethodType::ClassMethod | MethodType::InstanceMethod => {
+                let (is_final_changed, is_public_changed) =
+                    self.build_method_keywords(node, content, class_is_final, old_class_is_final);
+                self.build_class_method_arguments(
+                    node,
+                    content,
+                    scope_tree,
+                    &mut variables_in_method,
+                    class_is_procedure_block,
+                );
+                let language: &TsLanguage = &LANGUAGE_OBJECTSCRIPT_UDL.into();
+                self.build_procedure_set_variables(
+                    node,
+                    content,
+                    scope_tree,
+                    &mut variables_in_method,
+                    class_is_procedure_block,
+                    language,
+                    true,
+                );
+                let (unresolved_method_refs, unresolved_oref_method_refs) =
+                    self.get_method_dependencies(node, content, language, class_name, method_range);
+                return (
+                    is_final_changed,
+                    is_public_changed,
+                    variables_in_method,
+                    unresolved_method_refs,
+                    unresolved_oref_method_refs,
+                );
+            }
+        }
+    }
+
+    pub fn reset_method_keywords(
+        &mut self,
+        method_type: MethodType,
+        public_variables_declared: HashSet<String>,
+    ) {
+        self.method_type = method_type;
+        match method_type {
+            MethodType::Routine => {
+                self.return_type = None;
+                self.variables.clear();
+                self.public_variables_declared = public_variables_declared;
+            }
+            MethodType::Procedure(is_public) | MethodType::Subroutine(is_public) => {
+                self.return_type = None;
+                self.variables.clear();
+                self.public_variables_declared = public_variables_declared;
+                self.is_public = is_public;
+            }
+            MethodType::ClassMethod | MethodType::InstanceMethod => {
+                self.return_type = None;
+                self.variables.clear();
+                self.is_public = true;
+                self.is_procedure_block = None;
+                self.language = None;
+                self.public_variables_declared = HashSet::new();
+                self.code_mode = CodeMode::Code;
+                self.is_final = None;
+            }
+        }
+    }
+
+    fn build_method_keywords(
+        &mut self,
+        node: Node,
+        content: &str,
+        class_is_final: Option<bool>,
+        old_class_is_final: Option<bool>,
+    ) -> (bool, bool) {
+        // reset keywords to default based on method type
+        let query_str = r#"
+            (method_definition ([(method_keyword_codemode_expression) @keyword
+                        (method_keyword_external_language) @keyword
+                        (method_keyword) @keyword
+                        (call_method_keyword) @keyword
+                        (return_type (typename (identifier) @returntype ))
+                        ]))"#;
+        let language: &TsLanguage = &LANGUAGE_OBJECTSCRIPT_UDL.into();
+        let mut is_final_changed = false;
+        let mut privacy_changed = false;
+        if let Ok(query) = Query::new(language, query_str) {
+            let mut cursor = QueryCursor::new();
+            let mut iter = cursor.matches(&query, node, content.as_bytes());
+            let keyword_idx = query.capture_index_for_name("keyword");
+            let returntype_idx = query.capture_index_for_name("returntype");
+            let old_is_public = self.is_public.clone();
+            let old_is_final = self.is_final.clone();
+            let mut return_type_parameters = Vec::new();
+            let mut saw_first_return_type = false;
+            let mut return_type_id = None;
+            while let Some(query_match) = iter.next() {
+                let mut i = 0;
+                while i < query_match.captures.len() {
+                    let capture = &query_match.captures[i];
+                    if keyword_idx == Some(capture.index) {
+                        if let Some(keyword_str) =
+                            get_string_at_byte_range(content, capture.node.byte_range())
+                        {
+                            let (not, keyword_name, values) =
+                                get_keyword_and_value(keyword_str.as_str());
+                            if keyword_name == "final" && !class_is_final.unwrap_or(false) {
+                                if not {
+                                    self.is_final = Some(false);
+                                } else {
+                                    self.is_final = Some(true);
+                                }
+                            } else if keyword_name == "private" {
+                                if not {
+                                    self.is_public = true;
+                                } else {
+                                    self.is_public = false;
+                                }
+                            } else if keyword_name == "procedureblock" {
+                                if let Some(value) = values.get(0).copied() {
+                                    if value == "1" {
+                                        self.is_procedure_block = Some(true);
+                                    } else if value == "0" {
+                                        self.is_procedure_block = Some(false);
+                                    }
+                                } else {
+                                    self.is_procedure_block = Some(true);
+                                }
+                            } else if keyword_name == "codemode" {
+                                let Some(value) = values.get(0).copied() else {
+                                    eprintln!("Expected a value for language keyword, got: None");
+                                    i += 1;
+                                    continue;
+                                };
+                                if value == "call" {
+                                    self.code_mode = CodeMode::Call;
+                                } else if value == "code" {
+                                    self.code_mode = CodeMode::Code;
+                                } else if value == "expression" {
+                                    self.code_mode = CodeMode::Expression;
+                                } else if value == "objectgenerator" {
+                                    self.code_mode = CodeMode::ObjectGenerator;
+                                }
+                            } else if keyword_name == "publiclist" {
+                                for variable in values {
+                                    self.public_variables_declared.insert(variable.to_string());
+                                }
+                            } else if keyword_name == "language" {
+                                if let Some(value) = values.get(0).copied() {
+                                    if value == "objectscript" {
+                                        self.language = Some(Language::Objectscript);
+                                    } else if value == "tsql" {
+                                        self.language = Some(Language::TSql);
+                                    } else if value == "ispl" {
+                                        self.language = Some(Language::ISpl);
+                                    } else if value == "python" {
+                                        self.language = Some(Language::Python);
+                                    }
+                                }
+                            }
+                        }
+                        i += 1;
+                        continue;
+                    } else if returntype_idx == Some(capture.index) {
+                        let return_type_node = capture.node;
+                        let Some(typename) =
+                            get_string_at_byte_range(content, return_type_node.byte_range())
+                        else {
+                            i += 1;
+                            continue;
+                        };
+                        if !saw_first_return_type {
+                            return_type_id = Some(find_return_type(typename));
+                            saw_first_return_type = true;
+                        } else {
+                            return_type_parameters.push(typename);
+                        }
+                        i += 1;
+                        continue;
+                    }
+                    i += 1;
+                }
+            }
+            if let Some(typename_id) = return_type_id {
+                let typename = TypeName {
+                    ret_type: typename_id,
+                    parameters: return_type_parameters,
+                };
+                self.return_type = Some(typename);
+            }
+            let old_final_keyword_res = old_is_final.unwrap_or(old_class_is_final.unwrap_or(false));
+            let new_final_keyword = self.is_final.unwrap_or(class_is_final.unwrap_or(false));
+            if old_final_keyword_res != new_final_keyword {
+                is_final_changed = true;
+            }
+            if old_is_public != self.is_public {
+                privacy_changed = true;
+            }
+        }
+        (is_final_changed, privacy_changed)
     }
 }

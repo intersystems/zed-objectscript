@@ -1,15 +1,15 @@
 use crate::parse_structures::{
-    ClassProperty, Method, MethodRef, PrivateVarId, Variable, VariableRef,
+    Method, MethodRef, PrivateVarId, Property, PropertyRef, Variable, VariableRef,
 };
 use crate::scope_structures::ScopeId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 /// Per-document private semantic state (methods, properties, variables).
 ///
 /// This is used for private members that should not be shared across classes globally.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalSemanticModel {
     pub methods: HashMap<MethodRef, Method>,
-    pub properties: Vec<ClassProperty>,
+    pub properties: HashMap<PropertyRef, Property>,
     pub variables: HashMap<MethodRef, HashMap<ScopeId, Vec<Variable>>>,
     pub active: bool,
 }
@@ -19,18 +19,37 @@ impl LocalSemanticModel {
     pub fn new() -> Self {
         Self {
             methods: HashMap::new(),
-            properties: Vec::new(),
+            properties: HashMap::new(),
             variables: HashMap::new(),
             active: true,
         }
     }
 
-    /// Removes methods and their variables by MethodRef, leaving the rest intact.
-    pub fn partial_clear(&mut self, methods_to_clear: Vec<MethodRef>) {
+    /// Removes methods and their variables by MethodRef, and removes properties by their PropertyRef, leaving the rest intact.
+    pub fn partial_clear(
+        &mut self,
+        methods_to_clear: HashSet<MethodRef>,
+        properties_to_remove: HashSet<PropertyRef>,
+    ) {
         for method_ref in methods_to_clear {
-            self.methods.remove(&method_ref);
-            self.variables.remove(&method_ref);
+            self.remove_method(&method_ref);
         }
+        for property_ref in properties_to_remove {
+            self.remove_property(&property_ref);
+        }
+    }
+
+    /// Removes `method` corresponding to `method_ref` and removes all of its variables.
+    /// Returns `method` if it exists, None otherwise.
+    pub fn remove_method(&mut self, method_ref: &MethodRef) -> Option<Method> {
+        self.variables.remove(&method_ref);
+        self.methods.remove(&method_ref)
+    }
+
+    /// Removes `property` corresponding to `property_ref`.
+    /// Returns `property` if it exists, None otherwise.
+    pub fn remove_property(&mut self, property_ref: &PropertyRef) -> Option<Property> {
+        self.properties.remove(&property_ref)
     }
 
     /// Returns a reference to a private variable by method ref and index.
@@ -94,5 +113,26 @@ impl LocalSemanticModel {
     /// Logs a warning and returns `None` if the index is out of bounds.
     pub fn get_method_mut(&mut self, method_ref: &MethodRef) -> Option<&mut Method> {
         self.methods.get_mut(method_ref)
+    }
+
+    /// Fetches a mutable reference to a property by `PropertyRef`.
+    ///
+    /// Looks up the corresponding property for `property_ref` and then indexes into it. Logs and returns `None`
+    /// if the class has no recorded property for `PropertyRef`.
+    pub fn get_mut_property(&mut self, property_ref: &PropertyRef) -> Option<&mut Property> {
+        self.properties.get_mut(property_ref)
+    }
+
+    /// Fetches an immutable reference to a property by `PropertyRef`.
+    ///
+    /// Looks up the corresponding property for `property_ref` and then indexes into it. Logs and returns `None`
+    /// if the class has no recorded property for `PropertyRef`.
+    pub fn get_property(&self, property_ref: &PropertyRef) -> Option<&Property> {
+        self.properties.get(property_ref)
+    }
+
+    /// Given a Property, adds the Property to the vec corresponding to the class the Property is defined in.
+    pub fn new_property(&mut self, property: Property, property_ref: PropertyRef) {
+        self.properties.insert(property_ref, property);
     }
 }

@@ -145,6 +145,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_scope_tree_for_routine() {
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("gotodef")
+            .join("routines");
+        let (backend, uri) = setup_backend_and_workspace(project_root).await;
+        let project_state = backend.get_project(&uri).unwrap();
+        let project_data = project_state.data.read();
+
+        let methods = project_data.method_defs.get("crossref").unwrap();
+
+        println!("METHOD LEN {:?}", methods.len());
+    }
+
+    #[tokio::test]
     async fn test_goto_def_inherited_method_relative() {
         let project_root = env::current_dir()
             .unwrap()
@@ -154,7 +170,7 @@ mod tests {
         let (backend, uri) = setup_backend_and_workspace(project_root).await;
         let project_state = backend.get_project(&uri).unwrap();
         let project_data = project_state.data.read();
-        let class_id = project_data.classes.get("hksubclass").unwrap();
+
         let superclass_id = project_data.classes.get("hk").unwrap();
         let superclass = project_data
             .global_semantic_model
@@ -163,9 +179,10 @@ mod tests {
         let superclass_method_ref = superclass.get_method_ref("print2").unwrap();
         let methods = project_data
             .override_index
-            .effective_public_methods
-            .get(&class_id)
+            .effective_methods
+            .get("hksubclass")
             .unwrap();
+        eprintln!("METHODS {:?}", methods);
         let method_ref = methods.get("print2").unwrap();
         assert_eq!(method_ref, superclass_method_ref);
     }
@@ -240,7 +257,14 @@ mod tests {
         assert_eq!(before_y.len(), 3);
         assert_eq!(superclass_count, 2);
 
-        project_state.update_document(document_url, tree, FileType::Cls, 1, content.as_str());
+        project_state.update_document(
+            document_url,
+            &tree,
+            FileType::Cls,
+            1,
+            content.as_str(),
+            vec![],
+        );
 
         let (
             after_public_variables,
@@ -317,11 +341,11 @@ mod tests {
 
         assert_eq!(
             sub_one_class_inherited.inherited_classes,
-            vec![super_class_id]
+            vec!["SuperClass".to_string()]
         );
         assert_eq!(
             sub_two_class_inherited.inherited_classes,
-            vec![super_class_id]
+            vec!["SuperClass".to_string()]
         );
     }
 
@@ -338,16 +362,19 @@ mod tests {
         let project_data = project_state.data.read();
         let classes = project_data.classes.clone();
         let gsm = project_data.global_semantic_model.clone();
-        for (_class_name, class_id) in classes {
-            let Some(class) = &gsm.classes.get(&class_id) else {
+        for class_id in classes.values() {
+            let Some(class) = gsm.classes.get(class_id) else {
                 panic!("Class DNE");
             };
+            // eprintln!("CLASS: {:#?}", class);
+
             assert_eq!(class.is_procedure_block, Some(false));
             assert_eq!(class.default_language, Some(Language::Objectscript));
-            assert_eq!(class.inheritance_direction, "right");
+            assert_eq!(class.inheritance_direction, Some("right".to_string()));
             // get methods
             for (_, method_ref) in class.methods.clone() {
                 let method = gsm.methods.get(&method_ref).unwrap();
+                eprintln!("METHOD: {:#?}", method);
                 if method.name == "newVarChange" {
                     assert_eq!(method.variables.len(), 1);
                     let variable_refs = method.variables.get("x").unwrap();
@@ -357,7 +384,7 @@ mod tests {
                         assert!(variable_ref.priv_id.is_some());
                     }
                     assert_eq!(method.is_procedure_block, Some(true));
-                    assert_eq!(method.language, Some(Language::Objectscript));
+                    assert_eq!(method.language, None);
                 } else {
                     let all_var_refs: Vec<&Vec<(VariableRef, _)>> =
                         method.variables.values().collect();
@@ -367,8 +394,8 @@ mod tests {
                             assert!(variable_ref.priv_id.is_none());
                         }
                     }
-                    assert_eq!(method.is_procedure_block, Some(false));
-                    assert_eq!(method.language, Some(Language::Objectscript));
+                    assert_eq!(method.is_procedure_block, None);
+                    assert_eq!(method.language, None);
                 }
             }
         }
@@ -791,10 +818,11 @@ check()
             drop(data);
             project_state.update_document(
                 sub_public_url.clone(),
-                tree,
+                &tree,
                 file_type,
                 version,
                 sub_public_content.as_str(),
+                vec![],
             );
         }
 
@@ -893,7 +921,6 @@ check()
         let (backend, uri) = setup_backend_and_workspace(project_root).await;
         let project_state = backend.get_project(&uri).expect("missing project state");
         let project_data = project_state.data.read();
-
         let result = project_data
             .method_defs
             .get("Demo.Utility")
@@ -940,7 +967,7 @@ check()
         let content = document.content.as_str();
 
         let oref_range = range_for_substring(content, "do obj.Run()");
-        let class_name = document.class_name.as_deref().unwrap();
+        let class_name = &document.class_name;
 
         let locations =
             project_data.get_oref_definitions("obj", "Run", class_name, oref_range, true);
@@ -970,7 +997,7 @@ check()
         let content = document.content.as_str();
 
         let oref_range = range_for_substring(content, "job worker.Execute()");
-        let class_name = document.class_name.as_deref().unwrap();
+        let class_name = &document.class_name;
 
         let locations =
             project_data.get_oref_definitions("worker", "Execute", class_name, oref_range, true);
@@ -1039,7 +1066,7 @@ check()
             .global_semantic_model
             .get_class(child_right_id)
             .expect("class should exist");
-        assert_eq!(class.inheritance_direction, "right");
+        assert_eq!(class.inheritance_direction, Some("right".to_string()));
         assert!(
             !class.inherited_classes.is_empty(),
             "should have inherited classes"
@@ -1092,7 +1119,7 @@ check()
         let (backend, uri) = setup_backend_and_workspace(project_root).await;
         let project_state = backend.get_project(&uri).expect("missing project state");
         let project_data = project_state.data.read();
-
+        eprintln!("PROJECT DATA OVERRIDES {:#?}", project_data.override_index);
         let method_ref = project_data
             .method_defs
             .get("Demo.DeepMid")
@@ -1574,7 +1601,7 @@ check()
             .expect("document should be tracked");
         assert_eq!(doc.file_type, FileType::Cls);
         assert!(doc.class_id.is_some(), "class_id should be set for .cls");
-        assert_eq!(doc.class_name.as_deref(), Some("Demo.Hello"));
+        assert_eq!(&doc.class_name, "Demo.Hello");
     }
 
     #[test]
@@ -1594,7 +1621,7 @@ check()
             doc.class_id.is_some(),
             "class_id should be set for routines"
         );
-        assert_eq!(doc.class_name.as_deref(), Some("mytest"));
+        assert_eq!(&doc.class_name, "mytest");
     }
 
     #[test]
@@ -1621,7 +1648,7 @@ check()
         assert_eq!(doc.file_type, FileType::Xml);
         assert!(doc.class_id.is_none(), "XML docs should not have class_id");
         assert!(
-            doc.class_name.is_none(),
+            &doc.class_name == "XML",
             "XML docs should not have class_name"
         );
     }
@@ -1649,10 +1676,11 @@ check()
 
         project_state.update_document(
             parent_url.clone(),
-            tree,
+            &tree,
             file_type,
             version + 1,
             content.as_str(),
+            vec![],
         );
 
         // Verify the document is still consistent

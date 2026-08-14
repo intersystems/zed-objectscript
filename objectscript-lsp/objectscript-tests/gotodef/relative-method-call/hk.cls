@@ -1,5 +1,5 @@
 Class hk {
-    Method print2() {
+    ClassMethod print2() [Private] {
         w 2
     }
 }

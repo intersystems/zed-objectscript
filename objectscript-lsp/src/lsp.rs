@@ -674,9 +674,7 @@ impl LanguageServer for BackendWrapper {
                 return Ok(None);
             };
 
-            let Some(class_name) = document.class_name.clone() else {
-                return Ok(None);
-            };
+            let class_name = document.class_name.clone();
             (
                 document.content.clone(),
                 document.tree.clone(),
@@ -735,6 +733,13 @@ impl LanguageServer for BackendWrapper {
                         data.get_class_definition(&name_string)
                     }
                 }
+                MemberType::RelativeProperty => {
+                    // definitions = {
+                    //     let data = project.data.read();
+                    //
+                    // }
+                    // TODO
+                }
                 MemberType::RelativeMethodCall => {
                     definitions = {
                         let data = project.data.read();
@@ -747,10 +752,13 @@ impl LanguageServer for BackendWrapper {
                         } else {
                             if let Some(m_ref) = data
                                 .override_index
-                                .effective_public_methods
-                                .get(&class_id)
+                                .effective_methods
+                                .get(&class_name)
                                 .and_then(|methods| methods.get(&name_string))
                             {
+                                eprintln!(
+                                    "Error: Method is defined in override index but NOT in method_defs"
+                                );
                                 m_ref
                             } else {
                                 return Ok(None);
@@ -1588,7 +1596,16 @@ impl LanguageServer for BackendWrapper {
                 .log_message(MessageType::ERROR, format!("New Tree has Errors"))
                 .await;
         } else {
-            project.update_document(uri, new_tree, file_type, new_version, old_text.as_str());
+            let changed_ranges: Vec<tree_sitter::Range> =
+                new_tree.changed_ranges(&old_tree).collect();
+            project.update_document(
+                uri,
+                &new_tree,
+                file_type,
+                new_version,
+                old_text.as_str(),
+                changed_ranges,
+            );
         }
     }
 }
@@ -1742,7 +1759,7 @@ if  {
 
         assert_eq!(document.file_type, FileType::Xml);
         assert!(document.class_id.is_none());
-        assert!(document.class_name.is_none());
+        assert_eq!(&document.class_name, "XML");
     }
 
     #[test]

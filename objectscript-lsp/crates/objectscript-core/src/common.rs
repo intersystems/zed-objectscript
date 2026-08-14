@@ -1,13 +1,16 @@
-use crate::parse_structures::{ClassId, MemberType, ReturnType};
+use crate::parse_structures::{ClassId, MemberType, MethodType, ReturnType};
 use crate::refactor::count_leading_dots_in_line;
 use crate::scope_structures::ScopeId;
 use crate::scope_tree::ScopeTree;
 use regex::Regex;
+use std::collections::HashSet;
 use std::ops::Range as CoreRange;
 use tower_lsp::lsp_types::{Position, Range as LspRange, Url};
 use tree_sitter::{
-    Node, Point, Query, QueryCursor, Range as TsRange, Range, StreamingIterator, Tree, TreeCursor,
+    Language as TsLanguage, Node, Point, Query, QueryCursor, Range as TsRange, Range,
+    StreamingIterator, Tree, TreeCursor,
 };
+use tree_sitter_objectscript::LANGUAGE_OBJECTSCRIPT_UDL;
 
 use tree_sitter_xml::LANGUAGE_XML;
 
@@ -320,7 +323,11 @@ pub fn find_class_definition(root: Node) -> Option<Node> {
 }
 
 /// Dispatches to class or routine name extraction based on the `is_rtn` flag.
-pub fn get_member_name_from_root(content: &str, node: Node, is_rtn: bool) -> Option<String> {
+pub fn get_member_name_and_range_from_root(
+    content: &str,
+    node: Node,
+    is_rtn: bool,
+) -> Option<(Range, String)> {
     return if is_rtn {
         get_routine_name_from_root(content, node)
     } else {
@@ -335,77 +342,32 @@ pub fn get_member_name_from_root(content: &str, node: Node, is_rtn: bool) -> Opt
 ///
 /// Returns `None` if no class definition/name is found or if the byte range is invalid; prints a
 /// warning on unexpected/mismatched structure.
-fn get_class_name_from_root(content: &str, node: Node) -> Option<String> {
-    let Some(class_def) = find_class_definition(node) else {
-        return None;
-    };
-    let Some(name_node) = class_def.named_child(1) else {
-        eprintln!(
-            "Error: Expected Class name node to be at the class definition ({:?}) node's 1 index, but it was not",
-            class_def
-        );
-        return None;
-    };
-
-    let Some(class_name) = get_string_at_byte_range(content, name_node.byte_range()) else {
-        eprintln!(
-            "Error: Failed to get class name from content: {:?} \n\n\n. Expected it to be at byte range {:?}",
-            content, name_node
-        );
-
-        return None;
-    };
-    Some(class_name.to_string())
-}
-
-/// Finds the byte range of the top-level routine body (before the first subroutine/procedure).
-pub fn get_routine_range(root: Node) -> Option<Range> {
-    let start_byte = root.start_byte();
-    let start_position = root.start_position();
-    let end_byte = root.end_byte();
-    let end_position = root.end_position();
-    let mut has_rtn_def = false;
-    let routine_children = get_node_children(root);
-    for routine_child in routine_children {
-        match routine_child.kind() {
-            "routine_definition" => has_rtn_def = true,
-            "statement" => {
-                let Some(command) = routine_child.named_child(0) else {
-                    eprintln!(
-                        "Statement node did not have a child at index 0, aborting (get_routine_range)"
-                    );
-                    return None;
-                };
-                if has_rtn_def
-                    && (command.kind() == "command_quit" || command.kind() == "procedure")
-                {
-                    return Some(Range {
-                        start_byte,
-                        end_byte,
-                        start_point: start_position,
-                        end_point: end_position,
-                    });
-                } else if !has_rtn_def
-                    && (command.kind() == "command_quit"
-                        || command.kind() == "procedure"
-                        || command.kind() == "tag_statement")
-                {
-                    return Some(Range {
-                        start_byte,
-                        end_byte,
-                        start_point: start_position,
-                        end_point: end_position,
-                    });
+fn get_class_name_from_root(content: &str, node: Node) -> Option<(Range, String)> {
+    let query_str = "(class_definition (class_name (identifier) @classname))";
+    let language: &TsLanguage = &LANGUAGE_OBJECTSCRIPT_UDL.into();
+    if let Ok(query) = Query::new(language, query_str) {
+        let mut cursor = QueryCursor::new();
+        let mut iter = cursor.matches(&query, node, content.as_bytes());
+        while let Some(query_match) = iter.next() {
+            let matched_node = query_match.captures[0].node; // this is the identifier node
+            let mut parent_node = matched_node.parent();
+            while let Some(parent) = parent_node {
+                if parent.kind() == "class_definition" {
+                    if let Some(class_name) =
+                        get_string_at_byte_range(content, matched_node.byte_range())
+                    {
+                        return Some((parent.range(), class_name));
+                    }
                 }
+                parent_node = parent.parent();
             }
-            _ => return None,
         }
     }
     None
 }
 
 /// Given root node (source_file), find the routine name
-fn get_routine_name_from_root(content: &str, root: Node) -> Option<String> {
+fn get_routine_name_from_root(content: &str, root: Node) -> Option<(Range, String)> {
     // either it starts as a statement or as a routine_def
     if let Some(node) = root.named_child(0) {
         match node.kind() {
@@ -422,7 +384,12 @@ fn get_routine_name_from_root(content: &str, root: Node) -> Option<String> {
                     );
                     return None;
                 }
-                return get_string_at_byte_range(content, name_node.byte_range());
+
+                if let Some(routine_name) =
+                    get_string_at_byte_range(content, name_node.byte_range())
+                {
+                    return Some((root.range(), routine_name));
+                }
             }
             "statement" | "compiled_header" => {
                 let routine_children = get_node_children(root);
@@ -445,7 +412,11 @@ fn get_routine_name_from_root(content: &str, root: Node) -> Option<String> {
                             eprintln!("Error: Expected tag_statement to have child at index 0");
                             continue;
                         };
-                        return get_string_at_byte_range(content, tag.byte_range());
+                        if let Some(routine_name) =
+                            get_string_at_byte_range(content, tag.byte_range())
+                        {
+                            return Some((root.range(), routine_name));
+                        }
                     }
                 }
             }
@@ -471,15 +442,26 @@ pub fn get_string_at_byte_range(content: &str, range: CoreRange<usize>) -> Optio
 /// Unrecognized names return `ReturnType::Other(typename)` and are logged as unimplemented.
 pub fn find_return_type(typename: String) -> ReturnType {
     return match typename.to_lowercase().as_str() {
-        "%exactstring" | "%enumstring" | "%string" | "%char" => ReturnType::String,
-        "%bigint" | "%smallint" | "%integer" | "%posixtime" | "%counter" => ReturnType::Integer,
+        "%exactstring" | "%enumstring" | "%string" | "%char" | "text" | "string" => {
+            ReturnType::String
+        }
+        "%bigint" | "%smallint" | "%integer" | "%posixtime" | "%counter" | "integer" => {
+            ReturnType::Integer
+        }
         "%tinyint" => ReturnType::TinyInteger,
         "%binary" => ReturnType::Binary,
         "%date" => ReturnType::Date,
         "%double" => ReturnType::Double,
         "%numeric" | "%time" => ReturnType::Number,
         "%status" => ReturnType::Status,
-        "%sqlquery" => ReturnType::SqlQuery,
+        "%sqlquery" | "sql" => ReturnType::SqlQuery,
+        "boolean" => ReturnType::Boolean,
+        "classname" => ReturnType::ClassName,
+        "coscode" => ReturnType::CosCode,
+        "cosidentifier" => ReturnType::Variable,
+        "cosexpression" => ReturnType::Expression,
+        "sqlidentifier" => ReturnType::SqlIdentifier,
+        "configvalue" => ReturnType::ConfigValue,
         _ => {
             eprintln!("Unimplemented return type: {:?}", typename);
             ReturnType::Other(typename)
@@ -597,7 +579,7 @@ pub fn get_keyword_and_value(keyword: &str) -> (bool, String, Vec<&str>) {
 /// Creates a new `ScopeTree` rooted at `class_symbol_id`, then walks the syntax tree and adds
 /// scopes for nodes considered "scope nodes" (see `cls_is_scope_node`).
 pub fn initial_build_scope_tree(
-    tree: Tree,
+    tree: &Tree,
     class_symbol_id: ClassId,
     content: &str,
     is_rtn: bool,
@@ -622,10 +604,12 @@ fn build_scope_skeleton(
 ) {
     let is_scope;
     let method_name;
+    let in_routine_statements;
     if !is_rtn {
         (is_scope, method_name) = cls_is_scope_node(node, content);
+        in_routine_statements = false;
     } else {
-        (is_scope, method_name) = rtn_is_scope_node(node, content);
+        (is_scope, method_name, in_routine_statements) = rtn_is_scope_node(node, content);
     }
     if is_scope {
         let scope_start;
@@ -645,7 +629,13 @@ fn build_scope_skeleton(
             );
             return;
         };
-        let scope_id = scope_tree.add_scope(scope_start, scope_end, parent, method_name);
+        let scope_id = scope_tree.add_scope(
+            scope_start,
+            scope_end,
+            parent,
+            method_name,
+            in_routine_statements,
+        );
         scope_stack.push(scope_id);
     }
 
@@ -666,6 +656,11 @@ pub fn point_in_range(pos: Point, start: Point, end: Point) -> bool {
         return true;
     };
     false
+}
+
+pub fn range_within_range(inner: &Range, outer: &Range) -> bool {
+    point_in_range(inner.start_point, outer.start_point, outer.end_point)
+        && point_in_range(inner.end_point, outer.start_point, outer.end_point)
 }
 
 /// Returns `true` if `node` is treated as a scope boundary in `.cls` parsing.
@@ -690,7 +685,9 @@ pub fn cls_is_scope_node(node: Node, content: &str) -> (bool, Option<String>) {
         | "else_block_dotted"
         | "elseif_block_dotted"
         | "command_if_dotted_block"
-        | "command_else" => is_scope = true,
+        | "command_else" => {
+            is_scope = true;
+        }
         _ => is_scope = false,
     }
     (is_scope, method_name_str)
@@ -726,8 +723,200 @@ fn get_scope_range(node: Node) -> Range {
     }
 }
 
+/// Determines if a node kind terminates a routine method scope.
+pub fn is_rtn_method_end(node_str: &str, compiled_header: bool) -> bool {
+    if compiled_header {
+        return node_str == "command_quit"
+            || node_str == "procedure"
+            || node_str == "tag_statement";
+    } else {
+        return node_str == "command_quit" || node_str == "procedure";
+    }
+}
+
+/// Given a statement node of a procedure statement, get the range of the method it defines
+pub fn get_procedure_info(
+    node: &Node,
+    content: &str,
+) -> Option<(String, Range, MethodType, HashSet<String>)> {
+    let Some(statement_type) = node.named_child(0) else {
+        eprintln!("Error: Expected Statement node to have child at index 0");
+        return None;
+    };
+    let Some(tag) = statement_type.named_child(0) else {
+        eprintln!(
+            "Expected procedure node to have a child at index 0, aborting initial_build_procedure"
+        );
+        return None;
+    };
+    let Some(method_name) = get_string_at_byte_range(content, tag.byte_range()) else {
+        return None;
+    };
+    let procedure_range = statement_type.range();
+    let mut is_public = false;
+    let procedure_children = get_node_children(statement_type);
+    let mut public_variables_declared = HashSet::new();
+    for procedure_statement in procedure_children {
+        match procedure_statement.kind() {
+            "keyword_public" => {
+                is_public = true;
+            }
+            "procedure_pub_vars" => {
+                let variables = get_node_children(procedure_statement);
+                for var in variables {
+                    let Some(var_name) = get_string_at_byte_range(content, var.byte_range()) else {
+                        continue;
+                    };
+                    public_variables_declared.insert(var_name);
+                }
+            }
+            _ => {
+                continue;
+            }
+        }
+    }
+    return Some((
+        method_name,
+        procedure_range,
+        MethodType::Procedure(is_public),
+        public_variables_declared,
+    ));
+}
+
+/// Given a routine_definition node or compiled_header node, get the range of the statements that come before the first tag statement or procedure or quit.
+pub fn get_routine_method_range(node: &Node, end_point: Point, end_byte: usize) -> Option<Range> {
+    let mut saw_first_tag_statement = false;
+    let is_compiled_header = node.kind() == "compiled_header";
+    // get statement siblings until one is tag_statement or procedure
+    let mut next_sibling = node.next_named_sibling();
+    let routine_start_point = node.start_position();
+    let routine_start_byte = node.start_byte();
+    let mut routine_scope_end_point = end_point;
+    let mut routine_scope_end_byte = end_byte;
+    while let Some(sib) = next_sibling {
+        if sib.kind() == "statement" {
+            if let Some(future_statement_type) = sib.named_child(0) {
+                if !is_compiled_header || saw_first_tag_statement {
+                    if is_rtn_method_end(future_statement_type.kind(), is_compiled_header) {
+                        break;
+                    }
+                } else if future_statement_type.kind() == "tag_statement" {
+                    saw_first_tag_statement = true
+                }
+            }
+        }
+        routine_scope_end_point = sib.end_position();
+        routine_scope_end_byte = sib.end_byte();
+        next_sibling = sib.next_named_sibling();
+    }
+    let routine_range = Range {
+        start_byte: routine_start_byte,
+        start_point: routine_start_point,
+        end_point: routine_scope_end_point,
+        end_byte: routine_scope_end_byte,
+    };
+    return Some(routine_range);
+}
+
+/// Given a property node, get the name
+pub fn get_property_name(node: &Node, content: &str) -> Option<String> {
+    let Some(property_name_node_outer) = node.named_child(1) else {
+        eprintln!(
+            "Error: expected property node {:?} to have child at node 1",
+            node.kind()
+        );
+        return None;
+    };
+    let Some(property_name_node) = property_name_node_outer.named_child(0) else {
+        eprintln!("Error: expected property name node to have child at node 0");
+        return None;
+    };
+
+    get_string_at_byte_range(content, property_name_node.byte_range())
+}
+
+/// Given a parameter node, get the name
+pub fn get_parameter_name(node: &Node, content: &str) -> Option<String> {
+    let Some(parameter_name_node_outer) = node.named_child(1) else {
+        eprintln!("Error: expected parameter node to have child at node 1");
+        return None;
+    };
+    let Some(parameter_name_node) = parameter_name_node_outer.named_child(0) else {
+        eprintln!("Error: expected parameter name node to have child at node 0");
+        return None;
+    };
+
+    get_string_at_byte_range(content, parameter_name_node.byte_range())
+}
+
+/// Given a statement node of a tag statement, get the range of the method it defines
+pub fn get_subroutine_info(node: &Node, content: &str) -> Option<(String, Range, MethodType)> {
+    let mut is_public = true;
+    let Some(statement_type) = node.named_child(0) else {
+        eprintln!("Error: Expected Statement node to have child at index 0");
+        // curr_routine_child = routine_child.next_named_sibling();
+        return None;
+    };
+    if statement_type.kind() != "tag_statement" {
+        return None;
+    }
+    let Some(tag) = statement_type.named_child(0) else {
+        eprintln!("Error: expected tag statement node to have child at node 0");
+        // curr_routine_child = routine_child.next_named_sibling();
+        return None;
+    };
+
+    let Some(method_name) = get_string_at_byte_range(content, tag.byte_range()) else {
+        // curr_routine_child = routine_child.next_named_sibling();
+        return None;
+    };
+
+    if let Some(tag_keyword) =
+        statement_type.named_child((statement_type.named_child_count() - 1) as u32)
+    {
+        match tag_keyword.kind() {
+            "keyword_methodimpl" => {
+                eprintln!("TODO: Verify if there is anything to be done for methodimpl keyword");
+            }
+            "keyword_private" => {
+                is_public = false;
+            }
+            _ => {}
+        }
+    }
+    // get statement siblings until one is tag_statement or procedure
+    let mut next_sibling = node.next_named_sibling();
+    let subroutine_start_point = statement_type.start_position();
+    let subroutine_start_byte = statement_type.start_byte();
+    let mut subroutine_scope_end_point = node.end_position();
+    let mut subroutine_scope_end_byte = node.end_byte();
+    while let Some(sib) = next_sibling {
+        if sib.kind() == "statement" {
+            if let Some(future_statement_type) = sib.named_child(0) {
+                if is_rtn_method_end(future_statement_type.kind(), false) {
+                    break;
+                }
+            }
+        }
+        subroutine_scope_end_point = sib.end_position();
+        subroutine_scope_end_byte = sib.end_byte();
+        next_sibling = sib.next_named_sibling();
+    }
+    let subroutine_range = Range {
+        start_byte: subroutine_start_byte,
+        start_point: subroutine_start_point,
+        end_point: subroutine_scope_end_point,
+        end_byte: subroutine_scope_end_byte,
+    };
+    return Some((
+        method_name,
+        subroutine_range,
+        MethodType::Subroutine(is_public),
+    ));
+}
+
 /// Determines if a tree-sitter node starts a new subroutine scope in a routine file.
-pub fn rtn_is_scope_node(node: Node, content: &str) -> (bool, Option<String>) {
+pub fn rtn_is_scope_node(node: Node, content: &str) -> (bool, Option<String>, bool) {
     let mut method_name_str = None;
     let mut is_scope = false;
     match node.kind() {
@@ -737,25 +926,47 @@ pub fn rtn_is_scope_node(node: Node, content: &str) -> (bool, Option<String>) {
         | "else_block_dotted"
         | "elseif_block_dotted"
         | "command_if_dotted_block"
-        | "command_else" => return (true, None),
+        | "command_else" => return (true, None, false),
         _ => {
             if node.kind() == "tag_statement" {
                 let mut sib = node.parent().and_then(|p| p.prev_named_sibling());
                 while let Some(sibling) = sib {
                     let Some(command) = sibling.named_child(0) else {
                         eprintln!(
-                            "Sibling node did not have a child at index 0, skipping (rtn_is_scope_node)"
+                            "Sibling node {:?} for tag statement {:?} did not have a child at index 0, skipping (rtn_is_scope_node)",
+                            sibling, node
                         );
                         sib = sibling.prev_named_sibling();
                         continue;
                     };
                     if command.kind() == "tag_statement" {
-                        return (false, None);
+                        sib = sibling.prev_named_sibling();
+                        while let Some(last_sib) = sib {
+                            if last_sib.kind() == "routine_definition"
+                                || last_sib.kind() == "compiled_header"
+                            {
+                                return (true, None, true);
+                            }
+                            let Some(command) = last_sib.named_child(0) else {
+                                eprintln!(
+                                    "Sibling node {:?} for tag statement {:?} did not have a child at index 0, skipping (rtn_is_scope_node)",
+                                    last_sib, node
+                                );
+                                sib = last_sib.prev_named_sibling();
+                                continue;
+                            };
+                            if command.kind() == "procedure" || command.kind() == "command_quit" {
+                                return (true, None, false);
+                            }
+                            sib = last_sib.prev_named_sibling();
+                        }
+                        // No quit or procedure found, this is a routine statement
+                        return (true, None, true);
                     } else if command.kind() == "procedure" || command.kind() == "command_quit" {
                         if let Some(tag) = node.named_child(0) {
                             method_name_str = get_string_at_byte_range(content, tag.byte_range());
                         }
-                        return (true, method_name_str);
+                        return (true, method_name_str, false);
                     }
                     sib = sibling.prev_named_sibling();
                 }
@@ -763,7 +974,7 @@ pub fn rtn_is_scope_node(node: Node, content: &str) -> (bool, Option<String>) {
                 if let Some(tag) = node.named_child(0) {
                     method_name_str = get_string_at_byte_range(content, tag.byte_range());
                 }
-                return (true, method_name_str);
+                return (true, method_name_str, true);
             }
             if node.kind() == "procedure" {
                 if let Some(tag) = node.named_child(0) {
@@ -777,13 +988,13 @@ pub fn rtn_is_scope_node(node: Node, content: &str) -> (bool, Option<String>) {
                     let Some(dotted_statement_line) =
                         get_string_at_byte_range(content, node.byte_range())
                     else {
-                        return (is_scope, method_name_str);
+                        return (is_scope, method_name_str, false);
                     };
                     let depth = count_leading_dots_in_line(&dotted_statement_line);
                     let Some(sib_dotted_statement_line) =
                         get_string_at_byte_range(content, sibling.byte_range())
                     else {
-                        return (is_scope, method_name_str);
+                        return (is_scope, method_name_str, false);
                     };
                     let sib_depth = count_leading_dots_in_line(&sib_dotted_statement_line);
                     if depth > sib_depth {
@@ -813,7 +1024,8 @@ pub fn rtn_is_scope_node(node: Node, content: &str) -> (bool, Option<String>) {
                             while let Some(sibling) = curr_sib {
                                 let Some(command) = sibling.named_child(0) else {
                                     eprintln!(
-                                        "Sibling node did not have a child at index 0, skipping (rtn_is_scope_node)"
+                                        "Sibling node {:?} did not have a child at index 0, skipping (rtn_is_scope_node)",
+                                        sibling.kind()
                                     );
                                     curr_sib = sibling.prev_named_sibling();
                                     continue;
@@ -834,7 +1046,8 @@ pub fn rtn_is_scope_node(node: Node, content: &str) -> (bool, Option<String>) {
                     }
                 }
             }
-            (is_scope, method_name_str)
+
+            (is_scope, method_name_str, false)
         }
     }
 }
@@ -921,7 +1134,26 @@ pub fn get_outer_type_from_identifier(node: &Node) -> Option<MemberType> {
         }
         "query_name" => Some(MemberType::Query),
         "trigger_name" => Some(MemberType::Trigger),
-        "property_name" => Some(MemberType::Property),
+        "property_name" => {
+            let Some(property_name_parent) = node.parent() else {
+                eprintln!("Error: expected method_name node to have parent");
+                return None;
+            };
+            return match property_name_parent.kind() {
+                "oref_property" => {
+                    let Some(oref_property_parent) = property_name_parent.parent() else {
+                        eprintln!("Error: expected oref_property node to have parent");
+                        return None;
+                    };
+                    if oref_property_parent.kind() == "relative_dot_property" {
+                        return Some(MemberType::RelativeProperty);
+                    } else {
+                        return Some(MemberType::OrefProperty);
+                    }
+                }
+                _ => None,
+            };
+        }
         "relationship_name" => Some(MemberType::Relationship),
         "foreignkey_name" => Some(MemberType::Foreignkey),
         "index_name" => Some(MemberType::Index),

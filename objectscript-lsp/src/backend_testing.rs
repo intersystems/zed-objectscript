@@ -1,4 +1,4 @@
-use objectscript_core::common::get_member_name_from_root;
+use objectscript_core::common::get_member_name_and_range_from_root;
 use objectscript_core::parse_structures::FileType;
 use objectscript_core::workspace::ProjectState;
 use parking_lot::RwLock;
@@ -140,28 +140,23 @@ impl BackendTester {
                     false
                 };
 
-                let member_name =
-                    get_member_name_from_root(code.as_str(), tree.root_node(), is_rtn);
-
-                // Commit inside the ProjectData lock
+                if let Some((member_range, member_name)) =
+                    get_member_name_and_range_from_root(code.as_str(), tree.root_node(), is_rtn)
                 {
                     let mut data = project.data.write();
                     let already_exists = data.add_document_if_absent(
                         url.clone(),
                         code,
-                        tree,
+                        &tree,
                         filetype,
                         member_name,
+                        member_range,
                         None,
                     );
                     if already_exists {
                         documents_already_existing.push(url);
                     }
                 }
-            }
-            {
-                let mut data = project.data.write();
-                data.build_inheritance_and_variables(None, documents_already_existing);
             }
         });
         // Wait for completion (and handle join errors)

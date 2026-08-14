@@ -65,7 +65,7 @@ Additionally, bare `routine_name` nodes and `numeric_literal` nodes (for line of
 ### `get_method_superclass` (`workspace.rs:1503`)
 
 - Finds the `MethodRef` for the method in the current class
-- Looks up `override_index.overrides` to find the superclass `MethodRef` it overrides
+- Looks up `override_index.method_overrides` to find the superclass `MethodRef` it overrides
 - Returns the location from the superclass method symbol
 
 ### `get_class_definition` (`workspace.rs:1439`)
@@ -120,9 +120,9 @@ A directed graph (`petgraph::DiGraph<MethodRef, Range>`) where:
 ### OverrideIndex (`override_index.rs`)
 
 Tracks method overriding relationships:
-- `overrides`: subclass `MethodRef` → superclass `MethodRef` it overrides
-- `overridden_by`: superclass `MethodRef` → all subclass `MethodRef`s that override it
-- `effective_public_methods`: per-class map of method name → resolved `MethodRef`
+- `method_overrides`: subclass `MethodRef` → superclass `MethodRef` it overrides
+- `method_overridden_by`: superclass `MethodRef` → all subclass `MethodRef`s that override it
+- `effective_methods`: per-class map of method name → resolved `MethodRef`
 
 Used by `get_method_superclass` for navigating up the inheritance chain.
 
@@ -130,7 +130,7 @@ Used by `get_method_superclass` for navigating up the inheritance chain.
 
 Stores workspace-wide symbols:
 - Class symbols (`ClassGlobalSymbol`) — name, url, location
-- Method symbols (`MethodGlobalSymbol`) — for public methods
+- Method symbols (`MethodSymbol`) — for public methods
 - Variable symbols (`VariableGlobalSymbol`) — for public variables
 
 ### ProjectState Fields

@@ -13,12 +13,12 @@
 │  Code Action Provider (lsp.rs:code_action)                  │
 │  - Checks if refactor.rewrite kind is requested             │
 │  - Builds menu of available refactor commands per file type │
-│  - Returns CodeAction list with command references           │
+│  - Returns CodeAction list with command references          │
 └────────────────────────────┬────────────────────────────────┘
                              │ user selects action
                              ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  Execute Command (lsp.rs:execute_command)                    │
+│  Execute Command (lsp.rs:execute_command)                   │
 │  - Parses URI + RefactorLevel from command arguments        │
 │  - Dispatches to document or workspace refactor             │
 │  - Sends workspace/applyEdit to editor                      │
@@ -29,8 +29,8 @@
               ▼              ▼              ▼
    ┌──────────────┐  ┌─────────────┐  ┌─────────────┐
    │ refactor_    │  │ refactor_   │  │ refactor_   │
-   │ legacy_do_  │  │ conditionals│  │ for_        │
-   │ statements()│  │ ()          │  │ statements()│
+   │ legacy_do_  │  │ conditionals │   │ for_        │
+   │ statements()│  │ ()          │   │ statements()│
    └──────────────┘  └─────────────┘  └─────────────┘
 ```
 

@@ -1,5 +1,6 @@
 Class hksubclass Extends hk {
-    Method callInheritedMethod() {
+    Property x;
+    ClassMethod callInheritedMethod() {
         d ..print2()
     }
 }

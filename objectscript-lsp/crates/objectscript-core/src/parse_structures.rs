@@ -1,5 +1,5 @@
 use crate::scope_structures::ScopeId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::hash::Hasher;
 use tree_sitter::Range;
@@ -7,7 +7,7 @@ use tree_sitter::Range;
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ClassId(pub usize);
 
-/// Stores the Method Index, which is assigned by `class.next_id()`.
+/// Stores the Method Index, which is assigned by `class.get_next_method_id()`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct MethodId(pub usize);
 
@@ -19,29 +19,20 @@ pub struct PublicVarId(pub usize);
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct PrivateVarId(pub usize);
 
-/// Stores the index into the per-class property vec in `Class`.
+/// Stores the Property Index, which is assigned by `class.get_next_property_id()`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct PropertyId(pub usize);
 
-/// Stores the index into the per-class parameter vec in `Class`.
+/// Stores the Parameter Index, which is assigned by `class.get_next_parameter_id()`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ParameterId(pub usize);
-
-/// Key used to identify a method by type and name (and later, signature).
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub struct MethodKey {
-    /// Class method or instance method.
-    pub method_type: MethodType,
-    /// Method name.
-    pub name: String,
-    // later: add signature info (arg count/types) to be correct for overloads
-}
 
 /// Differentiates the kind of class member an identifier node represents.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MemberType {
     Class,
     ClassDef,
+    ClassDefRange,
     Relationship,
     Foreignkey,
     Parameter,
@@ -53,7 +44,8 @@ pub enum MemberType {
     RelativeMethodCall,
     Query,
     Trigger,
-    Property,
+    RelativeProperty,
+    OrefProperty,
     OrefMethod,
     RoutineMethodCall,
     Routine,
@@ -61,6 +53,8 @@ pub enum MemberType {
     SystemMember,
     GlobalVariable,
     MethodDef,
+    Keyword,
+    Procedure,
 }
 
 /// DFS visitation state.
@@ -71,14 +65,61 @@ pub enum DfsState {
     Done,
 }
 
-/// Reference to a method implementation in a class (public or private).
-///
-/// Exactly one of `pub_id` or `priv_id` is expected to be `Some`, depending on visibility/type.
+/// Reference to a method implementation in a class.
 #[derive(Copy, Clone, Debug)]
 pub struct MethodRef {
     pub class: ClassId,
     pub id: MethodId,
     pub offset: Option<usize>,
+}
+
+/// Unresolved Reference to a method implementation in a class.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct UnresolvedMethodRef {
+    pub class: String,  // unresolved class name
+    pub method: String, // unresolved method name
+    pub offset: Option<usize>,
+    pub method_call_range: Range,
+}
+
+/// Reference to a parameter in a class.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ParameterRef {
+    pub class: ClassId,
+    pub id: ParameterId,
+}
+
+/// Reference to a property in a class.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PropertyRef {
+    pub class: ClassId,
+    pub id: PropertyId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Parameter {
+    /// If true, the Parameter cannot be overwritten by subclasses.
+    pub is_final: Option<bool>,
+    /// Parameter Name.
+    pub name: String,
+    /// Expected return type.
+    pub return_type: Option<TypeName>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Property {
+    /// Whether property is required or not.
+    pub required: bool,
+    /// Whether property is public or not.
+    pub is_public: bool,
+    /// If true, the property cannot be overwritten by subclasses.
+    pub is_final: Option<bool>,
+    /// Property Name.
+    pub name: String,
+    /// Whether property is multidimensional or not.
+    pub multidimensional: bool,
+    /// Expected return type.
+    pub return_type: Option<TypeName>,
 }
 
 impl PartialEq for MethodRef {
@@ -98,6 +139,7 @@ impl Hash for MethodRef {
         // offset intentionally ignored
     }
 }
+
 // TODO: UNIMPLEMENTED: foreignkey, relationships, storage, query, index, trigger, xdata, projection
 /// Semantic representation of a parsed ObjectScript class.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -105,33 +147,35 @@ pub struct Class {
     /// Class Name.
     pub name: String,
     /// Imported classes referenced by this class.
-    pub imports: Vec<ClassId>, // list of class names
+    pub imports: Vec<String>, // list of class names
     // format: Include (macro file name) ex: include hannah for macro file hannah.inc
     // pub include: Vec<String>, // include files are inherited by subclasses, include files bring in macros at compile time
     // pub include_gen: Vec<String>, // this specifies include files to be generated
     // if inheritance keyword == left, leftmost supersedes all (default)
     // if inheritancedirection == right, right supersedes
     /// Direct parent classes in the `Extends` list.
-    pub inherited_classes: Vec<ClassId>,
+    pub inherited_classes: Vec<String>,
     /// Inheritance conflict resolution direction (`left`, or `right`, default is `left`).
-    pub inheritance_direction: String,
+    pub inheritance_direction: Option<String>,
     /// Optional ProcedureBlock default for this class; If defined, methods will inherit this keyword if they don't specify it themselves.
     pub is_procedure_block: Option<bool>,
     /// Optional default Language keyword for this class.
     pub default_language: Option<Language>,
     /// Stores method name -> MethodRef for each method in this class.
     pub methods: HashMap<String, MethodRef>,
-    /// Stores property name -> id for each private property in this class.
-    pub private_properties: HashMap<String, PropertyId>,
-    /// Stores property name -> id for each public property in this class.
-    pub public_properties: HashMap<String, PropertyId>,
+    /// Stores property name -> id for each property in this class.
+    pub properties: HashMap<String, PropertyRef>,
     /// Stores parameter name -> id for each parameter in this class.
-    pub parameters: HashMap<String, ParameterId>,
+    pub parameters: HashMap<String, ParameterRef>,
     /// Whether this class entry is considered live/usable (e.g., false after removal).
     pub active: bool,
     /// Whether this representation is of a routine.
     pub is_rtn: bool,
     pub(crate) next_method_id: usize,
+    pub(crate) next_parameter_id: usize,
+    pub(crate) next_property_id: usize,
+    /// If true, this class and all of its members cannot be overwritten by subclasses.
+    pub is_final: Option<bool>,
 }
 
 /// Language keyword values supported for classes/methods.
@@ -141,15 +185,6 @@ pub enum Language {
     TSql,
     Python,
     ISpl,
-}
-
-/// Semantic representation of a class property declaration.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ClassProperty {
-    pub name: String,
-    pub property_type: Option<String>,
-    pub is_public: bool,
-    pub range: Range,
 }
 
 /// Semantic representation of a class parameter declaration.
@@ -162,12 +197,12 @@ pub struct ClassParameter {
 }
 
 /// Distinguishes instance methods from class methods.
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum MethodType {
     InstanceMethod,
     ClassMethod,
-    Procedure,
-    Subroutine,
+    Procedure(bool),
+    Subroutine(bool),
     Routine,
 }
 
@@ -184,7 +219,7 @@ pub struct Method {
     /// Class Method or Instance Method.
     pub method_type: MethodType,
     /// Expected return type.
-    pub return_type: Option<ReturnType>,
+    pub return_type: Option<TypeName>,
     /// Method Name.
     pub name: String,
     /// Stores variable name -> VariableRef for all variable definitions in this method.
@@ -198,7 +233,9 @@ pub struct Method {
     /// Stores CodeMode of method. If None, method defaults to Code.
     pub code_mode: CodeMode,
     /// Names declared in `PublicList(...)` of ProcedureBlocks.
-    pub public_variables_declared: Vec<String>,
+    pub public_variables_declared: HashSet<String>,
+    /// If true, this method cannot be overwritten by subclasses.
+    pub is_final: Option<bool>,
 }
 
 /// CodeMode keyword values supported for methods.
@@ -225,13 +262,19 @@ pub struct Variable {
     /// Variable name.
     pub name: String,
     /// Optional type of the argument if the variable originated from a method argument.
-    pub arg_type: Option<ReturnType>,
+    pub arg_type: Option<TypeName>,
     /// Whether variable is public or not.
     pub is_public: bool,
     /// True if variable is an instance of a class, false otherwise.
     pub is_oref: bool,
     /// None if not an oref. If an oref, String representing class it points to.
     pub cls: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TypeName {
+    pub ret_type: ReturnType,
+    pub parameters: Vec<String>,
 }
 
 /// Normalized return/type categories recognized.
@@ -254,6 +297,13 @@ pub enum ReturnType {
     HttpResponse,
     Other(String),
     SqlQuery,
+    ClassName,
+    CosCode,
+    CosIdentifier,
+    SqlIdentifier,
+    ConfigValue,
+    Variable,
+    Expression,
 }
 
 /// File type for a workspace document.
