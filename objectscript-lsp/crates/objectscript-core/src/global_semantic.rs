@@ -326,6 +326,11 @@ impl GlobalSemanticModel {
         self.methods.remove(method_ref)
     }
 
+    /// Removes `class` corresponding to `class_id`.
+    pub fn remove_class(&mut self, class_id: &ClassId) {
+        self.classes.remove(class_id);
+    }
+
     /// Removes  `property` corresponding to `PropertyRef` and returns it if it exists, None otherwise.
     pub fn remove_property(&mut self, property_ref: &PropertyRef) -> Option<Property> {
         self.property_defs.remove(property_ref);

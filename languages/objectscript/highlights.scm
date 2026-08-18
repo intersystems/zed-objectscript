@@ -5,6 +5,8 @@
 [
   (json_boolean_literal)
   (json_null_literal)
+  (false)
+  (true)
 ] @boolean
 
 (json_object_literal_pair
@@ -250,18 +252,6 @@
   (html_marker_reversed)
 ] @punctuation.special
 
-[
-  (line_comment_1)
-  (line_comment_2)
-  (line_comment_3)
-  (line_comment_4)
-  (block_comment)
-  (inline_comment)
-  (argumentless_inline_comment)
-  (pound_if_special_case_else)
-  (pound_if_special_case)
-] @comment
-
 (tag) @function
 
 "--" @operator
@@ -337,9 +327,8 @@
   (xdata_keyword)
   (xdata_keyword_mimetype)
   (property_keyword)
-] @attribute
+] @type.builtin
 
-(documatic_line) @comment.doc
 
 [
   (query_name)

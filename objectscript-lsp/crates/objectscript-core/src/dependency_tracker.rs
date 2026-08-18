@@ -30,6 +30,7 @@ impl Dependents {
         self.dependent_classes.get(class_id)
     }
 
+    // NOTE: direct subclasses must be up to date for this to work correctly.
     pub fn rebuild_transitive_subclasses(&mut self, class_id: ClassId) {
         let mut result = HashSet::new();
         let mut queue: VecDeque<ClassId> = VecDeque::new();

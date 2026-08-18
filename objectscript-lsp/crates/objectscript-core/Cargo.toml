@@ -6,6 +6,14 @@ authors = ["Hannah Kimura <hannah.kimura@intersystems.com>"]
 license = "MIT"
 description = "Language Server for ObjectScript"
 
+[features]
+update-bench = []
+
+[[bench]]
+name = "update_document"
+harness = false
+required-features = ["update-bench"]
+
 [dependencies]
 tower-lsp = "0.20.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "fs"] }
@@ -21,3 +29,6 @@ walkdir = "2.5.0"
 regex = "1.12.3"
 petgraph = "0.8.3"
 evalexpr = "13.1.0"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }

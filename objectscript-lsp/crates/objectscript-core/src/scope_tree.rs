@@ -235,9 +235,19 @@ impl ScopeTree {
         }
     }
 
+    /// Look up a private property symbol by name.
+    ///
+    /// returns `None` if it does not exist.
+    pub fn get_private_property_symbol(
+        &self,
+        property_ref: &PropertyRef,
+    ) -> Option<&PropertySymbol> {
+        self.private_property_defs.get(property_ref)
+    }
+
     /// Look up a private method symbol by name.
     ///
-    /// Logs a warning and returns `None` if it does not exist.
+    /// returns `None` if it does not exist.
     pub fn get_private_method_symbol(&self, method_ref: &MethodRef) -> Option<&MethodSymbol> {
         self.private_method_defs.get(method_ref)
     }

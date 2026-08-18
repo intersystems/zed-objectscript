@@ -5,6 +5,7 @@ use crate::scope_tree::ScopeTree;
 use regex::Regex;
 use std::collections::HashSet;
 use std::ops::Range as CoreRange;
+use std::sync::OnceLock;
 use tower_lsp::lsp_types::{Position, Range as LspRange, Url};
 use tree_sitter::{
     Language as TsLanguage, Node, Point, Query, QueryCursor, Range as TsRange, Range,
@@ -34,6 +35,40 @@ const XML_OBJECTSCRIPT_INJECTIONS_QUERY: &str = r#"
   (#set! injection.language "objectscript")
 )
 "#;
+
+const CLASS_NAME_QUERY: &str = "(class_definition (class_name (identifier) @classname))";
+
+fn cached_query(
+    query: &'static OnceLock<Query>,
+    language: TsLanguage,
+    source: &str,
+    name: &str,
+) -> &'static Query {
+    query.get_or_init(|| {
+        Query::new(&language, source)
+            .unwrap_or_else(|error| panic!("failed to compile {name} Tree-sitter query: {error}"))
+    })
+}
+
+fn class_name_query() -> &'static Query {
+    static QUERY: OnceLock<Query> = OnceLock::new();
+    cached_query(
+        &QUERY,
+        LANGUAGE_OBJECTSCRIPT_UDL.into(),
+        CLASS_NAME_QUERY,
+        "class name",
+    )
+}
+
+fn xml_objectscript_injections_query() -> &'static Query {
+    static QUERY: OnceLock<Query> = OnceLock::new();
+    cached_query(
+        &QUERY,
+        LANGUAGE_XML.into(),
+        XML_OBJECTSCRIPT_INJECTIONS_QUERY,
+        "XML ObjectScript injections",
+    )
+}
 
 /// Logs override resolution results for a method/superclass pair for debugging.
 pub fn print_statements_exit_method_overrides_fn(
@@ -343,24 +378,21 @@ pub fn get_member_name_and_range_from_root(
 /// Returns `None` if no class definition/name is found or if the byte range is invalid; prints a
 /// warning on unexpected/mismatched structure.
 fn get_class_name_from_root(content: &str, node: Node) -> Option<(Range, String)> {
-    let query_str = "(class_definition (class_name (identifier) @classname))";
-    let language: &TsLanguage = &LANGUAGE_OBJECTSCRIPT_UDL.into();
-    if let Ok(query) = Query::new(language, query_str) {
-        let mut cursor = QueryCursor::new();
-        let mut iter = cursor.matches(&query, node, content.as_bytes());
-        while let Some(query_match) = iter.next() {
-            let matched_node = query_match.captures[0].node; // this is the identifier node
-            let mut parent_node = matched_node.parent();
-            while let Some(parent) = parent_node {
-                if parent.kind() == "class_definition" {
-                    if let Some(class_name) =
-                        get_string_at_byte_range(content, matched_node.byte_range())
-                    {
-                        return Some((parent.range(), class_name));
-                    }
+    let query = class_name_query();
+    let mut cursor = QueryCursor::new();
+    let mut iter = cursor.matches(query, node, content.as_bytes());
+    while let Some(query_match) = iter.next() {
+        let matched_node = query_match.captures[0].node; // this is the identifier node
+        let mut parent_node = matched_node.parent();
+        while let Some(parent) = parent_node {
+            if parent.kind() == "class_definition" {
+                if let Some(class_name) =
+                    get_string_at_byte_range(content, matched_node.byte_range())
+                {
+                    return Some((parent.range(), class_name));
                 }
-                parent_node = parent.parent();
             }
+            parent_node = parent.parent();
         }
     }
     None
@@ -849,6 +881,33 @@ pub fn get_parameter_name(node: &Node, content: &str) -> Option<String> {
     get_string_at_byte_range(content, parameter_name_node.byte_range())
 }
 
+/// Given the dotted statement line, find the tag
+pub fn get_dotted_subroutine_info(
+    node: &Node,
+    content: &str,
+) -> Option<(String, Range, MethodType)> {
+    if let Some(dotted_statement_parent) = node.parent()
+        && let Some(tag_node) = node.named_child(0)
+        && let Some(method_name) = get_string_at_byte_range(content, tag_node.byte_range())
+    {
+        if dotted_statement_parent.kind() != "command_do" {
+            eprintln!(
+                "Error: Expected dotted statement node to have parent of kind command_do, but got {:?}",
+                dotted_statement_parent.kind()
+            );
+            return None;
+        }
+        return Some((
+            method_name,
+            dotted_statement_parent.range(),
+            MethodType::DottedSubroutine(true),
+        ));
+    }
+    eprintln!("Error: Expected dotted statement node to have a parent, but it didn't");
+
+    None
+}
+
 /// Given a statement node of a tag statement, get the range of the method it defines
 pub fn get_subroutine_info(node: &Node, content: &str) -> Option<(String, Range, MethodType)> {
     let mut is_public = true;
@@ -862,12 +921,10 @@ pub fn get_subroutine_info(node: &Node, content: &str) -> Option<(String, Range,
     }
     let Some(tag) = statement_type.named_child(0) else {
         eprintln!("Error: expected tag statement node to have child at node 0");
-        // curr_routine_child = routine_child.next_named_sibling();
         return None;
     };
 
     let Some(method_name) = get_string_at_byte_range(content, tag.byte_range()) else {
-        // curr_routine_child = routine_child.next_named_sibling();
         return None;
     };
 
@@ -1119,7 +1176,27 @@ pub fn get_routine_scope_node_range(node: Node, content: &str) -> (Point, Point)
 /// [Class, Relationship, Foreignkey, Parameter, Projection,Index,Xdata,Storage,Method, Query, Trigger]
 pub fn get_outer_type_from_identifier(node: &Node) -> Option<MemberType> {
     return match node.kind() {
-        "parameter_name" => Some(MemberType::Parameter),
+        "parameter_name" => {
+            let Some(parameter_name_parent) = node.parent() else {
+                eprintln!("Error: expected method_name node to have parent");
+                return None;
+            };
+            return match parameter_name_parent.kind() {
+                "oref_parameter" => {
+                    let Some(oref_parameter_parent) = parameter_name_parent.parent() else {
+                        eprintln!("Error: expected oref_parameter node to have parent");
+                        return None;
+                    };
+                    if oref_parameter_parent.kind() == "relative_dot_parameter" {
+                        Some(MemberType::RelativeParameter)
+                    } else {
+                        Some(MemberType::OrefParameter)
+                    }
+                }
+                "parameter" => Some(MemberType::ParameterDef),
+                _ => Some(MemberType::RelativeParameter),
+            };
+        }
         "projection_name" => Some(MemberType::Projection),
         "class_name" => {
             let Some(class_name_parent) = node.parent() else {
@@ -1146,12 +1223,13 @@ pub fn get_outer_type_from_identifier(node: &Node) -> Option<MemberType> {
                         return None;
                     };
                     if oref_property_parent.kind() == "relative_dot_property" {
-                        return Some(MemberType::RelativeProperty);
+                        Some(MemberType::RelativeProperty)
                     } else {
-                        return Some(MemberType::OrefProperty);
+                        Some(MemberType::OrefProperty)
                     }
                 }
-                _ => None,
+                "property" => Some(MemberType::PropertyDef),
+                _ => Some(MemberType::RelativeProperty),
             };
         }
         "relationship_name" => Some(MemberType::Relationship),
@@ -1230,6 +1308,13 @@ pub fn parse_line_ref(
             "objectscript_identifier" | "objectscript_identifier_special" => {
                 // this should be the subroutine name
                 method_name = get_string_at_byte_range(content, line_ref_child.byte_range());
+            }
+            "method_name" => {
+                if let Some(identifier) = line_ref_child.named_child(0) {
+                    method_name = get_string_at_byte_range(content, identifier.byte_range());
+                } else {
+                    method_name = get_string_at_byte_range(content, line_ref_child.byte_range());
+                }
             }
             "routine_ref" => {
                 if let Some(routine_name_node) =
@@ -1320,14 +1405,11 @@ pub fn collect_error_nodes<'tree>(root: Node<'tree>) -> Vec<Node<'tree>> {
 
 /// Extracts byte ranges of ObjectScript code embedded in XML `<Implementation>` CDATA sections.
 pub fn xml_objectscript_implementation_ranges(root: Node, content: &str) -> Vec<Range> {
-    let language = LANGUAGE_XML.into();
-    let Some(query) = Query::new(&language, XML_OBJECTSCRIPT_INJECTIONS_QUERY).ok() else {
-        return Vec::new();
-    };
+    let query = xml_objectscript_injections_query();
     let capture_names = query.capture_names();
     let mut cursor = QueryCursor::new();
     let mut ranges = Vec::new();
-    let mut matches = cursor.matches(&query, root, content.as_bytes());
+    let mut matches = cursor.matches(query, root, content.as_bytes());
 
     while let Some(query_match) = matches.next() {
         for capture in query_match.captures {

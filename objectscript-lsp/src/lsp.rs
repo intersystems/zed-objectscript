@@ -108,13 +108,8 @@ fn refactor_title(refactor_level: RefactorLevel, scope: &str) -> String {
 }
 
 fn selectable_document_refactor_levels(file_type: FileType) -> &'static [RefactorLevel] {
-    const ROUTINE_LEVELS: [RefactorLevel; 4] = [
+    const OBJECTSCRIPT_LEVELS: [RefactorLevel; 4] = [
         RefactorLevel::DoCommands,
-        RefactorLevel::Conditionals,
-        RefactorLevel::ForCommands,
-        RefactorLevel::All,
-    ];
-    const CLASS_LEVELS: [RefactorLevel; 3] = [
         RefactorLevel::Conditionals,
         RefactorLevel::ForCommands,
         RefactorLevel::All,
@@ -122,8 +117,8 @@ fn selectable_document_refactor_levels(file_type: FileType) -> &'static [Refacto
     const XML_LEVELS: [RefactorLevel; 0] = [];
 
     match file_type {
-        FileType::Routine => &ROUTINE_LEVELS,
-        FileType::Cls => &CLASS_LEVELS,
+        FileType::Routine => &OBJECTSCRIPT_LEVELS,
+        FileType::Cls => &OBJECTSCRIPT_LEVELS,
         FileType::Xml => &XML_LEVELS,
     }
 }
@@ -724,7 +719,19 @@ impl LanguageServer for BackendWrapper {
                 MemberType::MethodDef => {
                     definitions = {
                         let data = project.data.read();
-                        data.get_method_superclass(name_string, &class_id)
+                        data.get_method_superclass(name_string, &class_id, &uri)
+                    }
+                }
+                MemberType::PropertyDef => {
+                    definitions = {
+                        let data = project.data.read();
+                        data.get_property_superclass(name_string, &class_id, &uri)
+                    }
+                }
+                MemberType::ParameterDef => {
+                    definitions = {
+                        let data = project.data.read();
+                        data.get_parameter_superclass(name_string, &class_id)
                     }
                 }
                 MemberType::Class => {
@@ -733,12 +740,59 @@ impl LanguageServer for BackendWrapper {
                         data.get_class_definition(&name_string)
                     }
                 }
+                MemberType::RelativeParameter => {
+                    definitions = {
+                        let data = project.data.read();
+                        let parameter_ref = if let Some(p_ref) = data
+                            .parameter_defs
+                            .get(&class_name)
+                            .and_then(|parameters| parameters.get(&name_string))
+                        {
+                            p_ref
+                        } else {
+                            if let Some(p_ref) = data
+                                .override_index
+                                .effective_parameters
+                                .get(&class_name)
+                                .and_then(|parameters| parameters.get(&name_string))
+                            {
+                                eprintln!(
+                                    "Error: Parameter is defined in override index but NOT in parameter_defs"
+                                );
+                                p_ref
+                            } else {
+                                return Ok(None);
+                            }
+                        };
+                        data.get_parameter_definition(parameter_ref)
+                    }
+                }
                 MemberType::RelativeProperty => {
-                    // definitions = {
-                    //     let data = project.data.read();
-                    //
-                    // }
-                    // TODO
+                    definitions = {
+                        let data = project.data.read();
+                        let property_ref = if let Some(p_ref) = data
+                            .property_defs
+                            .get(&class_name)
+                            .and_then(|properties| properties.get(&name_string))
+                        {
+                            p_ref
+                        } else {
+                            if let Some(p_ref) = data
+                                .override_index
+                                .effective_properties
+                                .get(&class_name)
+                                .and_then(|properties| properties.get(&name_string))
+                            {
+                                eprintln!(
+                                    "Error: Property is defined in override index but NOT in property_defs"
+                                );
+                                p_ref
+                            } else {
+                                return Ok(None);
+                            }
+                        };
+                        data.get_property_definition(property_ref)
+                    }
                 }
                 MemberType::RelativeMethodCall => {
                     definitions = {
@@ -835,6 +889,11 @@ impl LanguageServer for BackendWrapper {
                                         content,
                                         class_name.clone(),
                                     );
+
+                                    eprintln!(
+                                        "ROUTINE NAME: {:?}, METHOD NAME: {:?}, OFFSET: {:?}",
+                                        &routine_name, &method_name, offset
+                                    );
                                     let method_ref = if let Some(m_ref) = data
                                         .method_defs
                                         .get(&routine_name)
@@ -842,6 +901,7 @@ impl LanguageServer for BackendWrapper {
                                     {
                                         m_ref
                                     } else {
+                                        eprintln!("Error: method ref not found");
                                         return Ok(None);
                                     };
                                     data.get_method_definition(method_ref, offset)
@@ -1318,7 +1378,14 @@ impl LanguageServer for BackendWrapper {
                                     .get(&class_name_str)
                                     .and_then(|methods| methods.get(&name_string))
                                 {
-                                    data.get_method_overrides(method_ref)
+                                    let Some(method_url) = data
+                                        .global_semantic_model
+                                        .get_class_symbol(&method_ref.class)
+                                        .map(|symbol| symbol.url.clone())
+                                    else {
+                                        return Ok(None);
+                                    };
+                                    data.get_method_overrides(method_ref, &method_url)
                                 } else {
                                     return Ok(None);
                                 }
@@ -1332,7 +1399,7 @@ impl LanguageServer for BackendWrapper {
                         if let Some(class) = data.global_semantic_model.get_class(&class_id)
                             && let Some(method_ref) = class.methods.get(&name_string)
                         {
-                            data.get_method_overrides(&method_ref)
+                            data.get_method_overrides(&method_ref, &uri)
                         } else {
                             return Ok(None);
                         }

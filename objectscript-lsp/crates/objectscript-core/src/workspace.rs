@@ -13,7 +13,7 @@ use crate::parse_structures::{
     UnresolvedMethodRef, VariableRef,
 };
 use crate::refactor::{
-    refactor_conditionals, refactor_for_statements, refactor_legacy_do_statements,
+    refactor_conditionals_in_document, refactor_for_statements, refactor_legacy_do_statements,
 };
 use crate::scope_structures::ScopeId;
 use crate::scope_tree::ScopeTree;
@@ -23,11 +23,34 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::path::PathBuf;
 use std::sync::OnceLock;
+#[cfg(feature = "update-bench")]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tower_lsp::lsp_types::Url;
 use tree_sitter::{Parser, Point, Range, Tree};
 use tree_sitter_objectscript::LANGUAGE_OBJECTSCRIPT_UDL;
 use tree_sitter_objectscript_routine::LANGUAGE_OBJECTSCRIPT_ROUTINE;
 use tree_sitter_xml::LANGUAGE_XML;
+
+#[cfg(feature = "update-bench")]
+static FULL_UPDATE_DOCUMENT_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(feature = "update-bench")]
+pub fn reset_full_update_document_call_count() {
+    FULL_UPDATE_DOCUMENT_CALLS.store(0, Ordering::Relaxed);
+}
+
+#[cfg(feature = "update-bench")]
+pub fn full_update_document_call_count() -> usize {
+    FULL_UPDATE_DOCUMENT_CALLS.load(Ordering::Relaxed)
+}
+
+#[cfg(not(feature = "update-bench"))]
+pub fn reset_full_update_document_call_count() {}
+
+#[cfg(not(feature = "update-bench"))]
+pub fn full_update_document_call_count() -> usize {
+    0
+}
 
 /// Holds Tree-sitter parsers for each supported ObjectScript file grammar.
 pub struct WorkspaceParsers {
@@ -189,7 +212,7 @@ impl ProjectData {
     /// `Refactor Legacy Dotted Do Statements`, `Refactor Legacy If/Else Statements`
     /// `Refactor Legacy For Statements`, or do all three actions.
     pub fn refactor_document(&self, url: &Url, refactor_level: RefactorLevel) -> Option<String> {
-        let (filetype, content) = {
+        let filetype = {
             let Some(document) = self.get_document(url) else {
                 eprintln!(
                     "Tried to refactor document {:?}, but it does not exist ",
@@ -197,36 +220,132 @@ impl ProjectData {
                 );
                 return None;
             };
-            (document.file_type.clone(), document.content.clone())
+            document.file_type.clone()
         };
         if filetype == FileType::Xml {
             return None;
         }
-        let updated_content = match refactor_level {
-            RefactorLevel::DoCommands => {
-                if filetype != FileType::Routine {
-                    return None;
-                }
-                refactor_legacy_do_statements(content.as_str())
-            }
-            RefactorLevel::Conditionals => {
-                refactor_conditionals(content.as_str(), filetype.clone())
-            }
-            RefactorLevel::ForCommands => {
-                refactor_for_statements(content.as_str(), filetype.clone())
-            }
+
+        let language = match filetype {
+            FileType::Routine => LANGUAGE_OBJECTSCRIPT_ROUTINE.into(),
+            FileType::Cls => LANGUAGE_OBJECTSCRIPT_UDL.into(),
+            FileType::Xml => return None,
+        };
+        let mut parser = Parser::new();
+        if parser.set_language(&language).is_err() {
+            eprintln!("Error: Failed to load refactor grammar");
+            return None;
+        }
+
+        self.refactor_document_with_parser(url, refactor_level, &mut parser)
+    }
+
+    fn legacy_do_refactor_context(
+        &self,
+        document: &Document,
+    ) -> (
+        HashSet<String>,
+        HashMap<String, (tree_sitter::Range, MethodType)>,
+    ) {
+        let mut current_class_methods = HashMap::new();
+        let Some(class_id) = document.class_id else {
+            return (HashSet::new(), current_class_methods);
+        };
+        let Some(class) = self.global_semantic_model.get_class(&class_id) else {
+            return (HashSet::new(), current_class_methods);
+        };
+        let routine_members = class.methods.keys().cloned().collect();
+        for (method_name, method_ref) in &class.methods {
+            let Some(method) = self.global_semantic_model.get_method(method_ref) else {
+                continue;
+            };
+            let range = self
+                .global_semantic_model
+                .get_method_symbol(method_ref)
+                .map(|method_symbol| method_symbol.location)
+                .or_else(|| {
+                    document
+                        .scope_tree
+                        .get_private_method_symbol(method_ref)
+                        .map(|method_symbol| method_symbol.location)
+                });
+            let Some(range) = range else {
+                continue;
+            };
+            current_class_methods.insert(method_name.clone(), (range, method.method_type));
+        }
+
+        (routine_members, current_class_methods)
+    }
+
+    fn refactor_document_with_parser(
+        &self,
+        url: &Url,
+        refactor_level: RefactorLevel,
+        parser: &mut Parser,
+    ) -> Option<String> {
+        let Some(document) = self.get_document(url) else {
+            eprintln!(
+                "Tried to refactor document {:?}, but it does not exist ",
+                url.path()
+            );
+            return None;
+        };
+        let (mut routine_members, current_class_methods) =
+            self.legacy_do_refactor_context(document);
+        if document.file_type == FileType::Xml {
+            return None;
+        }
+
+        let (updated_content, _) = match refactor_level {
+            RefactorLevel::DoCommands => refactor_legacy_do_statements(
+                document.content.as_str(),
+                document.file_type,
+                document.tree.clone(),
+                &document.scope_tree,
+                parser,
+                &mut routine_members,
+                &current_class_methods,
+            ),
+            RefactorLevel::Conditionals => refactor_conditionals_in_document(
+                document.content.as_str(),
+                document.file_type,
+                document.tree.clone(),
+                parser,
+            ),
+            RefactorLevel::ForCommands => refactor_for_statements(
+                document.content.as_str(),
+                document.file_type,
+                document.tree.clone(),
+                parser,
+            ),
             RefactorLevel::All => {
-                let content_after_do_refactor = if filetype == FileType::Routine {
-                    refactor_legacy_do_statements(content.as_str())
-                } else {
-                    content.clone()
-                };
-                let content_after_if_refactor =
-                    refactor_conditionals(content_after_do_refactor.as_str(), filetype.clone());
-                refactor_for_statements(content_after_if_refactor.as_str(), filetype.clone())
+                let (content_after_do_refactor, tree_after_do_refactor) =
+                    refactor_legacy_do_statements(
+                        document.content.as_str(),
+                        document.file_type,
+                        document.tree.clone(),
+                        &document.scope_tree,
+                        parser,
+                        &mut routine_members,
+                        &current_class_methods,
+                    );
+                let (content_after_if_refactor, tree_after_if_refactor) =
+                    refactor_conditionals_in_document(
+                        content_after_do_refactor.as_str(),
+                        document.file_type,
+                        tree_after_do_refactor,
+                        parser,
+                    );
+                refactor_for_statements(
+                    content_after_if_refactor.as_str(),
+                    document.file_type,
+                    tree_after_if_refactor,
+                    parser,
+                )
             }
         };
-        if content == updated_content.as_str() {
+        if document.content.as_str() == updated_content.as_str() {
             None
         } else {
             Some(updated_content)
@@ -298,6 +417,96 @@ impl ProjectData {
         }
     }
 
+    fn fully_remove_old_class_members(&mut self, class_id: &ClassId) {
+        let classes: HashSet<ClassId> = self.classes.values().copied().collect();
+        let (class_name, inherited_classes) =
+            if let Some(class) = self.global_semantic_model.get_class(&class_id) {
+                let class_name = class.name.clone();
+                let inherited_classes = class.inherited_classes.clone();
+                (class_name, inherited_classes)
+            } else {
+                return;
+            };
+
+        self.full_reset_class_inheritance(&class_name, *class_id, &inherited_classes);
+
+        if let Some(stale_methods) = self.method_defs.remove(&class_name) {
+            for (stale_method_name, stale_method_ref) in stale_methods {
+                if let Some(stale_node_index) = self.dependency_graph.get_node(stale_method_ref) {
+                    let method_caller_refs = self
+                        .dependency_graph
+                        .remove_incoming_calls_to_node(*stale_node_index);
+                    self.unresolved_method_references
+                        .entry((class_name.to_string(), stale_method_name.clone()))
+                        .or_insert(HashSet::new())
+                        .extend(method_caller_refs);
+                }
+                self.global_semantic_model.remove_method(&stale_method_ref);
+            }
+        }
+        if let Some(stale_properties) = self.property_defs.remove(&class_name) {
+            for (_, stale_property_ref) in stale_properties {
+                self.global_semantic_model
+                    .remove_property(&stale_property_ref);
+            }
+        }
+        if let Some(stale_parameters) = self.parameter_defs.remove(&class_name) {
+            for (_, stale_parameter_ref) in stale_parameters {
+                self.global_semantic_model
+                    .remove_parameter(&stale_parameter_ref);
+            }
+        }
+
+        if let Some(class) = self.global_semantic_model.get_mut_class(class_id) {
+            class.clear(class_name, false);
+        }
+
+        self.build_override_index_for_classes(&classes);
+    }
+
+    pub fn full_update_document(
+        &mut self,
+        url: Url,
+        content: &str,
+        tree: &Tree,
+        filetype: FileType,
+        class_id: ClassId,
+        class_name: String,
+        version: Option<i32>,
+        class_range: Range,
+    ) {
+        #[cfg(feature = "update-bench")]
+        FULL_UPDATE_DOCUMENT_CALLS.fetch_add(1, Ordering::Relaxed);
+
+        if filetype == FileType::Xml {
+            let document = Document::new(
+                content.to_string(),
+                tree.clone(),
+                filetype,
+                "XML".to_string(),
+                None,
+                ScopeTree::new(None),
+                version,
+            );
+            self.documents.insert(url, document);
+            return;
+        } else if filetype == FileType::Routine || filetype == FileType::Cls {
+            self.fully_remove_old_class_members(&class_id);
+            self.global_semantic_model.remove_class(&class_id);
+            self.documents.remove(&url);
+            self.add_document(
+                url,
+                content,
+                tree,
+                filetype,
+                Some(class_id),
+                class_name,
+                version,
+                class_range,
+            );
+        }
+    }
+
     /// Parse and register a new document, initializing semantic + symbol state for `.cls` files.
     ///
     /// For all ObjectScript files, this:
@@ -334,7 +543,7 @@ impl ProjectData {
             let Some(class_id) = class_id else {
                 return;
             };
-            if let Some(_) = self.get_document(&url) {
+            if self.documents.contains_key(&url) {
                 eprintln!("Error: Document already exists");
                 return;
             }
@@ -371,15 +580,14 @@ impl ProjectData {
                 node
             };
             // this is a new class, so some things returned from this function are not applicable
-            let (_, _, _, methods, properties, parameters, inherited_classes, _, _, _) = class
-                .build_class(
-                    starting_node,
-                    content,
-                    is_rtn,
-                    &class_id,
-                    class_range,
-                    &class_name,
-                );
+            let (_, _, methods, properties, parameters, inherited_classes, _) = class.build_class(
+                starting_node,
+                content,
+                is_rtn,
+                &class_id,
+                class_range,
+                &class_name,
+            );
 
             class.build_imports(tree, content);
 
@@ -474,7 +682,9 @@ impl ProjectData {
                             );
                         }
                     }
-                    MethodType::Subroutine(_) | MethodType::Routine => {
+                    MethodType::Subroutine(_)
+                    | MethodType::Routine
+                    | MethodType::DottedSubroutine(_) => {
                         (
                             _,
                             _,
@@ -794,6 +1004,26 @@ impl ProjectData {
         self.build_override_index_for_classes(&curr_class_hash);
     }
 
+    // in this scenario, the override index should be recomputed for ALL classes everytime, so no need to track which ones
+    fn full_reset_class_inheritance(
+        &mut self,
+        class_name: &str,
+        class_id: ClassId,
+        old_inherited_classes: &Vec<String>,
+    ) {
+        if let Some(direct_dependents) = self
+            .dependent_class_index
+            .direct_subclasses
+            .remove(&class_id)
+        {
+            self.unresolved_inheritance_references
+                .entry(class_name.to_string())
+                .or_insert(HashSet::new())
+                .extend(direct_dependents.clone());
+        }
+        self.remove_stale_class_from_dependent_classes(class_id, old_inherited_classes);
+    }
+
     fn update_class_inheritance(
         &mut self,
         old_class_name: &str,
@@ -821,16 +1051,53 @@ impl ProjectData {
 
             if new_class_is_final || class_name_changed {
                 // remove all references to the old class
-                self.unresolved_inheritance_references
-                    .entry(old_class_name.to_string())
-                    .or_insert(HashSet::new())
-                    .extend(current_dependents);
                 self.dependent_class_index
                     .dependent_classes
                     .remove(&class_id);
-                self.dependent_class_index
+                if let Some(direct_dependents) = self
+                    .dependent_class_index
                     .direct_subclasses
-                    .remove(&class_id);
+                    .remove(&class_id)
+                {
+                    if new_class_is_final && !class_name_changed {
+                        self.unresolved_inheritance_references
+                            .entry(new_class_name.to_string())
+                            .or_insert(HashSet::new())
+                            .extend(direct_dependents.clone());
+                    }
+                    if class_name_changed {
+                        self.unresolved_inheritance_references
+                            .entry(old_class_name.to_string())
+                            .or_insert(HashSet::new())
+                            .extend(direct_dependents);
+                    }
+                }
+            }
+            if is_final_changed && !new_class_is_final {
+                if class_name_changed
+                    && let Some(direct_dependents) = self
+                        .unresolved_inheritance_references
+                        .remove(old_class_name)
+                {
+                    self.dependent_class_index
+                        .direct_subclasses
+                        .entry(class_id)
+                        .or_insert(HashSet::new())
+                        .extend(direct_dependents);
+                    self.dependent_class_index
+                        .rebuild_transitive_subclasses(class_id);
+                } else if let Some(direct_dependents) = self
+                    .unresolved_inheritance_references
+                    .remove(new_class_name)
+                {
+                    self.dependent_class_index
+                        .direct_subclasses
+                        .entry(class_id)
+                        .or_insert(HashSet::new())
+                        .extend(direct_dependents);
+                    self.dependent_class_index
+                        .rebuild_transitive_subclasses(class_id);
+                }
             }
         }
         let mut curr_class_hash = HashSet::new();
@@ -872,7 +1139,9 @@ impl ProjectData {
                         .extend(method_caller_refs);
                     if let Some(new_class) = self.global_semantic_model.get_class(&class_id)
                         && let Some(new_method_ref) = new_class.get_method_ref(&old_method_name)
-                        && !old_method_is_final.unwrap_or(new_class.is_final.unwrap_or(false))
+                        && new_class
+                            .is_final
+                            .unwrap_or(old_method_is_final.unwrap_or(false))
                     {
                         self.resolve_unresolved_method(
                             &(new_class_name.to_string(), old_method_name),
@@ -999,14 +1268,59 @@ impl ProjectData {
         }
     }
 
+    fn remove_parameters_in_class(
+        &mut self,
+        class_name: &str,
+        classes_to_fully_recompute_inheritance: &HashSet<ClassId>,
+        subclasses_to_recompute_inheritance: &HashSet<ClassId>,
+        new_class_is_final: bool,
+    ) {
+        if let Some(parameter_refs) = self.parameter_defs.remove(class_name) {
+            for (parameter_name, parameter_ref) in parameter_refs {
+                self.global_semantic_model.remove_parameter(&parameter_ref);
+                self.compute_inheritance_override_index_parameter(
+                    classes_to_fully_recompute_inheritance,
+                    subclasses_to_recompute_inheritance,
+                    parameter_name.clone(),
+                    parameter_ref,
+                    false,
+                    new_class_is_final,
+                );
+            }
+        }
+    }
+
+    fn remove_properties_in_class(
+        &mut self,
+        class_name: &str,
+        classes_to_fully_recompute_inheritance: &HashSet<ClassId>,
+        subclasses_to_recompute_inheritance: &HashSet<ClassId>,
+        new_class_is_final: bool,
+    ) {
+        if let Some(property_refs) = self.property_defs.remove(class_name) {
+            for (property_name, property_ref) in property_refs {
+                self.global_semantic_model.remove_property(&property_ref);
+                self.compute_inheritance_override_index_property(
+                    classes_to_fully_recompute_inheritance,
+                    subclasses_to_recompute_inheritance,
+                    property_name.clone(),
+                    property_ref,
+                    false,
+                    new_class_is_final,
+                );
+            }
+        }
+    }
+
     fn remove_stale_methods(
         &mut self,
         stale_methods: &HashSet<String>,
         class_name: &str,
-        class_name_changed: bool,
         classes_to_fully_recompute_inheritance: &HashSet<ClassId>,
         subclasses_to_recompute_inheritance: &HashSet<ClassId>,
         new_class_is_final: bool,
+        methods_already_rebuilt: &mut HashSet<String>,
+        scope_tree: &mut ScopeTree,
     ) -> HashSet<MethodRef> {
         let mut stale_method_refs = HashSet::new();
         // first remove all stale members
@@ -1017,14 +1331,12 @@ impl ProjectData {
                 .get_mut(class_name)
                 .and_then(|methods| methods.remove(stale_method))
             {
-                if !class_name_changed
-                    && let Some(stale_node_index) = self.dependency_graph.get_node(stale_method_ref)
-                {
+                if let Some(stale_node_index) = self.dependency_graph.get_node(stale_method_ref) {
                     let method_caller_refs = self
                         .dependency_graph
                         .remove_incoming_calls_to_node(*stale_node_index);
                     if let Some(old_method) =
-                        self.global_semantic_model.get_method(&stale_method_ref)
+                        self.global_semantic_model.remove_method(&stale_method_ref)
                     {
                         let old_method_name = old_method.name.clone();
                         self.unresolved_method_references
@@ -1034,14 +1346,15 @@ impl ProjectData {
                         self.compute_inheritance_override_index_method(
                             classes_to_fully_recompute_inheritance,
                             subclasses_to_recompute_inheritance,
-                            old_method_name,
+                            old_method_name.clone(),
                             stale_method_ref,
                             false,
                             new_class_is_final,
                         );
+                        methods_already_rebuilt.insert(old_method_name);
+                        scope_tree.private_method_defs.remove(&stale_method_ref);
                     }
                 }
-                self.global_semantic_model.remove_method(&stale_method_ref);
                 stale_method_refs.insert(stale_method_ref);
                 for method_map in self.pub_var_defs.values_mut() {
                     method_map.remove(&stale_method_ref);
@@ -1049,6 +1362,44 @@ impl ProjectData {
             }
         }
         stale_method_refs
+    }
+
+    fn incremental_remove_stale_class_members(
+        &mut self,
+        stale_methods: &HashSet<String>,
+        new_class_name: &str,
+        old_class_name: &str,
+        classes_to_fully_recompute_inheritance: &HashSet<ClassId>,
+        subclasses_to_recompute_inheritance: &HashSet<ClassId>,
+        new_class_is_final: bool,
+        old_class_is_final: bool,
+        methods_already_rebuilt: &mut HashSet<String>,
+        scope_tree: &mut ScopeTree,
+    ) {
+        self.remove_stale_methods(
+            stale_methods,
+            new_class_name,
+            &classes_to_fully_recompute_inheritance,
+            &subclasses_to_recompute_inheritance,
+            new_class_is_final,
+            methods_already_rebuilt,
+            scope_tree,
+        );
+        // remove all property_defs and parameter defs for the class (will be rebuilt fully)
+        // note: already removed from scope tree because it was rebuilt and the old defs were not copied over for params/properties
+        self.remove_properties_in_class(
+            &old_class_name,
+            &classes_to_fully_recompute_inheritance,
+            &subclasses_to_recompute_inheritance,
+            old_class_is_final,
+        );
+
+        self.remove_parameters_in_class(
+            &old_class_name,
+            &classes_to_fully_recompute_inheritance,
+            &subclasses_to_recompute_inheritance,
+            old_class_is_final,
+        );
     }
 
     /// Returns true if successful, false otherwise
@@ -1062,7 +1413,7 @@ impl ProjectData {
         changed_ranges: Vec<Range>,
         new_class_name: String,
         new_class_range: Range,
-    ) -> bool {
+    ) {
         if file_type == FileType::Xml {
             let Some(document) = self.get_document_mut(&url) else {
                 generic_exit_statements("Error: document DNE for path: {:?}", url.path());
@@ -1076,7 +1427,7 @@ impl ProjectData {
                     Some(version),
                     new_class_range,
                 );
-                return true;
+                return;
             };
             document.version = Some(version);
             document.file_type = file_type;
@@ -1085,7 +1436,7 @@ impl ProjectData {
             document.class_name = new_class_name;
             document.class_id = None;
             document.scope_tree = ScopeTree::new(None);
-            return true;
+            return;
         } else if file_type == FileType::Routine || file_type == FileType::Cls {
             let is_rtn = if file_type == FileType::Routine {
                 true
@@ -1101,25 +1452,74 @@ impl ProjectData {
                 document.version = Some(version);
             }
 
-            let (old_class_id, old_class_name, old_is_final, old_inherited_classes, old_scope_tree) = {
+            let (
+                old_class_id,
+                old_class_name,
+                old_is_final,
+                old_inherited_classes,
+                old_scope_tree,
+                old_method_names,
+            ) = {
                 let Some(doc) = self.get_document(&url) else {
                     eprintln!(
                         "Error: Document for url {:?} DNE aborting update_document",
                         url.path()
                     );
-                    return false;
+                    let class_id = if let Some(id) = self.classes.get(&new_class_name) {
+                        *id
+                    } else {
+                        ClassId(self.global_semantic_model.next_id())
+                    };
+                    self.full_update_document(
+                        url,
+                        content,
+                        tree,
+                        file_type,
+                        class_id,
+                        new_class_name,
+                        Some(version),
+                        new_class_range,
+                    );
+                    return;
                 };
                 let Some(cls_id) = doc.class_id else {
                     eprintln!(
                         "Error: Class ID for document {:?} DNE aborting update_document",
                         doc
                     );
-                    return false;
+                    let class_id = if let Some(id) = self.classes.get(&new_class_name) {
+                        *id
+                    } else {
+                        ClassId(self.global_semantic_model.next_id())
+                    };
+                    self.full_update_document(
+                        url,
+                        content,
+                        tree,
+                        file_type,
+                        class_id,
+                        new_class_name,
+                        Some(version),
+                        new_class_range,
+                    );
+                    return;
                 };
                 let old_member_name = doc.class_name.clone();
                 let Some(class) = self.global_semantic_model.get_class(&cls_id) else {
-                    return false;
+                    self.full_update_document(
+                        url,
+                        content,
+                        tree,
+                        file_type,
+                        cls_id,
+                        new_class_name,
+                        Some(version),
+                        new_class_range,
+                    );
+                    return;
                 };
+
+                let old_method_names: HashSet<String> = class.methods.keys().cloned().collect();
 
                 (
                     cls_id,
@@ -1127,6 +1527,7 @@ impl ProjectData {
                     class.is_final.clone(),
                     class.inherited_classes.clone(),
                     doc.scope_tree.clone(),
+                    old_method_names,
                 )
             };
 
@@ -1134,18 +1535,25 @@ impl ProjectData {
             // returned results to update the global semantic model/ local semantic model/ scope tree
             let (
                 inheritance_changed,
-                class_name_changed,
                 stale_methods,
                 new_methods,
                 properties_already_rebuilt,
                 parameters_already_rebuilt,
                 new_inherited_classes,
                 all_methods,
-                stale_properties,
-                stale_parameters,
             ) = {
                 let Some(class) = self.global_semantic_model.get_mut_class(&old_class_id) else {
-                    return false;
+                    self.full_update_document(
+                        url,
+                        content,
+                        tree,
+                        file_type,
+                        old_class_id,
+                        new_class_name,
+                        Some(version),
+                        new_class_range,
+                    );
+                    return;
                 };
                 class.build_imports(tree, content);
                 class.build_class(
@@ -1157,6 +1565,10 @@ impl ProjectData {
                     &new_class_name,
                 )
             };
+
+            let all_methods_set: HashSet<String> = all_methods.keys().cloned().collect();
+            let total_methods: HashSet<String> =
+                old_method_names.union(&all_methods_set).cloned().collect();
             // update class symbol and class ref
             if let Some(class_symbol) = self
                 .global_semantic_model
@@ -1177,6 +1589,7 @@ impl ProjectData {
                 scope_tree.copy_method_scope(&old_scope, &old_scope_tree);
             }
             scope_tree.private_method_defs = old_scope_tree.private_method_defs;
+            // NOTE: property defs are never copied over because they are fully rebuilt
 
             // rebuild keywords for class (is_procedure, is_final, language)
             self.rebuild_keyword_inheritance_for_class(&old_class_id);
@@ -1185,7 +1598,17 @@ impl ProjectData {
                 if let Some(class) = self.global_semantic_model.get_class(&old_class_id) {
                     (class.is_final, class.is_procedure_block)
                 } else {
-                    return false;
+                    self.full_update_document(
+                        url,
+                        content,
+                        tree,
+                        file_type,
+                        old_class_id,
+                        new_class_name,
+                        Some(version),
+                        new_class_range,
+                    );
+                    return;
                 }
             };
             // classes to recompute inheritance includes all classes that
@@ -1213,24 +1636,16 @@ impl ProjectData {
                 .cloned()
                 .collect();
 
-            let stale_method_refs = self.remove_stale_methods(
+            self.incremental_remove_stale_class_members(
                 &stale_methods,
                 &new_class_name,
-                class_name_changed,
+                &old_class_name,
                 &classes_to_fully_recompute_inheritance,
                 &subclasses_to_recompute_inheritance,
                 new_class_is_final.unwrap_or(false),
-            );
-
-            // remove all property_defs and parameter defs for the class (will be rebuilt fully)
-            self.property_defs.remove(&new_class_name);
-            self.parameter_defs.remove(&new_class_name);
-            // remove stale methods, properties, and parameters in gsm and lsm
-            self.global_semantic_model.incremental_reset_doc_semantics(
-                &old_class_id,
-                stale_method_refs,
-                stale_properties,
-                stale_parameters,
+                old_is_final.unwrap_or(false),
+                &mut methods_already_rebuilt,
+                &mut scope_tree,
             );
 
             let mut unresolved_orefs = HashMap::new();
@@ -1299,7 +1714,9 @@ impl ProjectData {
                             );
                         }
                     }
-                    MethodType::Subroutine(_) | MethodType::Routine => {
+                    MethodType::Subroutine(_)
+                    | MethodType::Routine
+                    | MethodType::DottedSubroutine(_) => {
                         (
                             _,
                             _,
@@ -1590,7 +2007,9 @@ impl ProjectData {
                                         );
                                     }
                                 }
-                                MethodType::Subroutine(_) | MethodType::Routine => {
+                                MethodType::Subroutine(_)
+                                | MethodType::Routine
+                                | MethodType::DottedSubroutine(_) => {
                                     (
                                         method_is_final_changed,
                                         method_is_public_changed,
@@ -1745,10 +2164,20 @@ impl ProjectData {
                 }
             }
             let Some(doc) = self.get_document_mut(&url) else {
-                return false;
+                self.full_update_document(
+                    url,
+                    content,
+                    tree,
+                    file_type,
+                    old_class_id,
+                    new_class_name,
+                    Some(version),
+                    new_class_range,
+                );
+                return;
             };
             doc.scope_tree = scope_tree;
-            for (method_name, _) in all_methods {
+            for method_name in total_methods {
                 if methods_already_rebuilt.contains(&method_name) {
                     continue;
                 }
@@ -1766,9 +2195,24 @@ impl ProjectData {
                 }
             }
 
-            return true;
+            return;
         }
-        return false;
+        let class_id = if let Some(id) = self.classes.get(&new_class_name) {
+            *id
+        } else {
+            ClassId(self.global_semantic_model.next_id())
+        };
+        self.full_update_document(
+            url,
+            content,
+            tree,
+            file_type,
+            class_id,
+            new_class_name,
+            Some(version),
+            new_class_range,
+        );
+        return;
     }
 
     /// Resolves oref method references for a given method. Searches local scopes, parent scopes,
@@ -1800,6 +2244,7 @@ impl ProjectData {
                     .contains(&oref_name.to_string())
                     || method.method_type == MethodType::Routine
                     || matches!(method.method_type, MethodType::Subroutine(_))
+                    || matches!(method.method_type, MethodType::DottedSubroutine(_))
             } else {
                 false
             };
@@ -2978,6 +3423,55 @@ impl ProjectData {
         self.documents.get_mut(url)
     }
 
+    /// Returns the `Url` and `Range` that point to the parameter location for `parameter_name`
+    pub fn get_parameter_definition(&self, parameter_ref: &ParameterRef) -> Vec<(Url, Range)> {
+        let mut locations = Vec::new();
+        if let Some(cls_sym) = self
+            .global_semantic_model
+            .get_class_symbol(&parameter_ref.class)
+            && let Some(parameter_symbol) = self
+                .global_semantic_model
+                .get_parameter_symbol(parameter_ref)
+        {
+            locations.push((cls_sym.url.clone(), parameter_symbol.location));
+            return locations;
+        } else {
+            eprintln!(
+                "Error: failed to find either class symbol/document/parameter definition, aborting (get_parameter_definition)"
+            );
+        }
+        return locations;
+    }
+
+    /// Returns the `Url` and `Range` that point to the property location for `property_name`
+    pub fn get_property_definition(&self, property_ref: &PropertyRef) -> Vec<(Url, Range)> {
+        let mut locations = Vec::new();
+        if let Some(cls_sym) = self
+            .global_semantic_model
+            .get_class_symbol(&property_ref.class)
+            && let Some(cls_doc) = self.get_document(&cls_sym.url)
+        {
+            if let Some(property_symbol) =
+                self.global_semantic_model.get_property_symbol(property_ref)
+            {
+                locations.push((cls_sym.url.clone(), property_symbol.location));
+                return locations;
+            } else if let Some(property_symbol) = cls_doc
+                .scope_tree
+                .get_private_property_symbol(&property_ref)
+            {
+                locations.push((cls_sym.url.clone(), property_symbol.location));
+                return locations;
+            }
+        } else {
+            eprintln!(
+                "Error: failed to find class symbol or document, aborting (get_property_definition)"
+            );
+        }
+
+        return locations;
+    }
+
     /// Returns the `Url` and `Range` that point to the method location for `method_name`
     pub fn get_method_definition(
         &self,
@@ -2991,7 +3485,24 @@ impl ProjectData {
             && let Some(cls_doc) = self.get_document(&cls_sym.url)
         {
             if let Some(method_symbol) = self.global_semantic_model.get_method_symbol(method_ref) {
-                locations.push((method_symbol.url.clone(), method_symbol.location));
+                let sym_range = if let Some(offset) = offset {
+                    let content = &cls_doc.content;
+                    let new_start_point = Point {
+                        row: method_symbol.location.start_point.row + offset,
+                        column: method_symbol.location.start_point.column,
+                    };
+                    let new_start_byte = point_to_byte(content, new_start_point);
+                    let new_range = Range {
+                        start_byte: new_start_byte,
+                        start_point: new_start_point,
+                        end_byte: new_start_byte,
+                        end_point: new_start_point,
+                    };
+                    new_range
+                } else {
+                    method_symbol.location
+                };
+                locations.push((cls_sym.url.clone(), sym_range));
                 return locations;
             } else if let Some(method_symbol) =
                 cls_doc.scope_tree.get_private_method_symbol(&method_ref)
@@ -3003,16 +3514,11 @@ impl ProjectData {
                         column: method_symbol.location.start_point.column,
                     };
                     let new_start_byte = point_to_byte(content, new_start_point);
-                    let new_end_point = Point {
-                        row: method_symbol.location.end_point.row + offset,
-                        column: method_symbol.location.end_point.column,
-                    };
-                    let new_end_byte = point_to_byte(content, new_end_point);
                     let new_range = Range {
                         start_byte: new_start_byte,
                         start_point: new_start_point,
-                        end_byte: new_end_byte,
-                        end_point: new_end_point,
+                        end_byte: new_start_byte,
+                        end_point: new_start_point,
                     };
                     new_range
                 } else {
@@ -3021,6 +3527,10 @@ impl ProjectData {
                 locations.push((cls_sym.url.clone(), sym_range));
                 return locations;
             }
+        } else {
+            eprintln!(
+                "Error: failed to find class symbol or document, aborting (get_method_definition"
+            );
         }
 
         return locations;
@@ -3388,9 +3898,14 @@ impl ProjectData {
         &self,
         method_name: String,
         class_id: &ClassId,
+        url: &Url,
     ) -> Vec<(Url, Range)> {
         let method_name_str = method_name.as_str();
+
         let mut locations = Vec::new();
+        let Some(document) = self.get_document(url) else {
+            return locations;
+        };
         let Some(class) = self.global_semantic_model.get_class(&class_id) else {
             eprintln!("Error: Class struct DNE, aborting (get_method_superclass)",);
             return locations;
@@ -3416,6 +3931,109 @@ impl ProjectData {
                 locations.push((
                     superclass_method_symbol.url.clone(),
                     superclass_method_symbol.location,
+                ));
+            } else if let Some(superclass_method_symbol) = document
+                .scope_tree
+                .get_private_method_symbol(superclass_method_ref)
+            {
+                locations.push((
+                    superclass_method_symbol.url.clone(),
+                    superclass_method_symbol.location,
+                ));
+            }
+        }
+        return locations;
+    }
+
+    /// Returns the location of the superclass parameter that the given subclass parameter parameter_overrides
+    pub fn get_parameter_superclass(
+        &self,
+        parameter_name: String,
+        class_id: &ClassId,
+    ) -> Vec<(Url, Range)> {
+        let parameter_name_str = parameter_name.as_str();
+        let mut locations = Vec::new();
+        let Some(class) = self.global_semantic_model.get_class(&class_id) else {
+            eprintln!("Error: Class struct DNE, aborting (get_parameter_superclass)",);
+            return locations;
+        };
+        if let Some(parameter_ref) = class.parameters.get(parameter_name_str) {
+            let superclass_parameter_ref = match self
+                .override_index
+                .parameter_overrides
+                .get(parameter_ref)
+            {
+                Some(v) => v,
+                None => {
+                    eprintln!(
+                        "Info: Parameter {:?} in subclass {:?} doesn't override any superclass parameter",
+                        parameter_name_str, class.name
+                    );
+                    return locations;
+                }
+            };
+
+            if let Some(superclass_parameter_symbol) = self
+                .global_semantic_model
+                .get_parameter_symbol(superclass_parameter_ref)
+            {
+                locations.push((
+                    superclass_parameter_symbol.url.clone(),
+                    superclass_parameter_symbol.location,
+                ));
+            }
+        }
+        return locations;
+    }
+
+    /// Returns the location of the superclass property that the given subclass property property_overrides
+    pub fn get_property_superclass(
+        &self,
+        property_name: String,
+        class_id: &ClassId,
+        url: &Url,
+    ) -> Vec<(Url, Range)> {
+        let property_name_str = property_name.as_str();
+        let mut locations = Vec::new();
+        let Some(class) = self.global_semantic_model.get_class(&class_id) else {
+            eprintln!("Error: Class struct DNE, aborting (get_property_superclass)",);
+            return locations;
+        };
+        let Some(document) = self.get_document(url) else {
+            return locations;
+        };
+
+        if let Some(property_ref) = class.properties.get(property_name_str) {
+            let superclass_property_ref = match self
+                .override_index
+                .property_overrides
+                .get(property_ref)
+            {
+                Some(v) => v,
+                None => {
+                    eprintln!(
+                        "Info: Property {:?} in subclass {:?} doesn't override any superclass property",
+                        property_name_str, class.name
+                    );
+                    return locations;
+                }
+            };
+
+            if let Some(superclass_property_symbol) = self
+                .global_semantic_model
+                .get_property_symbol(superclass_property_ref)
+            {
+                locations.push((
+                    superclass_property_symbol.url.clone(),
+                    superclass_property_symbol.location,
+                ));
+            } else if let Some(superclass_property_symbol) = document
+                .scope_tree
+                .get_private_property_symbol(superclass_property_ref)
+            {
+                locations.push((
+                    superclass_property_symbol.url.clone(),
+                    superclass_property_symbol.location,
                 ));
             }
         }
@@ -3460,8 +4078,23 @@ impl ProjectData {
     /// `override_index.method_overridden_by` to find overriding methods (public or private) in subclasses.
     ///
     /// Each returned `(Url, Range)` points to the overriding method's definition location.
-    pub fn get_method_overrides(&self, method_ref: &MethodRef) -> Vec<(Url, Range)> {
+    pub fn get_method_overrides(&self, method_ref: &MethodRef, url: &Url) -> Vec<(Url, Range)> {
         let mut locations = Vec::new();
+        let Some(document) = self.get_document(url) else {
+            eprintln!(
+                "Error: Document {:?} DNE, aborting (get_method_overrides)",
+                url.path()
+            );
+            return locations;
+        };
+        if document.class_id != Some(method_ref.class) {
+            eprintln!(
+                "Error: MethodRef {:?} does not belong to document {:?}, aborting (get_method_overrides)",
+                method_ref,
+                url.path()
+            );
+            return locations;
+        }
         // ---- overridden-by list ----
         let method_overrides = match self.override_index.method_overridden_by.get(method_ref) {
             Some(v) => v,
@@ -3713,12 +4346,67 @@ impl ProjectState {
 
     /// Wrapper to refactor a document inside the inner `ProjectData`
     pub fn refactor_document(&self, url: &Url, refactor_level: RefactorLevel) -> Option<String> {
-        self.data.read().refactor_document(url, refactor_level)
+        let file_type = {
+            let data = self.data.read();
+            data.get_document(url)?.file_type.clone()
+        };
+        let mut parser = match file_type {
+            FileType::Routine => self.parsers.routine.lock(),
+            FileType::Cls => self.parsers.cls.lock(),
+            FileType::Xml => return None,
+        };
+        self.data
+            .read()
+            .refactor_document_with_parser(url, refactor_level, &mut parser)
     }
 
     /// Wrapper to refactor a workspace inside the inner `ProjectData`
     pub fn refactor(&self, refactor_level: RefactorLevel) -> Vec<(String, Url)> {
-        self.data.read().refactor(refactor_level)
+        let candidates: Vec<(Url, FileType)> = {
+            let data = self.data.read();
+            data.documents
+                .iter()
+                .filter_map(|(url, document)| {
+                    if document.file_type == FileType::Xml {
+                        return None;
+                    }
+                    if refactor_level == RefactorLevel::DoCommands
+                        && document.file_type != FileType::Routine
+                    {
+                        return None;
+                    }
+                    Some((url.clone(), document.file_type.clone()))
+                })
+                .collect()
+        };
+
+        let mut changed = Vec::new();
+        for (url, file_type) in candidates {
+            let refactored = match file_type {
+                FileType::Routine => {
+                    let mut parser = self.parsers.routine.lock();
+                    self.data.read().refactor_document_with_parser(
+                        &url,
+                        refactor_level,
+                        &mut parser,
+                    )
+                }
+                FileType::Cls => {
+                    let mut parser = self.parsers.cls.lock();
+                    self.data.read().refactor_document_with_parser(
+                        &url,
+                        refactor_level,
+                        &mut parser,
+                    )
+                }
+                FileType::Xml => None,
+            };
+            let Some(refactored) = refactored else {
+                continue;
+            };
+            changed.push((refactored, url));
+        }
+        changed
     }
 
     /// Return the project root path, if initialized.

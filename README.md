@@ -6,10 +6,11 @@ An [ObjectScript](https://docs.intersystems.com/latest/csp/docbook/DocBook.UI.Pa
 
 # Introduction
 
-This Zed extension uses the [tree-sitter-objectscript](https://github.com/intersystems/tree-sitter-objectscript) grammars and the `objectscript-lsp` crate (local to this repo) to provide syntax highlighting, code injections, and language support for `.cls`, `.mac`, `.rtn`, `.inc`, `.int` and `.xml` files containing ObjectScript.  Install the following extensions below to get syntax highlighting for any code injected into objectscript that is `sql` or `html`. 
+This Zed extension uses the [tree-sitter-objectscript](https://github.com/intersystems/tree-sitter-objectscript) grammars and the `objectscript-lsp` crate (local to this repo) to provide syntax highlighting, code injections, and language support for `.cls`, `.mac`, `.rtn`, `.inc`, `.int` and `.xml` files containing ObjectScript.  Install the following extensions below to get syntax highlighting for any code injected into objectscript that is `sql`, `html`, or special comments (TODO, NOTE, etc). 
 
 - [SQL](https://zed.dev/extensions/sql)
 - [HTML](https://zed.dev/extensions/html)
+- [Comment](https://zed.dev/extensions/comment)
 
 The current features supported in the `ObjectScript language server` are `goto_definition`, `goto_implementation`, `refactor`, and `diagnostics`. These features are described in detail in the `objectscript-lsp/documentation/features` folder.
 

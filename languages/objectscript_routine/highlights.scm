@@ -253,13 +253,6 @@
 ] @punctuation.special
 
 [
-  (line_comment_1)
-  (line_comment_2)
-  (line_comment_3)
-  (line_comment_4)
-  (block_comment)
-  (inline_comment)
-  (argumentless_inline_comment)
   (pound_if_special_case_else)
   (pound_if_special_case)
 ] @comment

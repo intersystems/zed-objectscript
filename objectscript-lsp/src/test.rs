@@ -1,23 +1,83 @@
 #[cfg(test)]
 mod tests {
     use crate::backend_testing::BackendTester;
-    use objectscript_core::common::get_keyword_and_value;
-    use objectscript_core::parse_structures::{FileType, Language, RefactorLevel, VariableRef};
-    use objectscript_core::refactor::{refactor_conditionals, refactor_legacy_do_statements};
-    use objectscript_core::workspace::ProjectState;
+    use objectscript_core::common::{get_keyword_and_value, parse_line_ref};
+    use objectscript_core::parse_structures::{
+        FileType, Language, MethodRef, RefactorLevel, VariableRef,
+    };
+    use objectscript_core::refactor::refactor_conditionals_in_document;
+    use objectscript_core::workspace::{ProjectData, ProjectState};
     use std::collections::HashSet;
     use std::env;
     use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
     use tower_lsp::lsp_types::Url;
     use tree_sitter::{Parser, Point, Range};
+    use tree_sitter_objectscript::LANGUAGE_OBJECTSCRIPT_UDL;
+    use tree_sitter_objectscript_playground::LANGUAGE_OBJECTSCRIPT;
     use tree_sitter_objectscript_routine::LANGUAGE_OBJECTSCRIPT_ROUTINE;
 
-    fn parse_routine(code: &str) -> tree_sitter::Tree {
+    fn new_parser(language: tree_sitter::Language, name: &str) -> Mutex<Parser> {
         let mut parser = Parser::new();
         parser
-            .set_language(&LANGUAGE_OBJECTSCRIPT_ROUTINE.into())
-            .expect("failed to load objectscript grammar");
-        parser.parse(code, None).expect("parse returned None")
+            .set_language(&language)
+            .unwrap_or_else(|_| panic!("failed to load {name} grammar"));
+        Mutex::new(parser)
+    }
+
+    fn parser_for_file_type(file_type: FileType) -> &'static Mutex<Parser> {
+        static ROUTINE_PARSER: OnceLock<Mutex<Parser>> = OnceLock::new();
+        static CLS_PARSER: OnceLock<Mutex<Parser>> = OnceLock::new();
+        static OBJECTSCRIPT_PARSER: OnceLock<Mutex<Parser>> = OnceLock::new();
+
+        match file_type {
+            FileType::Routine => ROUTINE_PARSER
+                .get_or_init(|| new_parser(LANGUAGE_OBJECTSCRIPT_ROUTINE.into(), "routine")),
+            FileType::Cls => {
+                CLS_PARSER.get_or_init(|| new_parser(LANGUAGE_OBJECTSCRIPT_UDL.into(), "UDL"))
+            }
+            FileType::Xml => OBJECTSCRIPT_PARSER
+                .get_or_init(|| new_parser(LANGUAGE_OBJECTSCRIPT.into(), "ObjectScript")),
+        }
+    }
+
+    fn with_refactor_parser<T>(file_type: FileType, f: impl FnOnce(&mut Parser) -> T) -> T {
+        let mut parser = parser_for_file_type(file_type)
+            .lock()
+            .expect("test parser mutex poisoned");
+        f(&mut parser)
+    }
+
+    fn parse_for_file_type(
+        code: &str,
+        file_type: FileType,
+        parser: &mut Parser,
+    ) -> tree_sitter::Tree {
+        parser
+            .parse(code, None)
+            .unwrap_or_else(|| panic!("parse returned None for {file_type:?}"))
+    }
+
+    fn parse_routine(code: &str) -> tree_sitter::Tree {
+        with_refactor_parser(FileType::Routine, |parser| {
+            parse_for_file_type(code, FileType::Routine, parser)
+        })
+    }
+
+    fn refactor_conditionals_for_test(input: &str, file_type: FileType) -> String {
+        with_refactor_parser(file_type, |parser| {
+            let tree = parse_for_file_type(input, file_type, parser);
+            let (updated, _) = refactor_conditionals_in_document(input, file_type, tree, parser);
+            updated
+        })
+    }
+
+    fn method_owner_url(project_data: &ProjectData, method_ref: &MethodRef) -> Url {
+        project_data
+            .global_semantic_model
+            .get_class_symbol(&method_ref.class)
+            .map(|symbol| symbol.url.clone())
+            .expect("method owner class symbol should exist")
     }
 
     async fn setup_backend_and_workspace(project_root: PathBuf) -> (BackendTester, Url) {
@@ -512,8 +572,7 @@ mod tests {
         let test_mac_url = Url::from_file_path(&test_mac_path).unwrap();
         let (backend, uri) = setup_backend_and_workspace(test_route).await;
         let project_state = backend.get_project(&uri).expect("missing project state");
-        let project_data = project_state.data.read();
-        let refactored = project_data
+        let refactored = project_state
             .refactor(RefactorLevel::DoCommands)
             .into_iter()
             .find_map(|(content, url)| (url == test_mac_url).then_some(content))
@@ -537,8 +596,7 @@ mod tests {
         let test_mac_url = Url::from_file_path(&test_mac_path).unwrap();
         let (backend, uri) = setup_backend_and_workspace(test_route).await;
         let project_state = backend.get_project(&uri).expect("missing project state");
-        let project_data = project_state.data.read();
-        let refactored = project_data
+        let refactored = project_state
             .refactor(RefactorLevel::DoCommands)
             .into_iter()
             .find_map(|(content, url)| (url == test_mac_url).then_some(content))
@@ -562,8 +620,7 @@ mod tests {
         let test_mac_url = Url::from_file_path(&test_mac_path).unwrap();
         let (backend, uri) = setup_backend_and_workspace(routines_root).await;
         let project_state = backend.get_project(&uri).expect("missing project state");
-        let project_data = project_state.data.read();
-        let refactored = project_data
+        let refactored = project_state
             .refactor(RefactorLevel::DoCommands)
             .into_iter()
             .find_map(|(content, url)| (url == test_mac_url).then_some(content))
@@ -588,8 +645,7 @@ mod tests {
 
         let (backend, uri) = setup_backend_and_workspace(routines_root).await;
         let project_state = backend.get_project(&uri).expect("missing project state");
-        let project_data = project_state.data.read();
-        let refactored = project_data
+        let refactored = project_state
             .refactor(RefactorLevel::DoCommands)
             .into_iter()
             .find_map(|(content, url)| (url == test_mac_url).then_some(content))
@@ -655,7 +711,12 @@ after
     quit
 "#;
 
-        let actual = refactor_legacy_do_statements(input);
+        let state = ProjectState::new();
+        let uri = Url::parse("file:///tmp/refactors-old-dotted-do.mac").unwrap();
+        state.handle_document_opened(uri.clone(), input.to_string(), FileType::Routine, 1);
+        let actual = state
+            .refactor_document(&uri, RefactorLevel::DoCommands)
+            .expect("expected legacy do refactor to change content");
         assert_eq!(actual, expected);
     }
 
@@ -677,7 +738,7 @@ check()
  quit
 "#;
 
-        let actual = refactor_conditionals(input, FileType::Routine);
+        let actual = refactor_conditionals_for_test(input, FileType::Routine);
         assert_eq!(actual, expected);
     }
 
@@ -701,7 +762,81 @@ check()
  quit
 "#;
 
-        let actual = refactor_conditionals(input, FileType::Routine);
+        let actual = refactor_conditionals_for_test(input, FileType::Routine);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn refactors_old_if_in_cls_method_into_braced_block() {
+        let input = r#"Class Bench.Refactor
+{
+Method Test()
+{
+ i x = 2 set y = 5 set z = 6
+ quit
+}
+}
+"#;
+        let expected = r#"Class Bench.Refactor
+{
+Method Test()
+{
+ i x = 2 {
+    set y = 5
+    set z = 6
+ }
+ quit
+}
+}
+"#;
+
+        let actual = refactor_conditionals_for_test(input, FileType::Cls);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn refactors_old_if_else_in_cls_method_into_braced_blocks() {
+        let input = r#"Class Bench.Refactor
+{
+Method Test()
+{
+ i x = 2 set y = 5
+ e  set z = 6
+ quit
+}
+}
+"#;
+        let expected = r#"Class Bench.Refactor
+{
+Method Test()
+{
+ i x = 2 {
+    set y = 5
+ } else {
+    set z = 6
+ }
+ quit
+}
+}
+"#;
+
+        let actual = refactor_conditionals_for_test(input, FileType::Cls);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn refactors_old_if_in_xml_objectscript_content_with_playground_grammar() {
+        let input = r#" i x = 2 set y = 5 set z = 6
+ quit
+"#;
+        let expected = r#" i x = 2 {
+    set y = 5
+    set z = 6
+ }
+ quit
+"#;
+
+        let actual = refactor_conditionals_for_test(input, FileType::Xml);
         assert_eq!(actual, expected);
     }
 
@@ -721,7 +856,8 @@ check()
             .get("SuperClass")
             .and_then(|m| m.get("newVarChange"))
             .unwrap();
-        let locations = project_data.get_method_overrides(method_ref);
+        let method_url = method_owner_url(&project_data, method_ref);
+        let locations = project_data.get_method_overrides(method_ref, &method_url);
         assert_eq!(locations.len(), 2);
         let paths: HashSet<String> = locations
             .into_iter()
@@ -747,7 +883,8 @@ check()
             .get("Demo.NavSuper")
             .and_then(|m| m.get("Overridden"))
             .unwrap();
-        let locations = project_data.get_method_overrides(method_ref);
+        let method_url = method_owner_url(&project_data, method_ref);
+        let locations = project_data.get_method_overrides(method_ref, &method_url);
 
         assert_eq!(locations.len(), 2);
         let paths: HashSet<String> = locations
@@ -841,8 +978,11 @@ check()
             .expect("sub_private should have class_id");
 
         // Test goto definition from sub_public's Overridden -> super's Overridden
-        let locations_public =
-            project_data.get_method_superclass("Overridden".to_string(), &sub_public_class_id);
+        let locations_public = project_data.get_method_superclass(
+            "Overridden".to_string(),
+            &sub_public_class_id,
+            &sub_public_url,
+        );
         assert!(
             !locations_public.is_empty(),
             "sub_public's Overridden should resolve to super's Overridden (after late indexing)"
@@ -850,8 +990,11 @@ check()
         assert!(locations_public[0].0.path().ends_with("super.cls"));
 
         // Test goto definition from sub_private's Overridden -> super's Overridden
-        let locations_private =
-            project_data.get_method_superclass("Overridden".to_string(), &sub_private_class_id);
+        let locations_private = project_data.get_method_superclass(
+            "Overridden".to_string(),
+            &sub_private_class_id,
+            &sub_private_url,
+        );
         assert!(
             !locations_private.is_empty(),
             "sub_private's Overridden should resolve to super's Overridden"
@@ -1028,7 +1171,9 @@ check()
             .get("Demo.ChildDefault")
             .expect("Demo.ChildDefault should exist");
 
-        let locations = project_data.get_method_superclass("UseParent".to_string(), child_class_id);
+        let child_url = Url::from_file_path(project_root.join("child-default.cls")).unwrap();
+        let locations =
+            project_data.get_method_superclass("UseParent".to_string(), child_class_id, &child_url);
         // UseParent is not in any parent, so no superclass resolution
         assert!(
             locations.is_empty(),
@@ -1093,7 +1238,8 @@ check()
             .and_then(|m| m.get("DeepMethod"))
             .expect("Demo.DeepSuper.DeepMethod should exist");
 
-        let locations = project_data.get_method_overrides(method_ref);
+        let method_url = method_owner_url(&project_data, method_ref);
+        let locations = project_data.get_method_overrides(method_ref, &method_url);
         // DeepMid overrides DeepSuper, and DeepLeafOne/Two override DeepMid
         // Direct overrides of DeepSuper.DeepMethod is DeepMid
         assert!(
@@ -1126,7 +1272,8 @@ check()
             .and_then(|m| m.get("DeepMethod"))
             .expect("Demo.DeepMid.DeepMethod should exist");
 
-        let locations = project_data.get_method_overrides(method_ref);
+        let method_url = method_owner_url(&project_data, method_ref);
+        let locations = project_data.get_method_overrides(method_ref, &method_url);
         assert!(
             !locations.is_empty(),
             "DeepMid.DeepMethod should have overrides in leaf classes"
@@ -1155,7 +1302,8 @@ check()
             .and_then(|m| m.get("Unique"))
             .expect("Demo.NoOverrides.Unique should exist");
 
-        let locations = project_data.get_method_overrides(method_ref);
+        let method_url = method_owner_url(&project_data, method_ref);
+        let locations = project_data.get_method_overrides(method_ref, &method_url);
         assert!(
             locations.is_empty(),
             "method with no subclasses should have no overrides"
@@ -1430,7 +1578,8 @@ check()
             .expect("Demo.OrderChild should be indexed");
 
         // goto def on Greet in child should resolve to parent's Greet
-        let locations = project_data.get_method_superclass("Greet".to_string(), child_class_id);
+        let locations =
+            project_data.get_method_superclass("Greet".to_string(), child_class_id, &child_url);
         assert!(
             !locations.is_empty(),
             "child opened before parent: goto def should still resolve after parent loads"
@@ -1470,7 +1619,8 @@ check()
             .get("Demo.OrderChild")
             .expect("Demo.OrderChild should be indexed");
 
-        let locations = project_data.get_method_superclass("Greet".to_string(), child_class_id);
+        let locations =
+            project_data.get_method_superclass("Greet".to_string(), child_class_id, &child_url);
         assert!(
             !locations.is_empty(),
             "parent opened before child: goto def should resolve"
@@ -1533,6 +1683,74 @@ check()
             .get(&parent_url)
             .expect("document should exist");
         assert_eq!(doc.version, Some(2), "version should be updated to latest");
+    }
+
+    #[tokio::test]
+    async fn test_routine_gotodef_method_offset() {
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("gotodef")
+            .join("routines");
+        let (backend, uri) = setup_backend_and_workspace(project_root.clone()).await;
+        let project_state = backend.get_project(&uri).expect("missing project state");
+        let project_data = project_state.data.read();
+
+        let document_url = Url::from_file_path(project_root.join("offset-goto.mac")).unwrap();
+        let document = project_data
+            .documents
+            .get(&document_url)
+            .expect("offset-goto.mac should be indexed");
+        let point = point_for_substring(&document.content, "main+3");
+        let node = document
+            .tree
+            .root_node()
+            .named_descendant_for_point_range(point, point)
+            .expect("main+3 should resolve to a syntax node");
+        let mut ancestor = Some(node);
+        let mut line_ref = None;
+        while let Some(current) = ancestor {
+            if current.kind() == "line_ref" {
+                line_ref = Some(current);
+                break;
+            }
+            ancestor = current.parent();
+        }
+        let line_ref = line_ref.expect("main+3 should parse as a line_ref");
+        let (routine_name, method_name, offset) =
+            parse_line_ref(line_ref, &document.content, "offsetgoto".to_string());
+        assert_eq!(routine_name, "offsetgoto");
+        assert_eq!(method_name, "main");
+        assert_eq!(offset, Some(3));
+
+        let class_id = project_data
+            .classes
+            .get(&routine_name)
+            .expect("offsetgoto routine should be indexed as a class");
+        let class = project_data
+            .global_semantic_model
+            .get_class(class_id)
+            .expect("offsetgoto semantic class should exist");
+        let method_ref = class
+            .methods
+            .get(&method_name)
+            .expect("main tag should be indexed as a routine method");
+
+        let locations = project_data.get_method_definition(method_ref, offset);
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].0, document_url);
+        assert_eq!(
+            locations[0].1.start_point.row, 5,
+            "main+3 should resolve to the row three lines after the main tag"
+        );
+        assert_eq!(
+            document
+                .content
+                .lines()
+                .nth(locations[0].1.start_point.row)
+                .unwrap(),
+            " w !, \"line after main\""
+        );
     }
 
     // =========================================================================
@@ -1702,8 +1920,7 @@ check()
         let content = "ROUTINE modern\n\nmain\n    set x = 1\n    quit\n";
         state.handle_document_opened(uri.clone(), content.to_string(), FileType::Routine, 1);
 
-        let data = state.data.read();
-        let result = data.refactor_document(&uri, RefactorLevel::DoCommands);
+        let result = state.refactor_document(&uri, RefactorLevel::DoCommands);
         assert!(
             result.is_none(),
             "document with no legacy syntax should return None"
@@ -1718,9 +1935,7 @@ check()
             .join("diagnostics");
         let (backend, uri) = setup_backend_and_workspace(project_root).await;
         let project_state = backend.get_project(&uri).expect("missing project state");
-        let project_data = project_state.data.read();
-
-        let changes = project_data.refactor(RefactorLevel::All);
+        let changes = project_state.refactor(RefactorLevel::All);
         for (_, url) in &changes {
             assert!(
                 !url.path().ends_with(".xml"),

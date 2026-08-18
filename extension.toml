@@ -8,17 +8,17 @@ repository = "https://github.com/intersystems/zed-objectscript"
 
 [grammars.objectscript_udl]
 repository = "https://github.com/intersystems/tree-sitter-objectscript"
-commit = "30cfb7addc4c6fdfcf1550180eef2cdcd1fdb202"
+commit = "6ee63cf01590446f4e64b6c048739bfe7d23408b"
 path = "udl"
 
 [grammars.objectscript_routine]
 repository = "https://github.com/intersystems/tree-sitter-objectscript"
-commit = "30cfb7addc4c6fdfcf1550180eef2cdcd1fdb202"
+commit = "6ee63cf01590446f4e64b6c048739bfe7d23408b"
 path = "objectscript_routine"
 
 [grammars.objectscript]
 repository = "https://github.com/intersystems/tree-sitter-objectscript"
-commit = "30cfb7addc4c6fdfcf1550180eef2cdcd1fdb202"
+commit = "6ee63cf01590446f4e64b6c048739bfe7d23408b"
 path = "objectscript"
 
 [grammars.xml]

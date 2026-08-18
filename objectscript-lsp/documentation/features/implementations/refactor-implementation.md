@@ -240,7 +240,7 @@ Uses tree-sitter queries to find legacy statements with no body (no expression +
 | Function | Purpose |
 |---|---|
 | `remove_unreachable_for_statements` | First pass: removes dead for statements |
-| `refactor_legacy_for_statements` | Loop converting old for → block form |
+| `refactor_legacy_for_statement_to_block` | Loop converting old for → block form |
 | `refactor_old_for_statements` | Single transformation of one for statement |
 
 ---

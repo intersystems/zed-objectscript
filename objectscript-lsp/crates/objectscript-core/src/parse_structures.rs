@@ -35,7 +35,9 @@ pub enum MemberType {
     ClassDefRange,
     Relationship,
     Foreignkey,
-    Parameter,
+    RelativeParameter,
+    ParameterDef,
+    OrefParameter,
     Projection,
     Index,
     Xdata,
@@ -46,6 +48,7 @@ pub enum MemberType {
     Trigger,
     RelativeProperty,
     OrefProperty,
+    PropertyDef,
     OrefMethod,
     RoutineMethodCall,
     Routine,
@@ -55,6 +58,7 @@ pub enum MemberType {
     MethodDef,
     Keyword,
     Procedure,
+    DottedStatementTag,
 }
 
 /// DFS visitation state.
@@ -203,6 +207,7 @@ pub enum MethodType {
     ClassMethod,
     Procedure(bool),
     Subroutine(bool),
+    DottedSubroutine(bool),
     Routine,
 }
 
@@ -307,7 +312,7 @@ pub enum ReturnType {
 }
 
 /// File type for a workspace document.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Copy)]
 pub enum FileType {
     Cls,
     Routine,

@@ -2,12 +2,202 @@ use crate::common::{
     advance_point, detect_newline, get_node_children, get_string_at_byte_range,
     indent_statement_lines, line_indent_before, normalized_statement_lines,
 };
-use crate::parse_structures::{FileType, OldStatement};
+use crate::parse_structures::{FileType, MethodType, OldStatement};
+use crate::scope_tree::ScopeTree;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
-use tree_sitter::{InputEdit, Language, Node, Parser, Query, QueryCursor, StreamingIterator};
+use std::sync::OnceLock;
+use tree_sitter::{InputEdit, Language, Node, Parser, Query, QueryCursor, StreamingIterator, Tree};
 use tree_sitter_objectscript::LANGUAGE_OBJECTSCRIPT_UDL;
+use tree_sitter_objectscript_playground::LANGUAGE_OBJECTSCRIPT;
 use tree_sitter_objectscript_routine::LANGUAGE_OBJECTSCRIPT_ROUTINE;
-fn update_tree_and_content(
+const UNREACHABLE_IF_QUERY: &str =
+    "(command_if (keyword_old_if) (expression)? @condition (statement)? @statement) @command_if";
+const UNREACHABLE_ELSE_QUERY: &str =
+    "(command_else (keyword_oldelse) (statement)? @statement) @command";
+const UNREACHABLE_FOR_QUERY: &str =
+    "(command_for (keyword_for) (for_parameter)? @param (statement)? @statement ) @command";
+const UNREACHABLE_OLD_FOR_QUERY: &str =
+    "(command_for (keyword_old_for) (for_parameter)? @param (statement)? @statement ) @command";
+const OLD_IF_ELSE_QUERY: &str = r#"(_
+  (statement (command_if (keyword_old_if)) @command_if)
+  .
+  (statement (command_else) @command_else)
+)"#;
+const OLD_IF_QUERY: &str = "(command_if (keyword_old_if)) @command";
+const OLD_ELSE_QUERY: &str = "(command_else (keyword_oldelse)) @command_else";
+const OLD_FOR_QUERY: &str = "(command_for (keyword_old_for)) @command";
+const OLD_DO_QUERY: &str = "(command_do (keyword_do_old)) @command";
+
+#[derive(Clone, Copy)]
+pub enum RefactorGrammar {
+    Udl,
+    Routine,
+    ObjectScript,
+}
+
+impl RefactorGrammar {
+    fn language(self) -> Language {
+        match self {
+            RefactorGrammar::Udl => LANGUAGE_OBJECTSCRIPT_UDL.into(),
+            RefactorGrammar::Routine => LANGUAGE_OBJECTSCRIPT_ROUTINE.into(),
+            RefactorGrammar::ObjectScript => LANGUAGE_OBJECTSCRIPT.into(),
+        }
+    }
+}
+
+pub fn refactor_grammar_for_file_type(file_type: FileType) -> RefactorGrammar {
+    match file_type {
+        FileType::Routine => RefactorGrammar::Routine,
+        FileType::Cls => RefactorGrammar::Udl,
+        FileType::Xml => RefactorGrammar::ObjectScript,
+    }
+}
+
+fn cached_query(
+    query: &'static OnceLock<Option<Query>>,
+    language: Language,
+    source: &str,
+) -> Option<&'static Query> {
+    query
+        .get_or_init(|| Query::new(&language, source).ok())
+        .as_ref()
+}
+
+fn cached_query_for_grammar(
+    grammar: RefactorGrammar,
+    udl_query: &'static OnceLock<Option<Query>>,
+    routine_query: &'static OnceLock<Option<Query>>,
+    objectscript_query: &'static OnceLock<Option<Query>>,
+    source: &str,
+) -> Option<&'static Query> {
+    match grammar {
+        RefactorGrammar::Udl => cached_query(udl_query, grammar.language(), source),
+        RefactorGrammar::Routine => cached_query(routine_query, grammar.language(), source),
+        RefactorGrammar::ObjectScript => {
+            cached_query(objectscript_query, grammar.language(), source)
+        }
+    }
+}
+
+fn unreachable_if_query(grammar: RefactorGrammar) -> Option<&'static Query> {
+    static UDL_QUERY: OnceLock<Option<Query>> = OnceLock::new();
+    static ROUTINE_QUERY: OnceLock<Option<Query>> = OnceLock::new();
+    static OBJECTSCRIPT_QUERY: OnceLock<Option<Query>> = OnceLock::new();
+    cached_query_for_grammar(
+        grammar,
+        &UDL_QUERY,
+        &ROUTINE_QUERY,
+        &OBJECTSCRIPT_QUERY,
+        UNREACHABLE_IF_QUERY,
+    )
+}
+
+fn unreachable_else_query(grammar: RefactorGrammar) -> Option<&'static Query> {
+    static UDL_QUERY: OnceLock<Option<Query>> = OnceLock::new();
+    static ROUTINE_QUERY: OnceLock<Option<Query>> = OnceLock::new();
+    static OBJECTSCRIPT_QUERY: OnceLock<Option<Query>> = OnceLock::new();
+    cached_query_for_grammar(
+        grammar,
+        &UDL_QUERY,
+        &ROUTINE_QUERY,
+        &OBJECTSCRIPT_QUERY,
+        UNREACHABLE_ELSE_QUERY,
+    )
+}
+
+fn unreachable_for_query(grammar: RefactorGrammar) -> Option<&'static Query> {
+    static UDL_QUERY: OnceLock<Option<Query>> = OnceLock::new();
+    static ROUTINE_QUERY: OnceLock<Option<Query>> = OnceLock::new();
+    static OBJECTSCRIPT_QUERY: OnceLock<Option<Query>> = OnceLock::new();
+    cached_query_for_grammar(
+        grammar,
+        &UDL_QUERY,
+        &ROUTINE_QUERY,
+        &OBJECTSCRIPT_QUERY,
+        UNREACHABLE_FOR_QUERY,
+    )
+}
+
+fn unreachable_old_for_query(grammar: RefactorGrammar) -> Option<&'static Query> {
+    static UDL_QUERY: OnceLock<Option<Query>> = OnceLock::new();
+    static ROUTINE_QUERY: OnceLock<Option<Query>> = OnceLock::new();
+    static OBJECTSCRIPT_QUERY: OnceLock<Option<Query>> = OnceLock::new();
+    cached_query_for_grammar(
+        grammar,
+        &UDL_QUERY,
+        &ROUTINE_QUERY,
+        &OBJECTSCRIPT_QUERY,
+        UNREACHABLE_OLD_FOR_QUERY,
+    )
+}
+
+fn old_if_else_query(grammar: RefactorGrammar) -> Option<&'static Query> {
+    static UDL_QUERY: OnceLock<Option<Query>> = OnceLock::new();
+    static ROUTINE_QUERY: OnceLock<Option<Query>> = OnceLock::new();
+    static OBJECTSCRIPT_QUERY: OnceLock<Option<Query>> = OnceLock::new();
+    cached_query_for_grammar(
+        grammar,
+        &UDL_QUERY,
+        &ROUTINE_QUERY,
+        &OBJECTSCRIPT_QUERY,
+        OLD_IF_ELSE_QUERY,
+    )
+}
+
+fn old_if_query(grammar: RefactorGrammar) -> Option<&'static Query> {
+    static UDL_QUERY: OnceLock<Option<Query>> = OnceLock::new();
+    static ROUTINE_QUERY: OnceLock<Option<Query>> = OnceLock::new();
+    static OBJECTSCRIPT_QUERY: OnceLock<Option<Query>> = OnceLock::new();
+    cached_query_for_grammar(
+        grammar,
+        &UDL_QUERY,
+        &ROUTINE_QUERY,
+        &OBJECTSCRIPT_QUERY,
+        OLD_IF_QUERY,
+    )
+}
+
+fn old_else_query(grammar: RefactorGrammar) -> Option<&'static Query> {
+    static UDL_QUERY: OnceLock<Option<Query>> = OnceLock::new();
+    static ROUTINE_QUERY: OnceLock<Option<Query>> = OnceLock::new();
+    static OBJECTSCRIPT_QUERY: OnceLock<Option<Query>> = OnceLock::new();
+    cached_query_for_grammar(
+        grammar,
+        &UDL_QUERY,
+        &ROUTINE_QUERY,
+        &OBJECTSCRIPT_QUERY,
+        OLD_ELSE_QUERY,
+    )
+}
+
+fn old_for_query(grammar: RefactorGrammar) -> Option<&'static Query> {
+    static UDL_QUERY: OnceLock<Option<Query>> = OnceLock::new();
+    static ROUTINE_QUERY: OnceLock<Option<Query>> = OnceLock::new();
+    static OBJECTSCRIPT_QUERY: OnceLock<Option<Query>> = OnceLock::new();
+    cached_query_for_grammar(
+        grammar,
+        &UDL_QUERY,
+        &ROUTINE_QUERY,
+        &OBJECTSCRIPT_QUERY,
+        OLD_FOR_QUERY,
+    )
+}
+
+pub fn old_do_query(grammar: RefactorGrammar) -> Option<&'static Query> {
+    static UDL_QUERY: OnceLock<Option<Query>> = OnceLock::new();
+    static ROUTINE_QUERY: OnceLock<Option<Query>> = OnceLock::new();
+    static OBJECTSCRIPT_QUERY: OnceLock<Option<Query>> = OnceLock::new();
+    cached_query_for_grammar(
+        grammar,
+        &UDL_QUERY,
+        &ROUTINE_QUERY,
+        &OBJECTSCRIPT_QUERY,
+        OLD_DO_QUERY,
+    )
+}
+
+pub fn update_tree_and_content(
     tree: &mut tree_sitter::Tree,
     content: &mut String,
     old_range: tree_sitter::Range,
@@ -43,28 +233,25 @@ pub fn create_parser(language: &Language) -> Option<Parser> {
 fn remove_unreachable_statements(
     content: &mut String,
     tree: &mut tree_sitter::Tree,
-    language: &Language,
-    query_str: &str,
+    query: &Query,
     parser: &mut Parser,
 ) {
-    if let Ok(query) = Query::new(language, query_str) {
-        let root = tree.root_node();
-        let mut cursor = QueryCursor::new();
-        let mut iter = cursor.matches(&query, root, content.as_bytes());
-        let mut ranges = Vec::new();
-        while let Some(m) = iter.next() {
-            if m.captures.len() == 1 {
-                ranges.push(m.captures[0].node.range());
-            }
+    let root = tree.root_node();
+    let mut cursor = QueryCursor::new();
+    let mut iter = cursor.matches(query, root, content.as_bytes());
+    let mut ranges = Vec::new();
+    while let Some(m) = iter.next() {
+        if m.captures.len() == 1 {
+            ranges.push(m.captures[0].node.range());
         }
-        ranges.sort_by_key(|range| std::cmp::Reverse(range.start_byte));
+    }
+    ranges.sort_by_key(|range| std::cmp::Reverse(range.start_byte));
 
-        for range in ranges {
-            update_tree_and_content(tree, content, range, "");
-            let new_tree = parser.parse(content.as_str(), Some(&*tree)).unwrap();
-            *tree = new_tree;
-        }
-    };
+    for range in ranges {
+        update_tree_and_content(tree, content, range, "");
+        let new_tree = parser.parse(content.as_str(), Some(&*tree)).unwrap();
+        *tree = new_tree;
+    }
 }
 
 fn add_comment_to_string(
@@ -98,391 +285,365 @@ fn add_comment_to_string(
 // in routines, for each file, store the conditionals
 fn remove_unreachable_conditionals(
     content: &str,
-    language: &Language,
+    grammar: RefactorGrammar,
     parser: &mut Parser,
-) -> Option<(tree_sitter::Tree, String)> {
+    initial_tree: tree_sitter::Tree,
+) -> (tree_sitter::Tree, String) {
     // first remove if and else statements that are pointless (if statements with no expression and no statement)
     // first, refactor the if-else statements
     let mut updated_string = content.to_string();
-    let Some(mut tree) = parser.parse(content, None) else {
-        eprint!("Failed to parse tree");
-        return None;
-    };
-    let query_str = "(command_if (keyword_old_if) (expression)? @condition (statement)? @statement) @command_if";
-    remove_unreachable_statements(&mut updated_string, &mut tree, language, query_str, parser);
+    let mut tree = initial_tree;
+    if let Some(query) = unreachable_if_query(grammar) {
+        remove_unreachable_statements(&mut updated_string, &mut tree, query, parser);
+    }
 
-    let query_str = "(command_else (keyword_oldelse) (statement)? @statement) @command";
-    remove_unreachable_statements(&mut updated_string, &mut tree, language, query_str, parser);
+    if let Some(query) = unreachable_else_query(grammar) {
+        remove_unreachable_statements(&mut updated_string, &mut tree, query, parser);
+    }
 
     // first remove unreachable if statements
-    Some((tree, updated_string))
+    (tree, updated_string)
 }
 
 fn remove_unreachable_for_statements(
     content: &str,
-    language: &Language,
+    grammar: RefactorGrammar,
     parser: &mut Parser,
-) -> Option<(tree_sitter::Tree, String)> {
+    initial_tree: tree_sitter::Tree,
+) -> (tree_sitter::Tree, String) {
     let mut updated_string = content.to_string();
-    let Some(mut tree) = parser.parse(content, None) else {
-        eprint!("Failed to parse tree");
-        return None;
-    };
-    let query_str =
-        "(command_for (keyword_for) (for_parameter)? @param (statement)? @statement ) @command";
-    remove_unreachable_statements(&mut updated_string, &mut tree, language, query_str, parser);
+    let mut tree = initial_tree;
+    if let Some(query) = unreachable_for_query(grammar) {
+        remove_unreachable_statements(&mut updated_string, &mut tree, query, parser);
+    }
 
-    let query_str =
-        "(command_for (keyword_old_for) (for_parameter)? @param (statement)? @statement ) @command";
-    remove_unreachable_statements(&mut updated_string, &mut tree, language, query_str, parser);
-    Some((tree, updated_string))
+    if let Some(query) = unreachable_old_for_query(grammar) {
+        remove_unreachable_statements(&mut updated_string, &mut tree, query, parser);
+    }
+    (tree, updated_string)
 }
 
 fn refactor_if_else_statements(
     tree: &mut tree_sitter::Tree,
     updated_string: &mut String,
-    language: &Language,
-    query_str: &str,
+    query: &Query,
 ) -> bool {
-    if let Ok(query) = Query::new(language, query_str) {
-        let root = tree.root_node();
-        let mut cursor = QueryCursor::new();
-        let mut iter = cursor.matches(&query, root, updated_string.as_bytes());
-        let Some(query_match) = iter.next() else {
-            return false;
-        };
-        let if_statement = query_match.captures[0].node;
-        let else_statement = query_match.captures[1].node;
-        let Some(if_statement_struct) = build_old_statement_struct(&if_statement, &updated_string)
-        else {
-            eprintln!("Failed to build if_statement_struct");
-            return false;
-        };
-        let Some(else_statement_struct) =
-            build_old_statement_struct(&else_statement, &updated_string)
-        else {
-            eprintln!("Failed to build if_statement_struct");
-            return false;
-        };
-        let newline = detect_newline(updated_string);
-        let start_byte;
-        let start_point;
-        let (end_byte, end_point, else_has_comment, else_has_comment_after_last_statement) =
-            check_statement_fields(&else_statement_struct);
-        let if_has_comment = if_statement_struct.comment_range.is_some();
-        let if_has_comment_after_last_statement = if_statement_struct
-            .comment_after_last_statement_range
-            .is_some();
-        let mut replacement_string: String = String::new();
-        let Some(else_statements) = normalized_statement_lines(
-            updated_string,
-            else_statement_struct.statement_ranges.as_slice(),
-        ) else {
-            return false;
-        };
-        if if_statement_struct.last_expression_end_byte.is_none() {
-            start_byte = if_statement_struct.keyword_old_range.end_byte;
-            start_point = if_statement_struct.keyword_old_range.end_point;
-            // we know there are statements in this case, because
-            // otherwise it would have been handled by remove_unreachable_statements
-            replacement_string = String::from(" $TEST");
-        } else {
-            if if_statement_struct.statement_ranges.is_empty() {
-                start_byte = if_statement_struct.command_range.start_byte;
-                start_point = if_statement_struct.command_range.start_point;
-                let base_indent = line_indent_before(updated_string, start_byte);
-                let Some(expression) = get_string_at_byte_range(
-                    updated_string,
-                    Range {
-                        start: if_statement_struct.keyword_old_range.end_byte + 1,
-                        end: if_statement_struct.last_expression_end_byte.unwrap(),
-                    },
-                ) else {
-                    eprintln!("Failed to get string of expression for if statement");
-                    return false;
-                };
-                replacement_string = format!("{base_indent}if '({expression})");
-                if else_has_comment {
-                    add_comment_to_string(
-                        &else_statement_struct,
-                        updated_string,
-                        &mut replacement_string,
-                        false,
-                    );
-                }
-                replacement_string.push_str(
-                    build_replacement_string_block(
-                        base_indent.as_str(),
-                        newline,
-                        else_statements.as_slice(),
-                    )
-                    .as_str(),
-                );
-
-                if else_has_comment_after_last_statement {
-                    add_comment_to_string(
-                        &else_statement_struct,
-                        updated_string,
-                        &mut replacement_string,
-                        true,
-                    );
-                }
-                let old_text = &updated_string[start_byte..end_byte];
-                if old_text == replacement_string {
-                    return false;
-                }
-                let range = tree_sitter::Range {
-                    start_byte,
-                    end_byte,
-                    start_point,
-                    end_point,
-                };
-                update_tree_and_content(tree, updated_string, range, replacement_string.as_str());
-                return true;
-            } else {
-                start_byte = if_statement_struct.last_expression_end_byte.unwrap();
-                start_point = if_statement_struct.last_expression_end_point.unwrap();
-            }
-        }
-        let base_indent = line_indent_before(updated_string, start_byte);
-        let Some(if_statements) = normalized_statement_lines(
-            updated_string,
-            if_statement_struct.statement_ranges.as_slice(),
-        ) else {
-            eprintln!("Failed to normalize if statement ranges");
-            return false;
-        };
-        if if_has_comment {
-            add_comment_to_string(
-                &if_statement_struct,
-                updated_string,
-                &mut replacement_string,
-                false,
-            );
-        }
-        replacement_string.push_str(
-            build_replacement_string_block(base_indent.as_str(), newline, if_statements.as_slice())
-                .as_str(),
-        );
-        if if_has_comment_after_last_statement {
-            add_comment_to_string(
-                &if_statement_struct,
-                updated_string,
-                &mut replacement_string,
-                true,
-            );
-        }
-        replacement_string.push_str(format!("{base_indent}else").as_str());
-        if else_has_comment {
-            add_comment_to_string(
-                &else_statement_struct,
-                updated_string,
-                &mut replacement_string,
-                false,
-            );
-        }
-        replacement_string.push_str(
-            build_replacement_string_block(
-                base_indent.as_str(),
-                newline,
-                else_statements.as_slice(),
-            )
-            .as_str(),
-        );
-
-        if else_has_comment_after_last_statement {
-            add_comment_to_string(
-                &else_statement_struct,
-                updated_string,
-                &mut replacement_string,
-                true,
-            );
-        }
-
-        let old_text = &updated_string[start_byte..end_byte];
-        if old_text == replacement_string {
-            return false;
-        }
-        let range = tree_sitter::Range {
-            start_byte,
-            end_byte,
-            start_point,
-            end_point,
-        };
-        update_tree_and_content(tree, updated_string, range, replacement_string.as_str());
-        return true;
+    let root = tree.root_node();
+    let mut cursor = QueryCursor::new();
+    let mut iter = cursor.matches(query, root, updated_string.as_bytes());
+    let Some(query_match) = iter.next() else {
+        return false;
+    };
+    let if_statement = query_match.captures[0].node;
+    let else_statement = query_match.captures[1].node;
+    let Some(if_statement_struct) = build_old_statement_struct(&if_statement, &updated_string)
+    else {
+        eprintln!("Failed to build if_statement_struct");
+        return false;
+    };
+    let Some(else_statement_struct) = build_old_statement_struct(&else_statement, &updated_string)
+    else {
+        eprintln!("Failed to build if_statement_struct");
+        return false;
+    };
+    let newline = detect_newline(updated_string);
+    let start_byte;
+    let start_point;
+    let (end_byte, end_point, else_has_comment, else_has_comment_after_last_statement) =
+        check_statement_fields(&else_statement_struct);
+    let if_has_comment = if_statement_struct.comment_range.is_some();
+    let if_has_comment_after_last_statement = if_statement_struct
+        .comment_after_last_statement_range
+        .is_some();
+    let mut replacement_string: String = String::new();
+    let Some(else_statements) = normalized_statement_lines(
+        updated_string,
+        else_statement_struct.statement_ranges.as_slice(),
+    ) else {
+        return false;
+    };
+    if if_statement_struct.last_expression_end_byte.is_none() {
+        start_byte = if_statement_struct.keyword_old_range.end_byte;
+        start_point = if_statement_struct.keyword_old_range.end_point;
+        // we know there are statements in this case, because
+        // otherwise it would have been handled by remove_unreachable_statements
+        replacement_string = String::from(" $TEST");
     } else {
+        if if_statement_struct.statement_ranges.is_empty() {
+            start_byte = if_statement_struct.command_range.start_byte;
+            start_point = if_statement_struct.command_range.start_point;
+            let base_indent = line_indent_before(updated_string, start_byte);
+            let Some(expression) = get_string_at_byte_range(
+                updated_string,
+                Range {
+                    start: if_statement_struct.keyword_old_range.end_byte + 1,
+                    end: if_statement_struct.last_expression_end_byte.unwrap(),
+                },
+            ) else {
+                eprintln!("Failed to get string of expression for if statement");
+                return false;
+            };
+            replacement_string = format!("{base_indent}if '({expression})");
+            if else_has_comment {
+                add_comment_to_string(
+                    &else_statement_struct,
+                    updated_string,
+                    &mut replacement_string,
+                    false,
+                );
+            }
+            replacement_string.push_str(
+                build_replacement_string_block(
+                    base_indent.as_str(),
+                    newline,
+                    else_statements.as_slice(),
+                )
+                .as_str(),
+            );
+
+            if else_has_comment_after_last_statement {
+                add_comment_to_string(
+                    &else_statement_struct,
+                    updated_string,
+                    &mut replacement_string,
+                    true,
+                );
+            }
+            let old_text = &updated_string[start_byte..end_byte];
+            if old_text == replacement_string {
+                return false;
+            }
+            let range = tree_sitter::Range {
+                start_byte,
+                end_byte,
+                start_point,
+                end_point,
+            };
+            update_tree_and_content(tree, updated_string, range, replacement_string.as_str());
+            return true;
+        } else {
+            start_byte = if_statement_struct.last_expression_end_byte.unwrap();
+            start_point = if_statement_struct.last_expression_end_point.unwrap();
+        }
+    }
+    let base_indent = line_indent_before(updated_string, start_byte);
+    let Some(if_statements) = normalized_statement_lines(
+        updated_string,
+        if_statement_struct.statement_ranges.as_slice(),
+    ) else {
+        eprintln!("Failed to normalize if statement ranges");
+        return false;
+    };
+    if if_has_comment {
+        add_comment_to_string(
+            &if_statement_struct,
+            updated_string,
+            &mut replacement_string,
+            false,
+        );
+    }
+    replacement_string.push_str(
+        build_replacement_string_block(base_indent.as_str(), newline, if_statements.as_slice())
+            .as_str(),
+    );
+    if if_has_comment_after_last_statement {
+        add_comment_to_string(
+            &if_statement_struct,
+            updated_string,
+            &mut replacement_string,
+            true,
+        );
+    }
+    replacement_string.push_str(format!("{base_indent}else").as_str());
+    if else_has_comment {
+        add_comment_to_string(
+            &else_statement_struct,
+            updated_string,
+            &mut replacement_string,
+            false,
+        );
+    }
+    replacement_string.push_str(
+        build_replacement_string_block(base_indent.as_str(), newline, else_statements.as_slice())
+            .as_str(),
+    );
+
+    if else_has_comment_after_last_statement {
+        add_comment_to_string(
+            &else_statement_struct,
+            updated_string,
+            &mut replacement_string,
+            true,
+        );
+    }
+
+    let old_text = &updated_string[start_byte..end_byte];
+    if old_text == replacement_string {
         return false;
     }
+    let range = tree_sitter::Range {
+        start_byte,
+        end_byte,
+        start_point,
+        end_point,
+    };
+    update_tree_and_content(tree, updated_string, range, replacement_string.as_str());
+    true
 }
 
 fn refactor_old_for_statements(
     tree: &mut tree_sitter::Tree,
     updated_string: &mut String,
-    language: &Language,
-    query_str: &str,
+    query: &Query,
 ) -> bool {
-    if let Ok(query) = Query::new(language, query_str) {
-        let root = tree.root_node();
-        let mut cursor = QueryCursor::new();
-        let mut iter = cursor.matches(&query, root, updated_string.as_bytes());
-        let Some(query_match) = iter.next() else {
-            // everything has been refactored
-            return false;
-        };
-        let for_statement = query_match.captures[0].node;
-        let Some(statement_struct) = build_old_statement_struct(&for_statement, &updated_string)
-        else {
-            eprintln!("Failed to build for statement struct");
-            return false;
-        };
-        let newline = detect_newline(updated_string);
-        let start_byte;
-        let start_point;
-        let (end_byte, end_point, has_comment, has_comment_after_last_statement) =
-            check_statement_fields(&statement_struct);
-        let mut replacement_string: String = String::new();
-        if statement_struct.last_expression_end_byte.is_none() {
-            start_byte = statement_struct.keyword_old_range.end_byte;
-            start_point = statement_struct.keyword_old_range.end_point;
-        } else {
-            start_byte = statement_struct.last_expression_end_byte.unwrap();
-            start_point = statement_struct.last_expression_end_point.unwrap();
-        }
-        let base_indent = line_indent_before(updated_string, start_byte);
-        let Some(if_statements) = normalized_statement_lines(
-            updated_string,
-            statement_struct.statement_ranges.as_slice(),
-        ) else {
-            eprintln!("Failed to normalize if statement ranges");
-            return false;
-        };
-        if has_comment {
-            add_comment_to_string(
-                &statement_struct,
-                updated_string,
-                &mut replacement_string,
-                false,
-            );
-        }
-        replacement_string.push_str(
-            build_replacement_string_block(base_indent.as_str(), newline, if_statements.as_slice())
-                .as_str(),
-        );
-
-        if has_comment_after_last_statement {
-            add_comment_to_string(
-                &statement_struct,
-                updated_string,
-                &mut replacement_string,
-                true,
-            );
-        }
-
-        let old_text = &updated_string[start_byte..end_byte];
-        if old_text == replacement_string {
-            return false;
-        }
-        let range = tree_sitter::Range {
-            start_byte,
-            end_byte,
-            start_point,
-            end_point,
-        };
-        update_tree_and_content(tree, updated_string, range, replacement_string.as_str());
-        return true;
+    let root = tree.root_node();
+    let mut cursor = QueryCursor::new();
+    let mut iter = cursor.matches(query, root, updated_string.as_bytes());
+    let Some(query_match) = iter.next() else {
+        // everything has been refactored
+        return false;
+    };
+    let for_statement = query_match.captures[0].node;
+    let Some(statement_struct) = build_old_statement_struct(&for_statement, &updated_string) else {
+        eprintln!("Failed to build for statement struct");
+        return false;
+    };
+    let newline = detect_newline(updated_string);
+    let start_byte;
+    let start_point;
+    let (end_byte, end_point, has_comment, has_comment_after_last_statement) =
+        check_statement_fields(&statement_struct);
+    let mut replacement_string: String = String::new();
+    if statement_struct.last_expression_end_byte.is_none() {
+        start_byte = statement_struct.keyword_old_range.end_byte;
+        start_point = statement_struct.keyword_old_range.end_point;
     } else {
+        start_byte = statement_struct.last_expression_end_byte.unwrap();
+        start_point = statement_struct.last_expression_end_point.unwrap();
+    }
+    let base_indent = line_indent_before(updated_string, start_byte);
+    let Some(if_statements) =
+        normalized_statement_lines(updated_string, statement_struct.statement_ranges.as_slice())
+    else {
+        eprintln!("Failed to normalize if statement ranges");
+        return false;
+    };
+    if has_comment {
+        add_comment_to_string(
+            &statement_struct,
+            updated_string,
+            &mut replacement_string,
+            false,
+        );
+    }
+    replacement_string.push_str(
+        build_replacement_string_block(base_indent.as_str(), newline, if_statements.as_slice())
+            .as_str(),
+    );
+
+    if has_comment_after_last_statement {
+        add_comment_to_string(
+            &statement_struct,
+            updated_string,
+            &mut replacement_string,
+            true,
+        );
+    }
+
+    let old_text = &updated_string[start_byte..end_byte];
+    if old_text == replacement_string {
         return false;
     }
+    let range = tree_sitter::Range {
+        start_byte,
+        end_byte,
+        start_point,
+        end_point,
+    };
+    update_tree_and_content(tree, updated_string, range, replacement_string.as_str());
+    true
 }
 
 fn refactor_old_if_statements(
     tree: &mut tree_sitter::Tree,
     updated_string: &mut String,
-    language: &Language,
-    query_str: &str,
+    query: &Query,
 ) -> bool {
-    if let Ok(query) = Query::new(language, query_str) {
-        let root = tree.root_node();
-        let mut cursor = QueryCursor::new();
-        let mut iter = cursor.matches(&query, root, updated_string.as_bytes());
-        let Some(query_match) = iter.next() else {
-            // everything has been refactored
-            return false;
-        };
-        let if_statement = query_match.captures[0].node;
-        let Some(statement_struct) = build_old_statement_struct(&if_statement, &updated_string)
-        else {
-            eprintln!("Failed to build if_statement_struct");
-            return false;
-        };
-        let newline = detect_newline(updated_string);
-        let start_byte;
-        let start_point;
-        let (end_byte, end_point, has_comment, has_comment_after_last_statement) =
-            check_statement_fields(&statement_struct);
-        let mut replacement_string: String = String::new();
-        if statement_struct.last_expression_end_byte.is_none() {
-            start_byte = statement_struct.keyword_old_range.end_byte;
-            start_point = statement_struct.keyword_old_range.end_point;
-            // we know there are statements in this case, because
-            // otherwise it would have been handled by remove_unreachable_statements
-            replacement_string = String::from(" $TEST");
-        } else {
-            if statement_struct.statement_ranges.is_empty() {
-                let range = statement_struct.command_range;
-                update_tree_and_content(tree, updated_string, range, "");
-                return true;
-            } else {
-                start_byte = statement_struct.last_expression_end_byte.unwrap();
-                start_point = statement_struct.last_expression_end_point.unwrap();
-            }
-        }
-        let base_indent = line_indent_before(updated_string, start_byte);
-        let Some(if_statements) = normalized_statement_lines(
-            updated_string,
-            statement_struct.statement_ranges.as_slice(),
-        ) else {
-            eprintln!("Failed to normalize if statement ranges");
-            return false;
-        };
-        if has_comment {
-            add_comment_to_string(
-                &statement_struct,
-                updated_string,
-                &mut replacement_string,
-                false,
-            );
-        }
-        replacement_string.push_str(
-            build_replacement_string_block(base_indent.as_str(), newline, if_statements.as_slice())
-                .as_str(),
-        );
-
-        if has_comment_after_last_statement {
-            add_comment_to_string(
-                &statement_struct,
-                updated_string,
-                &mut replacement_string,
-                true,
-            );
-        }
-
-        let old_text = &updated_string[start_byte..end_byte];
-        if old_text == replacement_string {
-            return false;
-        }
-        let range = tree_sitter::Range {
-            start_byte,
-            end_byte,
-            start_point,
-            end_point,
-        };
-        update_tree_and_content(tree, updated_string, range, replacement_string.as_str());
-        return true;
+    let root = tree.root_node();
+    let mut cursor = QueryCursor::new();
+    let mut iter = cursor.matches(query, root, updated_string.as_bytes());
+    let Some(query_match) = iter.next() else {
+        // everything has been refactored
+        return false;
+    };
+    let if_statement = query_match.captures[0].node;
+    let Some(statement_struct) = build_old_statement_struct(&if_statement, &updated_string) else {
+        eprintln!("Failed to build if_statement_struct");
+        return false;
+    };
+    let newline = detect_newline(updated_string);
+    let start_byte;
+    let start_point;
+    let (end_byte, end_point, has_comment, has_comment_after_last_statement) =
+        check_statement_fields(&statement_struct);
+    let mut replacement_string: String = String::new();
+    if statement_struct.last_expression_end_byte.is_none() {
+        start_byte = statement_struct.keyword_old_range.end_byte;
+        start_point = statement_struct.keyword_old_range.end_point;
+        // we know there are statements in this case, because
+        // otherwise it would have been handled by remove_unreachable_statements
+        replacement_string = String::from(" $TEST");
     } else {
+        if statement_struct.statement_ranges.is_empty() {
+            let range = statement_struct.command_range;
+            update_tree_and_content(tree, updated_string, range, "");
+            return true;
+        } else {
+            start_byte = statement_struct.last_expression_end_byte.unwrap();
+            start_point = statement_struct.last_expression_end_point.unwrap();
+        }
+    }
+    let base_indent = line_indent_before(updated_string, start_byte);
+    let Some(if_statements) =
+        normalized_statement_lines(updated_string, statement_struct.statement_ranges.as_slice())
+    else {
+        eprintln!("Failed to normalize if statement ranges");
+        return false;
+    };
+    if has_comment {
+        add_comment_to_string(
+            &statement_struct,
+            updated_string,
+            &mut replacement_string,
+            false,
+        );
+    }
+    replacement_string.push_str(
+        build_replacement_string_block(base_indent.as_str(), newline, if_statements.as_slice())
+            .as_str(),
+    );
+
+    if has_comment_after_last_statement {
+        add_comment_to_string(
+            &statement_struct,
+            updated_string,
+            &mut replacement_string,
+            true,
+        );
+    }
+
+    let old_text = &updated_string[start_byte..end_byte];
+    if old_text == replacement_string {
         return false;
     }
+    let range = tree_sitter::Range {
+        start_byte,
+        end_byte,
+        start_point,
+        end_point,
+    };
+    update_tree_and_content(tree, updated_string, range, replacement_string.as_str());
+    true
 }
 
 /// Extracts end byte/point and comment presence flags from an OldStatement.
@@ -506,77 +667,71 @@ pub fn check_statement_fields(
 fn refactor_old_else_statements(
     tree: &mut tree_sitter::Tree,
     updated_string: &mut String,
-    language: &Language,
-    query_str: &str,
+    query: &Query,
 ) -> bool {
-    if let Ok(query) = Query::new(language, query_str) {
-        let root = tree.root_node();
-        let mut cursor = QueryCursor::new();
-        let mut iter = cursor.matches(&query, root, updated_string.as_bytes());
-        let Some(query_match) = iter.next() else {
-            // everything has been refactored
-            return false;
-        };
-        let else_statement = query_match.captures[0].node;
-        let Some(statement_struct) = build_old_statement_struct(&else_statement, &updated_string)
-        else {
-            eprintln!("Failed to build else_statement_struct");
-            return false;
-        };
-        let (end_byte, end_point, has_comment, has_comment_after_last_statement) =
-            check_statement_fields(&statement_struct);
-        let newline = detect_newline(updated_string);
-        let start_byte = statement_struct.keyword_old_range.start_byte;
-        let start_point = statement_struct.keyword_old_range.start_point;
-        let base_indent = line_indent_before(updated_string, start_byte);
-        let mut replacement_string = String::from(format!("{base_indent}if $TEST = 0"));
-        let Some(statements) = normalized_statement_lines(
+    let root = tree.root_node();
+    let mut cursor = QueryCursor::new();
+    let mut iter = cursor.matches(query, root, updated_string.as_bytes());
+    let Some(query_match) = iter.next() else {
+        // everything has been refactored
+        return false;
+    };
+    let else_statement = query_match.captures[0].node;
+    let Some(statement_struct) = build_old_statement_struct(&else_statement, &updated_string)
+    else {
+        eprintln!("Failed to build else_statement_struct");
+        return false;
+    };
+    let (end_byte, end_point, has_comment, has_comment_after_last_statement) =
+        check_statement_fields(&statement_struct);
+    let newline = detect_newline(updated_string);
+    let start_byte = statement_struct.keyword_old_range.start_byte;
+    let start_point = statement_struct.keyword_old_range.start_point;
+    let base_indent = line_indent_before(updated_string, start_byte);
+    let mut replacement_string = String::from(format!("{base_indent}if $TEST = 0"));
+    let Some(statements) =
+        normalized_statement_lines(updated_string, statement_struct.statement_ranges.as_slice())
+    else {
+        eprintln!("Failed to normalize if statement ranges");
+        return false;
+    };
+    if has_comment {
+        add_comment_to_string(
+            &statement_struct,
             updated_string,
-            statement_struct.statement_ranges.as_slice(),
-        ) else {
-            eprintln!("Failed to normalize if statement ranges");
-            return false;
-        };
-        if has_comment {
-            add_comment_to_string(
-                &statement_struct,
-                updated_string,
-                &mut replacement_string,
-                false,
-            );
-        }
-        replacement_string.push_str(
-            build_replacement_string_block(base_indent.as_str(), newline, statements.as_slice())
-                .as_str(),
+            &mut replacement_string,
+            false,
         );
+    }
+    replacement_string.push_str(
+        build_replacement_string_block(base_indent.as_str(), newline, statements.as_slice())
+            .as_str(),
+    );
 
-        if has_comment_after_last_statement {
-            add_comment_to_string(
-                &statement_struct,
-                updated_string,
-                &mut replacement_string,
-                true,
-            );
-        }
-        let old_text = &updated_string[start_byte..end_byte];
-        if old_text == replacement_string {
-            return false;
-        }
-        let range = tree_sitter::Range {
-            start_byte,
-            end_byte,
-            start_point,
-            end_point,
-        };
-        update_tree_and_content(tree, updated_string, range, replacement_string.as_str());
-        return true;
-    } else {
+    if has_comment_after_last_statement {
+        add_comment_to_string(
+            &statement_struct,
+            updated_string,
+            &mut replacement_string,
+            true,
+        );
+    }
+    let old_text = &updated_string[start_byte..end_byte];
+    if old_text == replacement_string {
         return false;
     }
+    let range = tree_sitter::Range {
+        start_byte,
+        end_byte,
+        start_point,
+        end_point,
+    };
+    update_tree_and_content(tree, updated_string, range, replacement_string.as_str());
+    true
 }
 
 /// Parses a legacy command node into an OldStatement capturing its keyword, expressions, statements, and comments.
-pub fn build_old_statement_struct(node: &Node, content: &str) -> Option<OldStatement> {
+pub fn build_old_statement_struct(node: &Node, _content: &str) -> Option<OldStatement> {
     let children = get_node_children(node.clone());
     let mut statement_ranges = Vec::new();
     let mut expression_end_byte = None;
@@ -590,7 +745,6 @@ pub fn build_old_statement_struct(node: &Node, content: &str) -> Option<OldState
     // we want to store the statement before the comment
     let mut last_statement_range_stored = None;
     let mut statements_after_do = Vec::new();
-    let depth = find_do_statement_depth(node);
 
     for child in children {
         match child.kind() {
@@ -627,17 +781,11 @@ pub fn build_old_statement_struct(node: &Node, content: &str) -> Option<OldState
                     last_statement_range_stored = None;
                     comment_after_statement_range = None;
                 }
-                let Some(line) = get_string_at_byte_range(content, child.byte_range()) else {
-                    continue;
+                let range = std::ops::Range {
+                    start: child.start_byte(),
+                    end: child.end_byte(),
                 };
-                let dot_count = count_leading_dots_in_line(&line);
-                if dot_count >= depth {
-                    let range = std::ops::Range {
-                        start: child.start_byte(),
-                        end: child.end_byte(),
-                    };
-                    statement_ranges.push(range);
-                }
+                statement_ranges.push(range);
             }
             "argumentless_inline_comment" => {
                 comment_range = Some(child.range());
@@ -731,7 +879,7 @@ pub fn build_old_statement_struct(node: &Node, content: &str) -> Option<OldState
 fn refactor_old_conditional_command(
     tree: &mut tree_sitter::Tree,
     updated_string: &mut String,
-    language: &Language,
+    grammar: RefactorGrammar,
     parser: &mut Parser,
 ) {
     // first refactor if-else statements
@@ -743,42 +891,50 @@ fn refactor_old_conditional_command(
     // 2. argumentless if -> if $TEST
     // 3. Both the if and else statements will be converted to their block form
     // 4. Comments will be preserved.
-    let query_str = r#"(source_file
-  (statement (command_if (keyword_old_if)) @command_if)
-  .
-  (statement (command_else) @command_else)
-)"#;
+    if let Some(query) = old_if_else_query(grammar) {
+        loop {
+            let changed = refactor_if_else_statements(tree, updated_string, query);
+            if let Some(new_tree) = parser.parse(updated_string.as_str(), Some(tree)) {
+                *tree = new_tree;
+            } else {
+                break;
+            }
 
-    loop {
-        let changed = refactor_if_else_statements(tree, updated_string, language, query_str);
-        let new_tree = parser.parse(updated_string.as_str(), Some(&*tree)).unwrap();
-        *tree = new_tree;
-
-        if !changed {
-            break;
+            if !changed {
+                break;
+            }
         }
     }
     eprintln!("Finished if-else refactoring");
 
-    let query_str = "(command_if (keyword_old_if)) @command";
-    loop {
-        let changed = refactor_old_if_statements(tree, updated_string, language, query_str);
-        let new_tree = parser.parse(updated_string.as_str(), Some(&*tree)).unwrap();
-        *tree = new_tree;
+    if let Some(query) = old_if_query(grammar) {
+        loop {
+            let changed = refactor_old_if_statements(tree, updated_string, query);
+            if let Some(new_tree) = parser.parse(updated_string.as_str(), Some(tree)) {
+                *tree = new_tree;
+            } else {
+                break;
+            }
 
-        if !changed {
-            break;
+            if !changed {
+                break;
+            }
         }
     }
     eprintln!("Finished old if refactoring");
-    let query_str = "(command_else (keyword_oldelse)) @command_else";
-    loop {
-        let changed = refactor_old_else_statements(tree, updated_string, language, query_str);
-        let new_tree = parser.parse(updated_string.as_str(), Some(&*tree)).unwrap();
-        *tree = new_tree;
 
-        if !changed {
-            break;
+    if let Some(query) = old_else_query(grammar) {
+        loop {
+            let changed = refactor_old_else_statements(tree, updated_string, query);
+            if let Some(new_tree) = parser.parse(updated_string.as_str(), Some(tree)) {
+                *tree = new_tree;
+            } else {
+                break;
+            }
+
+            if !changed {
+                break;
+            }
         }
     }
     eprintln!("Finished old else refactoring");
@@ -798,139 +954,59 @@ fn build_replacement_string_block(
     new_str
 }
 
-fn refactor_legacy_for_statements(
+fn refactor_legacy_for_statement_to_block(
     tree: &mut tree_sitter::Tree,
     updated_string: &mut String,
-    language: &Language,
+    grammar: RefactorGrammar,
     parser: &mut Parser,
 ) {
     // turn into block version
-    let query_str = "(command_for (keyword_old_for)) @command";
-    loop {
-        let changed = refactor_old_for_statements(tree, updated_string, language, query_str);
-        let new_tree = parser.parse(updated_string.as_str(), Some(&*tree)).unwrap();
-        *tree = new_tree;
+    if let Some(query) = old_for_query(grammar) {
+        loop {
+            let changed = refactor_old_for_statements(tree, updated_string, query);
+            if let Some(new_tree) = parser.parse(updated_string.as_str(), Some(tree)) {
+                *tree = new_tree;
+            } else {
+                break;
+            }
 
-        if !changed {
-            break;
+            if !changed {
+                break;
+            }
         }
     }
     eprintln!("Finished refactoring legacy for statements");
 }
 
 /// Refactors legacy `for` commands in ObjectScript source to block form.
-pub fn refactor_for_statements(content: &str, file_type: FileType) -> String {
-    let language: Language;
-    if file_type == FileType::Cls {
-        language = LANGUAGE_OBJECTSCRIPT_UDL.into();
-    } else {
-        language = LANGUAGE_OBJECTSCRIPT_ROUTINE.into()
-    }
-    let Some(mut parser) = create_parser(&language) else {
-        eprintln!("Error: Failed to create parser");
-        return content.to_string();
-    };
+pub fn refactor_for_statements(
+    content: &str,
+    file_type: FileType,
+    initial_tree: Tree,
+    parser: &mut Parser,
+) -> (String, Tree) {
+    let grammar = refactor_grammar_for_file_type(file_type);
 
-    let Some((mut updated_tree, mut updated_string)) =
-        remove_unreachable_for_statements(content, &language, &mut parser)
-    else {
-        eprintln!("Failed to get tree and string from remove_unreachable_conditionals");
-        return content.to_string();
-    };
-    refactor_legacy_for_statements(
-        &mut updated_tree,
-        &mut updated_string,
-        &language,
-        &mut parser,
-    );
-    updated_string
+    let (mut updated_tree, mut updated_string) =
+        remove_unreachable_for_statements(content, grammar, parser, initial_tree);
+    refactor_legacy_for_statement_to_block(&mut updated_tree, &mut updated_string, grammar, parser);
+    (updated_string, updated_tree)
 }
 
 /// Refactors legacy `if`/`else` commands in ObjectScript source to block form.
-pub fn refactor_conditionals(content: &str, file_type: FileType) -> String {
-    let language: Language;
-    if file_type == FileType::Cls {
-        language = LANGUAGE_OBJECTSCRIPT_UDL.into();
-    } else {
-        language = LANGUAGE_OBJECTSCRIPT_ROUTINE.into()
-    }
-    let Some(mut parser) = create_parser(&language) else {
-        eprintln!("Error: Failed to create parser");
-        return content.to_string();
-    };
+pub fn refactor_conditionals_in_document(
+    content: &str,
+    file_type: FileType,
+    initial_tree: tree_sitter::Tree,
+    parser: &mut Parser,
+) -> (String, Tree) {
+    let grammar = refactor_grammar_for_file_type(file_type);
     // first remove if and else statements that are pointless (if statements with no expression and no statement)
-    let Some((mut updated_tree, mut updated_string)) =
-        remove_unreachable_conditionals(content, &language, &mut parser)
-    else {
-        eprintln!("Failed to get tree and string from remove_unreachable_conditionals");
-        return content.to_string();
-    };
+    let (mut updated_tree, mut updated_string) =
+        remove_unreachable_conditionals(content, grammar, parser, initial_tree);
     // then, refactor the legacy if-else statements, if statements, and else statements
-    refactor_old_conditional_command(
-        &mut updated_tree,
-        &mut updated_string,
-        &language,
-        &mut parser,
-    );
-    updated_string
-}
-
-fn routine_members(node: &Node, content: &str) -> Vec<String> {
-    let mut names = Vec::new();
-    let children = get_node_children(node.clone());
-    for child in children {
-        match child.kind() {
-            "routine_definition" => {
-                let Some(routine_name) = child.named_child(1) else {
-                    eprintln!("Error: couldn't get routine_definition child");
-                    continue;
-                };
-                let Some(name) = get_string_at_byte_range(content, routine_name.byte_range())
-                else {
-                    eprintln!("Couldn't get routine name");
-                    continue;
-                };
-                names.push(name.to_string());
-            }
-            "statement" => {
-                let Some(command) = child.named_child(0) else {
-                    eprintln!("Error: couldn't get statement child");
-                    return names;
-                };
-                match command.kind() {
-                    "tag_statement" | "procedure" => {
-                        let Some(tag) = command.named_child(0) else {
-                            eprintln!("Error: Couldn't get tag from tag statement/procedure");
-                            return names;
-                        };
-                        let Some(tag_name) = get_string_at_byte_range(content, tag.byte_range())
-                        else {
-                            eprintln!("Couldn't get tag name");
-                            return names;
-                        };
-                        names.push(tag_name);
-                    }
-                    _ => continue,
-                }
-            }
-            "dotted_statement" => {
-                let Some(command) = child.named_child(0) else {
-                    eprintln!("Error: couldn't get statement child");
-                    return names;
-                };
-                if command.kind() == "tag" {
-                    let Some(tag_name) = get_string_at_byte_range(content, command.byte_range())
-                    else {
-                        eprintln!("Couldn't get tag name");
-                        return names;
-                    };
-                    names.push(tag_name);
-                }
-            }
-            _ => continue,
-        }
-    }
-    names
+    refactor_old_conditional_command(&mut updated_tree, &mut updated_string, grammar, parser);
+    (updated_string, updated_tree)
 }
 
 fn generated_subroutine_base_name(subroutine_name: &str) -> &str {
@@ -947,14 +1023,14 @@ fn generated_subroutine_base_name(subroutine_name: &str) -> &str {
 fn generate_subroutine_name(
     subroutine_name: &str,
     mut dot_depth: usize,
-    routine_members: &mut Vec<String>,
+    routine_members: &mut HashSet<String>,
 ) -> String {
     let subroutine_name = generated_subroutine_base_name(subroutine_name);
     loop {
         let candidate = format!("{subroutine_name}Subroutine{dot_depth}");
 
         if !routine_members.contains(&candidate) {
-            routine_members.push(candidate.clone());
+            routine_members.insert(candidate.clone());
             return candidate;
         }
         dot_depth += 1;
@@ -979,7 +1055,80 @@ fn line_starts_routine_member(line: &str) -> bool {
     first.is_ascii_alphabetic() || first == '%' || first == '$'
 }
 
-fn has_routine_member_between(content: &str, start_byte: usize, end_byte: usize) -> bool {
+fn routine_member_name_from_line(line: &str) -> Option<String> {
+    if !line_starts_routine_member(line) {
+        return None;
+    }
+
+    let token = line.split_whitespace().next()?;
+    let token = token
+        .split_once('(')
+        .map(|(name, _)| name)
+        .unwrap_or(token)
+        .trim_end_matches(':');
+
+    (!token.is_empty()).then(|| token.to_string())
+}
+
+fn routine_member_info_for_node(
+    content: &str,
+    node: &Node,
+) -> Option<(String, tree_sitter::Range)> {
+    let node_start = node.start_byte();
+    let mut cursor = 0;
+    let mut member = None;
+
+    while cursor < content.len() {
+        let line_end = line_end_before_newline(content, cursor, content.len());
+        if cursor > node_start {
+            break;
+        }
+
+        let line = content
+            .get(cursor..line_end)
+            .unwrap_or("")
+            .trim_end_matches('\r');
+        if let Some(name) = routine_member_name_from_line(line) {
+            member = Some((name, cursor));
+        }
+
+        cursor = match next_line_start(content, cursor, content.len()) {
+            Some(next) => next,
+            None => break,
+        };
+    }
+
+    let (name, member_start) = member?;
+    let mut member_end = content.len();
+    let mut cursor = next_line_start(content, member_start, content.len()).unwrap_or(content.len());
+    while cursor < content.len() {
+        let line_end = line_end_before_newline(content, cursor, content.len());
+        let line = content
+            .get(cursor..line_end)
+            .unwrap_or("")
+            .trim_end_matches('\r');
+        if line_starts_routine_member(line) {
+            member_end = cursor;
+            break;
+        }
+
+        cursor = match next_line_start(content, cursor, content.len()) {
+            Some(next) => next,
+            None => break,
+        };
+    }
+
+    let range = tree_sitter::Range {
+        start_byte: member_start,
+        end_byte: member_end,
+        start_point: point_at_byte(content, member_start),
+        end_point: point_at_byte(content, member_end),
+    };
+
+    Some((name, range))
+}
+
+pub fn has_routine_member_between(content: &str, start_byte: usize, end_byte: usize) -> bool {
     let mut cursor = start_byte;
     let end_byte = end_byte.min(content.len());
     while cursor < end_byte {
@@ -1010,7 +1159,7 @@ fn line_is_comment_or_blank(line: &str) -> bool {
         || trimmed.starts_with("/*")
 }
 
-fn byte_after_trailing_comments(content: &str, start_byte: usize) -> usize {
+pub fn byte_after_trailing_comments(content: &str, start_byte: usize) -> usize {
     let mut cursor = start_byte.min(content.len());
     while cursor < content.len() {
         let tail = content.get(cursor..).unwrap_or("");
@@ -1079,11 +1228,6 @@ fn changes_test_variable(content: &str, node: &Node) -> bool {
         || str.contains("read")
 }
 
-struct GeneratedDoSubroutine {
-    name: String,
-    text: String,
-}
-
 fn node_has_child_kind(node: Node, kind: &str) -> bool {
     let mut cursor = node.walk();
     let has_child = node
@@ -1092,7 +1236,7 @@ fn node_has_child_kind(node: Node, kind: &str) -> bool {
     has_child
 }
 
-fn is_old_do_with_dotted_body(content: &str, node: Node) -> bool {
+pub fn is_old_do_with_dotted_body(content: &str, node: Node) -> bool {
     node.kind() == "command_do"
         && node_has_child_kind(node, "keyword_do_old")
         && direct_dotted_body_depth(content, node.range()).is_some()
@@ -1106,7 +1250,7 @@ fn line_end_before_newline(content: &str, start_byte: usize, max_end_byte: usize
         .unwrap_or(max_end_byte)
 }
 
-fn point_at_byte(content: &str, byte_index: usize) -> tree_sitter::Point {
+pub fn point_at_byte(content: &str, byte_index: usize) -> tree_sitter::Point {
     let safe_byte_index = byte_index.min(content.len());
     let prefix = content.get(..safe_byte_index).unwrap_or("");
     let row = prefix.bytes().filter(|byte| *byte == b'\n').count();
@@ -1145,6 +1289,29 @@ pub fn count_leading_dots_in_line(line: &str) -> usize {
         }
     }
     count
+}
+
+pub fn strip_leading_dots_from_line(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut cursor = 0;
+    while matches!(bytes.get(cursor), Some(b' ' | b'\t')) {
+        cursor += 1;
+    }
+
+    loop {
+        if !matches!(bytes.get(cursor), Some(b'.')) {
+            break;
+        }
+        cursor += 1;
+        while matches!(bytes.get(cursor), Some(b' ' | b'\t')) {
+            cursor += 1;
+        }
+    }
+
+    line.get(cursor..)
+        .unwrap_or("")
+        .trim_end_matches('\r')
+        .to_string()
 }
 
 fn direct_dotted_body_depth(content: &str, range: tree_sitter::Range) -> Option<usize> {
@@ -1204,7 +1371,7 @@ fn dotted_body_line_ranges(
     ranges
 }
 
-fn dotted_body_replacement_end(content: &str, range: tree_sitter::Range) -> Option<usize> {
+pub fn dotted_body_replacement_end(content: &str, range: tree_sitter::Range) -> Option<usize> {
     let dot_depth = direct_dotted_body_depth(content, range)?;
     let body_line_ranges = dotted_body_line_ranges(content, range, dot_depth);
     let last_body_end = body_line_ranges.last()?.end;
@@ -1217,7 +1384,7 @@ fn dotted_body_replacement_end(content: &str, range: tree_sitter::Range) -> Opti
     )
 }
 
-fn strip_dotted_prefix(line: &str, dot_depth: usize) -> Option<(String, usize)> {
+fn strip_dotted_prefix(line: &str, dot_depth: usize) -> Option<String> {
     let bytes = line.as_bytes();
     let mut cursor = 0;
     while matches!(bytes.get(cursor), Some(b' ' | b'\t')) {
@@ -1238,29 +1405,35 @@ fn strip_dotted_prefix(line: &str, dot_depth: usize) -> Option<(String, usize)> 
         }
     }
 
-    Some((
+    Some(
         line.get(cursor..)
             .unwrap_or("")
             .trim_end_matches('\r')
             .to_string(),
-        cursor,
-    ))
+    )
 }
 
-fn build_new_do_call(content: &str, node: Node, sub_name: &str) -> Option<String> {
-    let mut new_do_call = format!("do {sub_name}");
-    let Some(statement_struct) = build_old_statement_struct(&node, content) else {
-        eprintln!("Failed to build do command struct");
-        return None;
+pub fn build_new_do_call(
+    content: &str,
+    sub_name: &str,
+    has_generated_subroutine: bool,
+    statement_struct: &OldStatement,
+) -> String {
+    let mut new_do_call = if has_generated_subroutine {
+        format!("do {sub_name}")
+    } else {
+        String::new()
     };
-    for range in statement_struct.statements_after {
-        let Some(statement) = get_string_at_byte_range(content, range) else {
-            eprintln!("Failed to get statement from do statements after");
-            return None;
+    for range in &statement_struct.statements_after {
+        if let Some(statement) = get_string_at_byte_range(content, range.clone()) {
+            if new_do_call.is_empty() {
+                new_do_call.push_str(format!("{statement}").as_str());
+            } else {
+                new_do_call.push_str(format!(" {statement}").as_str());
+            }
         };
-        new_do_call.push_str(format!(" {statement}").as_str());
     }
-    Some(new_do_call)
+    new_do_call
 }
 
 fn line_starts_with_quit_or_return(line: &str) -> bool {
@@ -1304,29 +1477,31 @@ fn brace_counts(line: &str) -> (usize, usize) {
     })
 }
 
-fn build_generated_dotted_do(
+/// Returns generated subroutine name and text
+pub fn build_generated_subroutine(
     content: &str,
-    command_do: Node,
-    outer_subroutine_name: &str,
-    routine_members: &mut Vec<String>,
+    command_do: &Node,
+    routine_members: &mut HashSet<String>,
     newline: &str,
-) -> Option<GeneratedDoSubroutine> {
+    special_dotted_statement_tag: bool,
+    outer_subroutine_name: &str,
+    is_rtn: bool,
+) -> Option<(String, String)> {
     let dot_depth = direct_dotted_body_depth(content, command_do.range())?;
     let sub_name = generate_subroutine_name(outer_subroutine_name, dot_depth, routine_members);
-    let body_line_ranges = dotted_body_line_ranges(content, command_do.range(), dot_depth);
-    if body_line_ranges.is_empty() {
-        eprintln!("There should be at least one dotted statement, found none");
-        return None;
-    }
-
     let base_indent = "    ";
     let block_indent = "   ";
     let mut body = String::new();
     let mut quit_or_return_end = false;
     let mut block_depth = 0usize;
 
-    if changes_test_variable(content, &command_do) {
+    if changes_test_variable(content, command_do) {
         body.push_str(format!("{base_indent}set temp=$TEST{newline}").as_str());
+    }
+    let body_line_ranges = dotted_body_line_ranges(content, command_do.range(), dot_depth);
+    if body_line_ranges.is_empty() {
+        eprintln!("There should be at least one dotted statement, found none");
+        return None;
     }
 
     for line_range in body_line_ranges {
@@ -1334,11 +1509,11 @@ fn build_generated_dotted_do(
             eprintln!("Error: couldn't get dotted statement string from range");
             return None;
         };
-        let Some((line, _)) = strip_dotted_prefix(raw_line, dot_depth) else {
+        let Some(stripped_line) = strip_dotted_prefix(raw_line, dot_depth) else {
             eprintln!("Error: couldn't strip dotted statement prefix");
             return None;
         };
-        let line = normalize_generated_dotted_line(line.as_str());
+        let line = normalize_generated_dotted_line(stripped_line.as_str());
         let indent_depth = block_depth.saturating_sub(leading_closing_braces(line.as_str()));
         quit_or_return_end = line_starts_with_quit_or_return(line.as_str());
         body.push_str(base_indent);
@@ -1347,153 +1522,196 @@ fn build_generated_dotted_do(
         }
         body.push_str(line.as_str());
         body.push_str(newline);
-
         let (open_braces, close_braces) = brace_counts(line.as_str());
         block_depth = block_depth.saturating_add(open_braces);
         block_depth = block_depth.saturating_sub(close_braces);
     }
-
-    if changes_test_variable(content, &command_do) {
+    if changes_test_variable(content, command_do) {
         body.push_str(format!("{base_indent}set $TEST=temp{newline}").as_str());
     }
     if !quit_or_return_end {
         body.push_str(format!("{base_indent}quit{newline}").as_str());
     }
-
-    let text = format!("{newline}{sub_name} Private{newline}{body}");
-
-    Some(GeneratedDoSubroutine {
-        name: sub_name,
-        text,
-    })
+    let text;
+    if is_rtn {
+        if special_dotted_statement_tag {
+            text = format!("{newline}{sub_name}{newline}{body}");
+        } else {
+            text = format!("{newline}{sub_name} Private{newline}{body}");
+        }
+    } else {
+        if special_dotted_statement_tag {
+            text = format!(
+                "{newline}{base_indent}ClassMethod {sub_name}() [ProcedureBlock = 0] {{{newline}{body}{newline}}}"
+            );
+        } else {
+            text = format!(
+                "{newline}{base_indent}ClassMethod {sub_name}() [ProcedureBlock = 0, Private] {{{newline}{body}{newline}}}"
+            );
+        }
+    }
+    Some((sub_name.to_string(), text))
 }
 
 fn refactor_smallest_dotted_do(
     tree: &mut tree_sitter::Tree,
     updated_string: &mut String,
-    language: &Language,
-    query_str: &str,
-    _parser: &mut Parser,
-    routine_members: &mut Vec<String>,
+    query: &Query,
+    routine_members: &mut HashSet<String>,
+    current_class_methods: &HashMap<String, (tree_sitter::Range, MethodType)>,
+    scope_tree: &ScopeTree,
+    is_rtn: bool,
 ) -> bool {
-    if let Ok(query) = Query::new(language, query_str) {
-        let mut nodes = Vec::new();
-        let root = tree.root_node();
-        let mut cursor = QueryCursor::new();
-        let mut iter = cursor.matches(&query, root, updated_string.as_bytes());
-        while let Some(m) = iter.next() {
-            nodes.push(m.captures[0].node);
-        }
-        nodes.sort_by_key(|node| node.start_byte());
-        if nodes.is_empty() {
-            return false;
-        }
-        let Some(command_do) = nodes
-            .into_iter()
-            .find(|node| is_old_do_with_dotted_body(updated_string.as_str(), *node))
-        else {
-            return false;
-        };
+    let mut nodes = Vec::new();
+    let mut special_dotted_statement_tag = false;
+    let root = tree.root_node();
+    let mut cursor = QueryCursor::new();
+    let mut iter = cursor.matches(query, root, updated_string.as_bytes());
+    while let Some(m) = iter.next() {
+        nodes.push(m.captures[0].node);
+    }
+    nodes.sort_by_key(|node| node.start_byte());
+    if nodes.is_empty() {
+        return false;
+    }
+    let Some(command_do) = nodes
+        .into_iter()
+        .rev()
+        .find(|node| is_old_do_with_dotted_body(updated_string.as_str(), *node))
+    else {
+        return false;
+    };
+    let Some(statement_struct) = build_old_statement_struct(&command_do, updated_string.as_str())
+    else {
+        eprintln!("Error: Failed to build do command struct");
+        return false;
+    };
+    // it should be fine to just reference the same scope tree and class method ranges,
+    // since i am doing this bottom up
 
-        let Some(associated_parent) = command_do.parent() else {
-            eprintln!("Couldn't get parent node for do command");
-            return false;
-        };
-
-        let Some((outer_subroutine_name, sub_last_statement_range)) =
-            find_do_statement_subroutine(updated_string.as_str(), &associated_parent)
-        else {
+    let routine_member_info = if is_rtn {
+        let Some(info) = routine_member_info_for_node(updated_string.as_str(), &command_do) else {
             eprintln!(
-                "Couldn't find do statement subroutine {:?}",
-                command_do.kind()
+                "Error: couldn't find routine member info, aborting (refactor_smallest_dotted_do)"
             );
             return false;
         };
-        let newline = detect_newline(updated_string);
-        let Some(generated) = build_generated_dotted_do(
-            updated_string.as_str(),
-            command_do,
-            outer_subroutine_name.as_str(),
-            routine_members,
-            newline,
-        ) else {
+        Some(info)
+    } else {
+        None
+    };
+    let method_name = if let Some((name, _)) = &routine_member_info {
+        name.clone()
+    } else {
+        let Some(method_name) = scope_tree.get_method_name(command_do.start_position()) else {
+            eprintln!(
+                "Error: couldn't find associated method, aborting (refactor_smallest_dotted_do)"
+            );
             return false;
         };
-        let Some(mut new_do_call) =
-            build_new_do_call(updated_string.as_str(), command_do, generated.name.as_str())
-        else {
-            return false;
-        };
+        method_name
+    };
+    let Some((method_range, method_type)) = current_class_methods.get(&method_name) else {
+        eprintln!(
+            "Error: couldn't find associated method range/type, aborting (refactor_smallest_dotted_do)"
+        );
+        return false;
+    };
+    if matches!(method_type, MethodType::DottedSubroutine(_)) {
+        special_dotted_statement_tag = true;
+    }
+    let insertion_boundary_range = routine_member_info
+        .as_ref()
+        .map(|(_, range)| range)
+        .unwrap_or(method_range);
+    let newline = detect_newline(updated_string);
+    let Some((generated_name, generated_text)) = build_generated_subroutine(
+        updated_string.as_str(),
+        &command_do,
+        routine_members,
+        newline,
+        special_dotted_statement_tag,
+        method_name.as_str(),
+        is_rtn,
+    ) else {
+        return false;
+    };
+    let mut new_do_call = build_new_do_call(
+        updated_string.as_str(),
+        generated_name.as_str(),
+        true,
+        &statement_struct,
+    );
+    let mut old_do_range = command_do.range();
+    if let Some(end_byte) = dotted_body_replacement_end(updated_string.as_str(), command_do.range())
+    {
+        if end_byte < old_do_range.end_byte {
+            old_do_range.end_byte = end_byte;
+            old_do_range.end_point = point_at_byte(updated_string.as_str(), end_byte);
+        }
+    }
+    if insertion_boundary_range.end_byte < old_do_range.end_byte {
+        old_do_range.end_byte = insertion_boundary_range.end_byte;
+        old_do_range.end_point = insertion_boundary_range.end_point;
+    }
 
-        let mut old_do_range = command_do.range();
-        if let Some(end_byte) =
-            dotted_body_replacement_end(updated_string.as_str(), command_do.range())
-        {
-            if end_byte < old_do_range.end_byte {
-                old_do_range.end_byte = end_byte;
-                old_do_range.end_point = point_at_byte(updated_string.as_str(), end_byte);
-            }
-        }
-        let old_do_spans_lines = old_do_range.start_point.row != old_do_range.end_point.row;
-        let mut added_comment = false;
-        let Some(statement_struct) =
-            build_old_statement_struct(&command_do, updated_string.as_str())
-        else {
-            eprintln!("Failed to build do command struct");
+    let old_do_spans_lines = old_do_range.start_point.row != old_do_range.end_point.row;
+    let mut added_comment = false;
+    let Some(statement_struct) = build_old_statement_struct(&command_do, updated_string.as_str())
+    else {
+        eprintln!("Failed to build do command struct");
+        return false;
+    };
+    if let Some(comment_range) = statement_struct.comment_after_last_statement_range {
+        let Some(comment) = get_string_at_byte_range(
+            updated_string.as_str(),
+            comment_range.start_byte..comment_range.end_byte,
+        ) else {
+            eprintln!("Failed to get comment after dotted do");
             return false;
         };
-        if let Some(comment_range) = statement_struct.comment_after_last_statement_range {
-            let Some(comment) = get_string_at_byte_range(
-                updated_string.as_str(),
-                comment_range.start_byte..comment_range.end_byte,
-            ) else {
-                eprintln!("Failed to get comment after dotted do");
-                return false;
-            };
-            new_do_call.push_str(newline);
-            new_do_call.push_str(comment.as_str());
-            added_comment = true;
-        } else if let Some(comment_range) = statement_struct.comment_range {
-            let Some(comment) = get_string_at_byte_range(
-                updated_string.as_str(),
-                comment_range.start_byte..comment_range.end_byte,
-            ) else {
-                eprintln!("Failed to get comment for dotted do");
-                return false;
-            };
-            new_do_call.push_str(newline);
-            new_do_call.push_str(comment.as_str());
-            added_comment = true;
-        }
-        if old_do_spans_lines || added_comment {
-            new_do_call.push_str(newline);
-        }
-        let insert_byte = if has_routine_member_between(
+        new_do_call.push_str(newline);
+        new_do_call.push_str(comment.as_str());
+        added_comment = true;
+    } else if let Some(comment_range) = statement_struct.comment_range {
+        let Some(comment) = get_string_at_byte_range(
+            updated_string.as_str(),
+            comment_range.start_byte..comment_range.end_byte,
+        ) else {
+            eprintln!("Failed to get comment for dotted do");
+            return false;
+        };
+        new_do_call.push_str(newline);
+        new_do_call.push_str(comment.as_str());
+        added_comment = true;
+    }
+    if old_do_spans_lines || added_comment {
+        new_do_call.push_str(newline);
+    }
+    let insert_byte = if is_rtn
+        && has_routine_member_between(
             updated_string.as_str(),
             old_do_range.end_byte,
-            sub_last_statement_range.end_byte,
+            insertion_boundary_range.end_byte,
         ) {
-            byte_after_trailing_comments(updated_string.as_str(), old_do_range.end_byte)
-        } else {
-            byte_after_trailing_comments(updated_string.as_str(), sub_last_statement_range.end_byte)
-        };
-        let insert_point = point_at_byte(updated_string.as_str(), insert_byte);
-        let insert_range = tree_sitter::Range {
-            start_byte: insert_byte,
-            end_byte: insert_byte,
-            start_point: insert_point,
-            end_point: insert_point,
-        };
-        update_tree_and_content(tree, updated_string, insert_range, generated.text.as_str());
-        update_tree_and_content(tree, updated_string, old_do_range, new_do_call.as_str());
-        return true;
+        byte_after_trailing_comments(updated_string.as_str(), old_do_range.end_byte)
     } else {
-        return false;
-    }
+        byte_after_trailing_comments(updated_string.as_str(), insertion_boundary_range.end_byte)
+    };
+    let insert_point = point_at_byte(updated_string.as_str(), insert_byte);
+    let insert_range = tree_sitter::Range {
+        start_byte: insert_byte,
+        end_byte: insert_byte,
+        start_point: insert_point,
+        end_point: insert_point,
+    };
+    update_tree_and_content(tree, updated_string, insert_range, generated_text.as_str());
+    update_tree_and_content(tree, updated_string, old_do_range, new_do_call.as_str());
+    true
 }
 
 /// Given a source_file node, parse the routine and update spacing for first level statements
-fn refactor_spacing_for_subroutines(root: Node, content: &mut String) -> Option<String> {
+pub fn refactor_spacing_for_subroutines(root: Node, content: &mut String) -> Option<String> {
     let base_indent = "    ";
     let mut replacement_string = String::new();
     let statement_children = get_node_children(root);
@@ -1545,39 +1763,47 @@ fn refactor_spacing_for_subroutines(root: Node, content: &mut String) -> Option<
     Some(replacement_string)
 }
 
-/// Extracts dotted `do` bodies into named subroutines and replaces them with `do subroutineName` calls.
-pub fn refactor_legacy_do_statements(content: &str) -> String {
-    let language = LANGUAGE_OBJECTSCRIPT_ROUTINE.into();
-    let Some(mut parser) = create_parser(&language) else {
-        eprintln!("Error: Failed to create parser");
-        return content.to_string();
+/// Extracts dotted `do` bodies from a standalone routine string.
+pub fn refactor_legacy_do_statements(
+    content: &str,
+    file_type: FileType,
+    tree: Tree,
+    scope_tree: &ScopeTree,
+    parser: &mut Parser,
+    routine_members: &mut HashSet<String>,
+    current_class_methods: &HashMap<String, (tree_sitter::Range, MethodType)>,
+) -> (String, Tree) {
+    let grammar = refactor_grammar_for_file_type(file_type);
+    let is_rtn = if file_type == FileType::Routine {
+        true
+    } else {
+        false
     };
-    let Some(mut tree) = parser.parse(content, None) else {
-        eprintln!("Failed to parse content");
-        return content.to_string();
-    };
-    let mut curr_routine_members = routine_members(&tree.root_node(), content);
-
+    let mut tree = tree.clone();
     let mut updated_string = content.to_string();
-
-    let query_str = "(command_do (keyword_do_old)) @command";
     let mut at_least_one_change = false;
 
-    loop {
-        let changed = refactor_smallest_dotted_do(
-            &mut tree,
-            &mut updated_string,
-            &language,
-            query_str,
-            &mut parser,
-            &mut curr_routine_members,
-        );
-        let new_tree = parser.parse(updated_string.as_str(), Some(&tree)).unwrap();
-        tree = new_tree;
-        if !changed {
-            break;
+    if let Some(query) = old_do_query(grammar) {
+        loop {
+            let changed = refactor_smallest_dotted_do(
+                &mut tree,
+                &mut updated_string,
+                query,
+                routine_members,
+                current_class_methods,
+                scope_tree,
+                is_rtn,
+            );
+            if let Some(new_tree) = parser.parse(updated_string.as_str(), Some(&tree)) {
+                tree = new_tree;
+            } else {
+                break;
+            }
+            if !changed {
+                break;
+            }
+            at_least_one_change = true;
         }
-        at_least_one_change = true;
     }
     if at_least_one_change {
         if let Some(replacement_str) =
@@ -1588,100 +1814,5 @@ pub fn refactor_legacy_do_statements(content: &str) -> String {
         };
     }
 
-    updated_string
-}
-
-/// given a statement node of a do statement, find the subroutine or procedure that the
-/// node is a part of
-pub fn find_do_statement_subroutine(
-    content: &str,
-    node: &Node,
-) -> Option<(String, tree_sitter::Range)> {
-    let mut tracker = node.clone();
-
-    while let Some(next) = tracker.parent() {
-        if next.kind() == "procedure" || next.kind() == "source_file" {
-            break;
-        }
-        tracker = next;
-    }
-    let node = tracker;
-    if let Some(parent) = node.parent() {
-        if parent.kind() == "procedure" {
-            let Some(tag_with_params) = parent.named_child(0) else {
-                eprintln!("Expected procedure child to be tag_with_params, but it dne");
-                return None;
-            };
-            let Some(tag) = tag_with_params.named_child(0) else {
-                eprintln!("Expected tag_with_params child to be tag, but it dne");
-                return None;
-            };
-            let Some(name) = get_string_at_byte_range(content, tag.byte_range()) else {
-                eprintln!("Failed to get tag name");
-                return None;
-            };
-
-            return Some((name, parent.range()));
-        }
-    }
-    let mut prev_sibling = node.prev_named_sibling();
-    let name;
-    // now outside of this, we need to look for the closest tag statement
-    while let Some(statement) = prev_sibling {
-        let Some(command) = statement.named_child(0) else {
-            prev_sibling = statement.prev_named_sibling();
-            continue;
-        };
-        if command.kind() == "tag_statement" || command.kind() == "tag_with_params" {
-            let Some(tag) = command.named_child(0) else {
-                eprintln!("Couldn't get tag statement child");
-                return None;
-            };
-            let Some(tag_name) = get_string_at_byte_range(content, tag.byte_range()) else {
-                eprintln!("Failed to get tag name string");
-                return None;
-            };
-            name = tag_name;
-
-            let mut next_sibling = node.next_named_sibling();
-            let mut last_statement_before_end = None;
-            while let Some(next_statement) = next_sibling {
-                let Some(command) = next_statement.named_child(0) else {
-                    next_sibling = next_statement.next_named_sibling();
-                    continue;
-                };
-                if command.kind() == "tag_statement"
-                    || command.kind() == "tag_with_params"
-                    || command.kind() == "procedure"
-                {
-                    let Some(last_statement_before_end) = next_statement.prev_named_sibling()
-                    else {
-                        eprintln!("Couldn't get last statement before end");
-                        return None;
-                    };
-                    return Some((name, last_statement_before_end.range()));
-                }
-                last_statement_before_end = Some(next_statement);
-                next_sibling = next_statement.next_named_sibling();
-            }
-            if let Some(last_statement_before_end) = last_statement_before_end {
-                let mut sibling = node.next_sibling();
-                let mut last_node = None;
-
-                while let Some(next) = sibling {
-                    last_node = Some(next);
-                    sibling = next.next_sibling();
-                }
-                if let Some(last_node) = last_node {
-                    return Some((name, last_node.range()));
-                }
-                return Some((name, last_statement_before_end.range()));
-            } else {
-                return Some((name, node.range()));
-            }
-        }
-        prev_sibling = statement.prev_named_sibling();
-        continue;
-    }
-    return None;
+    (updated_string, tree)
 }

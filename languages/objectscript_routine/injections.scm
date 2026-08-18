@@ -17,3 +17,14 @@
 (embedded_xml
   (angled_bracket_fenced_text) @injection.content
   (#set! injection.language "xml"))
+
+  ([
+  (line_comment_1)
+  (line_comment_2)
+  (line_comment_3)
+  (line_comment_4)
+  (block_comment)
+  (inline_comment)
+  (argumentless_inline_comment)
+  ] @injection.content
+    (#set! injection.language "comment"))

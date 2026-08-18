@@ -9,9 +9,116 @@ use crate::parse_structures::{
 use crate::scope_structures::ScopeId;
 use crate::scope_tree::ScopeTree;
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 use tree_sitter::{Language as TsLanguage, Node, Query, QueryCursor, Range, StreamingIterator};
 use tree_sitter_objectscript::LANGUAGE_OBJECTSCRIPT_UDL;
 use tree_sitter_objectscript_routine::LANGUAGE_OBJECTSCRIPT_ROUTINE;
+
+const SET_VARIABLES_QUERY: &str =
+    "(command_set (set_argument [(set_target) (set_target_list)] @settarget (expression) @value ))";
+
+const ROUTINE_ARGUMENT_QUERY: &str = "(tag_parameter (method_arg) @arg)";
+
+const CLASS_METHOD_ARGUMENT_QUERY: &str =
+    "(argument (method_arg) @arg (return_type (typename) @typename)?)";
+
+const METHOD_DEPENDENCY_QUERY: &str = r#"[(class_method_call) @classmethodcall
+(system_defined_function) @systemfunc
+(relative_dot_method) @relativemethod
+(routine_tag_call) @routine
+(goto_argument) @routine
+(print_argument) @routine
+]"#;
+
+const METHOD_KEYWORD_QUERY: &str = r#"
+    (method_definition ([(method_keyword_codemode_expression) @keyword
+                (method_keyword_external_language) @keyword
+                (method_keyword) @keyword
+                (call_method_keyword) @keyword
+                (return_type (typename (identifier) @returntype ))
+                ]))"#;
+
+fn cached_query(
+    query: &'static OnceLock<Query>,
+    language: TsLanguage,
+    source: &str,
+    name: &str,
+) -> &'static Query {
+    query.get_or_init(|| {
+        Query::new(&language, source)
+            .unwrap_or_else(|error| panic!("failed to compile {name} Tree-sitter query: {error}"))
+    })
+}
+
+fn udl_set_variables_query() -> &'static Query {
+    static QUERY: OnceLock<Query> = OnceLock::new();
+    cached_query(
+        &QUERY,
+        LANGUAGE_OBJECTSCRIPT_UDL.into(),
+        SET_VARIABLES_QUERY,
+        "UDL set variables",
+    )
+}
+
+fn routine_set_variables_query() -> &'static Query {
+    static QUERY: OnceLock<Query> = OnceLock::new();
+    cached_query(
+        &QUERY,
+        LANGUAGE_OBJECTSCRIPT_ROUTINE.into(),
+        SET_VARIABLES_QUERY,
+        "routine set variables",
+    )
+}
+
+fn routine_argument_query() -> &'static Query {
+    static QUERY: OnceLock<Query> = OnceLock::new();
+    cached_query(
+        &QUERY,
+        LANGUAGE_OBJECTSCRIPT_ROUTINE.into(),
+        ROUTINE_ARGUMENT_QUERY,
+        "routine argument",
+    )
+}
+
+fn class_method_argument_query() -> &'static Query {
+    static QUERY: OnceLock<Query> = OnceLock::new();
+    cached_query(
+        &QUERY,
+        LANGUAGE_OBJECTSCRIPT_UDL.into(),
+        CLASS_METHOD_ARGUMENT_QUERY,
+        "class method argument",
+    )
+}
+
+fn udl_method_dependency_query() -> &'static Query {
+    static QUERY: OnceLock<Query> = OnceLock::new();
+    cached_query(
+        &QUERY,
+        LANGUAGE_OBJECTSCRIPT_UDL.into(),
+        METHOD_DEPENDENCY_QUERY,
+        "UDL method dependency",
+    )
+}
+
+fn routine_method_dependency_query() -> &'static Query {
+    static QUERY: OnceLock<Query> = OnceLock::new();
+    cached_query(
+        &QUERY,
+        LANGUAGE_OBJECTSCRIPT_ROUTINE.into(),
+        METHOD_DEPENDENCY_QUERY,
+        "routine method dependency",
+    )
+}
+
+fn method_keyword_query() -> &'static Query {
+    static QUERY: OnceLock<Query> = OnceLock::new();
+    cached_query(
+        &QUERY,
+        LANGUAGE_OBJECTSCRIPT_UDL.into(),
+        METHOD_KEYWORD_QUERY,
+        "method keyword",
+    )
+}
 
 impl Method {
     /// Creates a new `Method` from parsed header information.
@@ -35,7 +142,7 @@ impl Method {
                 code_mode: CodeMode::Code,
                 is_final: Some(true),
             },
-            MethodType::Subroutine(is_public) => Self {
+            MethodType::Subroutine(is_public) | MethodType::DottedSubroutine(is_public) => Self {
                 method_type,
                 return_type: None,
                 name: method_name,
@@ -82,11 +189,10 @@ impl Method {
         variables_in_method: &mut Vec<(Variable, Range, Vec<String>, ScopeId)>,
         method_range: Range,
     ) {
-        let language = &LANGUAGE_OBJECTSCRIPT_ROUTINE.into();
-        let query_str = "(command_set (set_argument [(set_target) (set_target_list)] @settarget (expression) @value ))";
-        if let Ok(query) = Query::new(language, query_str) {
+        {
+            let query = routine_set_variables_query();
             let mut cursor = QueryCursor::new();
-            let mut iter = cursor.matches(&query, node, content.as_bytes());
+            let mut iter = cursor.matches(query, node, content.as_bytes());
             while let Some(query_match) = iter.next() {
                 let set_target_node = query_match.captures[0].node;
                 if !range_within_range(&set_target_node.range(), &method_range) {
@@ -171,15 +277,17 @@ impl Method {
         scope_tree: &ScopeTree,
         variables_in_method: &mut Vec<(Variable, Range, Vec<String>, ScopeId)>,
         class_is_procedure_block: Option<bool>,
-        language: &TsLanguage,
         is_class_method: bool,
     ) {
-        let query_str = "(command_set (set_argument [(set_target) (set_target_list)] @settarget (expression) @value ))";
-        if let Ok(query) = Query::new(language, query_str) {
+        {
+            let query = if is_class_method {
+                udl_set_variables_query()
+            } else {
+                routine_set_variables_query()
+            };
             let mut cursor = QueryCursor::new();
-            let mut iter = cursor.matches(&query, node, content.as_bytes());
+            let mut iter = cursor.matches(query, node, content.as_bytes());
             while let Some(query_match) = iter.next() {
-                eprintln!("CAPTURE {:?}", query_match.captures);
                 let mut var_defs = Vec::new();
                 let mut var_deps = Vec::new();
                 let set_target_node = query_match.captures[0].node;
@@ -274,11 +382,10 @@ impl Method {
         variables_in_method: &mut Vec<(Variable, Range, Vec<String>, ScopeId)>,
         is_procedure: bool, // false if subroutine
     ) {
-        let query_str = "(tag_parameter (method_arg) @arg)";
-        let language: &TsLanguage = &LANGUAGE_OBJECTSCRIPT_ROUTINE.into();
-        if let Ok(query) = Query::new(language, query_str) {
+        {
+            let query = routine_argument_query();
             let mut cursor = QueryCursor::new();
-            let mut iter = cursor.matches(&query, tag_node, content.as_bytes());
+            let mut iter = cursor.matches(query, tag_node, content.as_bytes());
             while let Some(query_match) = iter.next() {
                 let method_arg = query_match.captures[0].node;
                 if let Some(method_arg_type) = method_arg.named_child(0) {
@@ -327,11 +434,10 @@ impl Method {
         variables_in_method: &mut Vec<(Variable, Range, Vec<String>, ScopeId)>,
         class_is_procedure_block: Option<bool>,
     ) {
-        let language: &TsLanguage = &LANGUAGE_OBJECTSCRIPT_UDL.into();
-        let query_str = "(argument (method_arg) @arg (return_type (typename) @typename)?)";
-        if let Ok(query) = Query::new(language, query_str) {
+        {
+            let query = class_method_argument_query();
             let mut cursor = QueryCursor::new();
-            let mut iter = cursor.matches(&query, node, content.as_bytes());
+            let mut iter = cursor.matches(query, node, content.as_bytes());
             let arg_idx = query.capture_index_for_name("arg");
             let typename_idx = query.capture_index_for_name("typename");
             let mut return_type_parameters = Vec::new();
@@ -420,7 +526,7 @@ impl Method {
         &mut self,
         node: Node,
         content: &str,
-        language: &TsLanguage,
+        is_class_method: bool,
         class_name: &str,
         method_range: Range,
     ) -> (
@@ -429,16 +535,14 @@ impl Method {
     ) {
         let mut unresolved_method_refs = HashSet::new();
         let mut unresolved_oref_method_refs = HashSet::new();
-        let query_str = r#"[(class_method_call) @classmethodcall
-        (system_defined_function) @systemfunc
-        (relative_dot_method) @relativemethod
-        (routine_tag_call) @routine
-        (goto_argument) @routine
-        (print_argument) @routine
-        ]"#;
-        if let Ok(query) = Query::new(language, query_str) {
+        {
+            let query = if is_class_method {
+                udl_method_dependency_query()
+            } else {
+                routine_method_dependency_query()
+            };
             let mut cursor = QueryCursor::new();
-            let mut iter = cursor.matches(&query, node, content.as_bytes());
+            let mut iter = cursor.matches(query, node, content.as_bytes());
             let classmethod_idx = query.capture_index_for_name("classmethodcall");
             let systemfunc_idx = query.capture_index_for_name("systemfunc");
             let relativemethod_idx = query.capture_index_for_name("relativemethod");
@@ -682,9 +786,8 @@ impl Method {
                     &mut variables_in_method,
                     method_range,
                 );
-                let language: &TsLanguage = &LANGUAGE_OBJECTSCRIPT_ROUTINE.into();
                 let (unresolved_method_refs, unresolved_oref_method_refs) =
-                    self.get_method_dependencies(node, content, language, class_name, method_range);
+                    self.get_method_dependencies(node, content, false, class_name, method_range);
                 (
                     false,
                     false,
@@ -693,7 +796,7 @@ impl Method {
                     unresolved_oref_method_refs,
                 )
             }
-            MethodType::Subroutine(is_public) => {
+            MethodType::Subroutine(is_public) | MethodType::DottedSubroutine(is_public) => {
                 let is_public_changed = self.is_public != is_public;
                 self.build_routine_method_arguments(
                     node,
@@ -709,9 +812,8 @@ impl Method {
                     &mut variables_in_method,
                     method_range,
                 );
-                let language: &TsLanguage = &LANGUAGE_OBJECTSCRIPT_ROUTINE.into();
                 let (unresolved_method_refs, unresolved_oref_method_refs) =
-                    self.get_method_dependencies(node, content, language, class_name, method_range);
+                    self.get_method_dependencies(node, content, false, class_name, method_range);
 
                 (
                     false,
@@ -723,14 +825,12 @@ impl Method {
             }
             MethodType::Procedure(is_public) => {
                 let is_public_changed = self.is_public != is_public;
-                let language: &TsLanguage = &LANGUAGE_OBJECTSCRIPT_ROUTINE.into();
                 self.build_procedure_set_variables(
                     node,
                     content,
                     scope_tree,
                     &mut variables_in_method,
                     class_is_procedure_block,
-                    language,
                     false,
                 );
                 self.build_routine_method_arguments(
@@ -740,9 +840,8 @@ impl Method {
                     &mut variables_in_method,
                     true,
                 );
-                let language: &TsLanguage = &LANGUAGE_OBJECTSCRIPT_ROUTINE.into();
                 let (unresolved_method_refs, unresolved_oref_method_refs) =
-                    self.get_method_dependencies(node, content, language, class_name, method_range);
+                    self.get_method_dependencies(node, content, false, class_name, method_range);
                 (
                     false,
                     is_public_changed,
@@ -761,18 +860,16 @@ impl Method {
                     &mut variables_in_method,
                     class_is_procedure_block,
                 );
-                let language: &TsLanguage = &LANGUAGE_OBJECTSCRIPT_UDL.into();
                 self.build_procedure_set_variables(
                     node,
                     content,
                     scope_tree,
                     &mut variables_in_method,
                     class_is_procedure_block,
-                    language,
                     true,
                 );
                 let (unresolved_method_refs, unresolved_oref_method_refs) =
-                    self.get_method_dependencies(node, content, language, class_name, method_range);
+                    self.get_method_dependencies(node, content, true, class_name, method_range);
                 return (
                     is_final_changed,
                     is_public_changed,
@@ -796,7 +893,9 @@ impl Method {
                 self.variables.clear();
                 self.public_variables_declared = public_variables_declared;
             }
-            MethodType::Procedure(is_public) | MethodType::Subroutine(is_public) => {
+            MethodType::Procedure(is_public)
+            | MethodType::Subroutine(is_public)
+            | MethodType::DottedSubroutine(is_public) => {
                 self.return_type = None;
                 self.variables.clear();
                 self.public_variables_declared = public_variables_declared;
@@ -823,19 +922,12 @@ impl Method {
         old_class_is_final: Option<bool>,
     ) -> (bool, bool) {
         // reset keywords to default based on method type
-        let query_str = r#"
-            (method_definition ([(method_keyword_codemode_expression) @keyword
-                        (method_keyword_external_language) @keyword
-                        (method_keyword) @keyword
-                        (call_method_keyword) @keyword
-                        (return_type (typename (identifier) @returntype ))
-                        ]))"#;
-        let language: &TsLanguage = &LANGUAGE_OBJECTSCRIPT_UDL.into();
         let mut is_final_changed = false;
         let mut privacy_changed = false;
-        if let Ok(query) = Query::new(language, query_str) {
+        {
+            let query = method_keyword_query();
             let mut cursor = QueryCursor::new();
-            let mut iter = cursor.matches(&query, node, content.as_bytes());
+            let mut iter = cursor.matches(query, node, content.as_bytes());
             let keyword_idx = query.capture_index_for_name("keyword");
             let returntype_idx = query.capture_index_for_name("returntype");
             let old_is_public = self.is_public.clone();
