@@ -10,7 +10,7 @@ use objectscript_core::common::{
 };
 use objectscript_core::config::Config;
 use objectscript_core::parse_structures::{ClassId, FileType, MemberType, RefactorLevel};
-use objectscript_core::workspace::ProjectState;
+use objectscript_core::workspace::{ProjectData, ProjectState};
 use serde_json;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -29,7 +29,9 @@ use tower_lsp::lsp_types::{
     GotoDefinitionResponse, ImplementationProviderCapability, InitializeParams, InitializeResult,
     InitializedParams, Location, MessageType, OneOf, Position, Range as LspRange, Range,
     Registration, RelatedFullDocumentDiagnosticReport, ServerCapabilities, ServerInfo,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, WatchKind, WorkspaceEdit,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url, WatchKind,
+    WorkspaceDiagnosticParams, WorkspaceDiagnosticReport, WorkspaceDiagnosticReportResult,
+    WorkspaceDocumentDiagnosticReport, WorkspaceEdit, WorkspaceFullDocumentDiagnosticReport,
 };
 use tree_sitter::{InputEdit, Parser, Point, Tree};
 use tree_sitter_objectscript_playground::LANGUAGE_OBJECTSCRIPT;
@@ -187,6 +189,48 @@ fn push_xml_injected_objectscript_diagnostics(
     }
 }
 
+fn push_project_semantic_diagnostics(
+    diagnostics: &mut Vec<Diagnostic>,
+    data: &ProjectData,
+    uri: &Url,
+) {
+    if let Some(class_diagnostics) = data.other_class_diagnostics.get(uri) {
+        diagnostics.extend(class_diagnostics.iter().cloned());
+    }
+
+    for diagnostics_by_url in data.inheritance_diagonstics.values() {
+        if let Some(diagnostic) = diagnostics_by_url.get(uri) {
+            diagnostics.push(diagnostic.clone());
+        }
+    }
+
+    for diagnostics_by_url in data.method_reference_diagnostics.values() {
+        if let Some(diagnostic) = diagnostics_by_url.get(uri) {
+            diagnostics.push(diagnostic.clone());
+        }
+    }
+}
+
+fn collect_document_diagnostics(data: &ProjectData, uri: &Url) -> Option<Vec<Diagnostic>> {
+    let document = data.documents.get(uri)?;
+    let mut diagnostics = Vec::new();
+    let content = document.content.as_str();
+
+    push_host_syntax_diagnostics(
+        &mut diagnostics,
+        content,
+        &document.tree,
+        document.file_type.clone(),
+    );
+
+    if document.file_type == FileType::Xml {
+        push_xml_injected_objectscript_diagnostics(&mut diagnostics, content, &document.tree);
+    }
+
+    push_project_semantic_diagnostics(&mut diagnostics, data, uri);
+    Some(diagnostics)
+}
+
 fn build_refactor_command(
     command: &str,
     uri: &tower_lsp::lsp_types::Url,
@@ -290,8 +334,8 @@ fn build_caps(cfg: &Config) -> ServerCapabilities {
         })),
         diagnostic_provider: Some(DiagnosticServerCapabilities::Options(DiagnosticOptions {
             identifier: None,
-            inter_file_dependencies: false,
-            workspace_diagnostics: false,
+            inter_file_dependencies: true,
+            workspace_diagnostics: true,
             work_done_progress_options: Default::default(),
         })),
         execute_command_provider: Some(ExecuteCommandOptions {
@@ -315,6 +359,16 @@ fn build_caps(cfg: &Config) -> ServerCapabilities {
 #[tower_lsp::async_trait]
 impl LanguageServer for BackendWrapper {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        let diagnostic_refresh_supported = params
+            .capabilities
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.diagnostic.as_ref())
+            .and_then(|diagnostic| diagnostic.refresh_support)
+            .unwrap_or(false);
+        self.0
+            .set_diagnostic_refresh_supported(diagnostic_refresh_supported);
+
         // negotiate w/ client to set config for formatting, lint, snippets
         let negotiations: Config = params
             .initialization_options
@@ -473,6 +527,7 @@ impl LanguageServer for BackendWrapper {
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        let mut changed_any = false;
         for change in params.changes {
             let Some(file_type) = file_type_from_path(change.uri.path()) else {
                 continue;
@@ -496,6 +551,11 @@ impl LanguageServer for BackendWrapper {
                 .unwrap_or(0);
 
             project.handle_document_opened(change.uri, text, file_type, version);
+            changed_any = true;
+        }
+
+        if changed_any {
+            self.0.refresh_workspace_diagnostics_if_supported().await;
         }
     }
 
@@ -585,7 +645,6 @@ impl LanguageServer for BackendWrapper {
         params: DocumentDiagnosticParams,
     ) -> Result<DocumentDiagnosticReportResult> {
         let uri = params.text_document.uri;
-        let mut diagnostics: Vec<Diagnostic> = Vec::new();
         let Some(project) = self.0.get_project_from_document_url(&uri) else {
             self.0
                 .client
@@ -594,14 +653,12 @@ impl LanguageServer for BackendWrapper {
             generic_exit_statements("LSP", "diagnostic");
             return Ok(empty_diagnostic_report());
         };
-        let doc_snapshot: Option<(FileType, String, Tree)> = {
+        let diagnostics = {
             let data = project.data.read();
-            data.documents
-                .get(&uri)
-                .map(|d| (d.file_type.clone(), d.content.clone(), d.tree.clone()))
+            collect_document_diagnostics(&data, &uri)
         };
 
-        let (file_type, content, tree) = match doc_snapshot {
+        let diagnostics = match diagnostics {
             Some(v) => v,
             None => {
                 self.0
@@ -611,24 +668,7 @@ impl LanguageServer for BackendWrapper {
                 return Ok(empty_diagnostic_report());
             }
         };
-        let content = content.as_str();
-        push_host_syntax_diagnostics(&mut diagnostics, content, &tree, file_type.clone());
-        if file_type == FileType::Xml {
-            let host_count = diagnostics.len();
-            push_xml_injected_objectscript_diagnostics(&mut diagnostics, content, &tree);
-            self.0
-                .client
-                .log_message(
-                    MessageType::INFO,
-                    format!(
-                        "XML diagnostic for {} -> host errors: {}, total errors after injected ObjectScript pass: {}",
-                        uri,
-                        host_count,
-                        diagnostics.len()
-                    ),
-                )
-                .await;
-        }
+
         Ok(
             DocumentDiagnosticReport::Full(RelatedFullDocumentDiagnosticReport {
                 related_documents: None,
@@ -639,6 +679,36 @@ impl LanguageServer for BackendWrapper {
             })
             .into(),
         )
+    }
+
+    async fn workspace_diagnostic(
+        &self,
+        _params: WorkspaceDiagnosticParams,
+    ) -> Result<WorkspaceDiagnosticReportResult> {
+        let projects: Vec<_> = self.0.projects.read().values().cloned().collect();
+        let mut items = Vec::new();
+
+        for project in projects {
+            let data = project.data.read();
+            for (uri, document) in &data.documents {
+                let Some(diagnostics) = collect_document_diagnostics(&data, uri) else {
+                    continue;
+                };
+
+                items.push(WorkspaceDocumentDiagnosticReport::Full(
+                    WorkspaceFullDocumentDiagnosticReport {
+                        uri: uri.clone(),
+                        version: document.version.map(i64::from),
+                        full_document_diagnostic_report: FullDocumentDiagnosticReport {
+                            result_id: None,
+                            items: diagnostics,
+                        },
+                    },
+                ));
+            }
+        }
+
+        Ok(WorkspaceDiagnosticReport { items }.into())
     }
 
     async fn goto_definition(
@@ -1488,6 +1558,7 @@ impl LanguageServer for BackendWrapper {
             file_type,
             params.text_document.version,
         );
+        self.0.refresh_workspace_diagnostics_if_supported().await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -1543,6 +1614,7 @@ impl LanguageServer for BackendWrapper {
             // Reuse normal open handling so XML docs are tracked and ObjectScript docs still
             // populate their semantic state when a change arrives before an explicit didOpen.
             project.handle_document_opened(uri, text, file_type, new_version);
+            self.0.refresh_workspace_diagnostics_if_supported().await;
             return;
         };
 
@@ -1651,9 +1723,11 @@ impl LanguageServer for BackendWrapper {
                 doc.version = Some(new_version);
                 doc.file_type = file_type.clone();
             }
+            data.clear_diagnostics_for_url(&uri);
         }
 
         if file_type == FileType::Xml {
+            self.0.refresh_workspace_diagnostics_if_supported().await;
             return;
         }
 
@@ -1662,6 +1736,7 @@ impl LanguageServer for BackendWrapper {
                 .client
                 .log_message(MessageType::ERROR, format!("New Tree has Errors"))
                 .await;
+            self.0.refresh_workspace_diagnostics_if_supported().await;
         } else {
             let changed_ranges: Vec<tree_sitter::Range> =
                 new_tree.changed_ranges(&old_tree).collect();
@@ -1673,6 +1748,7 @@ impl LanguageServer for BackendWrapper {
                 old_text.as_str(),
                 changed_ranges,
             );
+            self.0.refresh_workspace_diagnostics_if_supported().await;
         }
     }
 }
@@ -1968,6 +2044,39 @@ set = 1
         assert!(
             !items.is_empty(),
             "expected diagnostic() to return injected ObjectScript errors for XML"
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_indexing_keeps_clean_xml_diagnostics_empty() {
+        let (service, _socket) = LspService::build(|client| BackendWrapper::new(client)).finish();
+        let backend = service.inner();
+
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("diagnostics");
+        let workspace_uri = Url::from_file_path(&project_root).unwrap();
+        let state = ProjectState::new();
+        state
+            .project_root_path
+            .set(Some(project_root.clone()))
+            .expect("failed to set workspace root");
+        backend.0.add_project(workspace_uri.clone(), state);
+        backend.0.index_workspace(&workspace_uri).await;
+
+        let clean_xml_uri = Url::from_file_path(project_root.join("injected-clean.xml")).unwrap();
+        let project = backend
+            .0
+            .get_project(&workspace_uri)
+            .expect("missing project state");
+        let data = project.data.read();
+        let diagnostics = collect_document_diagnostics(&data, &clean_xml_uri)
+            .expect("indexed XML document should be tracked");
+
+        assert!(
+            diagnostics.is_empty(),
+            "clean XML should not inherit parse errors from workspace indexing: {diagnostics:#?}"
         );
     }
 

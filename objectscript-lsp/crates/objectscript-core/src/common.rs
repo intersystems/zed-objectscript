@@ -362,7 +362,7 @@ pub fn get_member_name_and_range_from_root(
     content: &str,
     node: Node,
     is_rtn: bool,
-) -> Option<(Range, String)> {
+) -> Option<(Range, String, Range)> {
     return if is_rtn {
         get_routine_name_from_root(content, node)
     } else {
@@ -377,7 +377,7 @@ pub fn get_member_name_and_range_from_root(
 ///
 /// Returns `None` if no class definition/name is found or if the byte range is invalid; prints a
 /// warning on unexpected/mismatched structure.
-fn get_class_name_from_root(content: &str, node: Node) -> Option<(Range, String)> {
+fn get_class_name_from_root(content: &str, node: Node) -> Option<(Range, String, Range)> {
     let query = class_name_query();
     let mut cursor = QueryCursor::new();
     let mut iter = cursor.matches(query, node, content.as_bytes());
@@ -389,7 +389,7 @@ fn get_class_name_from_root(content: &str, node: Node) -> Option<(Range, String)
                 if let Some(class_name) =
                     get_string_at_byte_range(content, matched_node.byte_range())
                 {
-                    return Some((parent.range(), class_name));
+                    return Some((parent.range(), class_name, matched_node.range()));
                 }
             }
             parent_node = parent.parent();
@@ -399,7 +399,7 @@ fn get_class_name_from_root(content: &str, node: Node) -> Option<(Range, String)
 }
 
 /// Given root node (source_file), find the routine name
-fn get_routine_name_from_root(content: &str, root: Node) -> Option<(Range, String)> {
+fn get_routine_name_from_root(content: &str, root: Node) -> Option<(Range, String, Range)> {
     // either it starts as a statement or as a routine_def
     if let Some(node) = root.named_child(0) {
         match node.kind() {
@@ -420,7 +420,7 @@ fn get_routine_name_from_root(content: &str, root: Node) -> Option<(Range, Strin
                 if let Some(routine_name) =
                     get_string_at_byte_range(content, name_node.byte_range())
                 {
-                    return Some((root.range(), routine_name));
+                    return Some((root.range(), routine_name, name_node.range()));
                 }
             }
             "statement" | "compiled_header" => {
@@ -447,7 +447,7 @@ fn get_routine_name_from_root(content: &str, root: Node) -> Option<(Range, Strin
                         if let Some(routine_name) =
                             get_string_at_byte_range(content, tag.byte_range())
                         {
-                            return Some((root.range(), routine_name));
+                            return Some((root.range(), routine_name, tag.range()));
                         }
                     }
                 }
@@ -691,8 +691,8 @@ pub fn point_in_range(pos: Point, start: Point, end: Point) -> bool {
 }
 
 pub fn range_within_range(inner: &Range, outer: &Range) -> bool {
-    point_in_range(inner.start_point, outer.start_point, outer.end_point)
-        && point_in_range(inner.end_point, outer.start_point, outer.end_point)
+    // Tree-sitter end points are exclusive, so equality at the end still means contained.
+    inner.start_point >= outer.start_point && inner.end_point <= outer.end_point
 }
 
 /// Returns `true` if `node` is treated as a scope boundary in `.cls` parsing.
@@ -770,7 +770,7 @@ pub fn is_rtn_method_end(node_str: &str, compiled_header: bool) -> bool {
 pub fn get_procedure_info(
     node: &Node,
     content: &str,
-) -> Option<(String, Range, MethodType, HashSet<String>)> {
+) -> Option<(String, Range, Range, MethodType, HashSet<String>)> {
     let Some(statement_type) = node.named_child(0) else {
         eprintln!("Error: Expected Statement node to have child at index 0");
         return None;
@@ -784,6 +784,7 @@ pub fn get_procedure_info(
     let Some(method_name) = get_string_at_byte_range(content, tag.byte_range()) else {
         return None;
     };
+    let method_name_range = tag.range();
     let procedure_range = statement_type.range();
     let mut is_public = false;
     let procedure_children = get_node_children(statement_type);
@@ -809,6 +810,7 @@ pub fn get_procedure_info(
     }
     return Some((
         method_name,
+        method_name_range,
         procedure_range,
         MethodType::Procedure(is_public),
         public_variables_declared,
@@ -885,7 +887,7 @@ pub fn get_parameter_name(node: &Node, content: &str) -> Option<String> {
 pub fn get_dotted_subroutine_info(
     node: &Node,
     content: &str,
-) -> Option<(String, Range, MethodType)> {
+) -> Option<(String, Range, Range, MethodType)> {
     if let Some(dotted_statement_parent) = node.parent()
         && let Some(tag_node) = node.named_child(0)
         && let Some(method_name) = get_string_at_byte_range(content, tag_node.byte_range())
@@ -899,6 +901,7 @@ pub fn get_dotted_subroutine_info(
         }
         return Some((
             method_name,
+            tag_node.range(),
             dotted_statement_parent.range(),
             MethodType::DottedSubroutine(true),
         ));
@@ -909,7 +912,10 @@ pub fn get_dotted_subroutine_info(
 }
 
 /// Given a statement node of a tag statement, get the range of the method it defines
-pub fn get_subroutine_info(node: &Node, content: &str) -> Option<(String, Range, MethodType)> {
+pub fn get_subroutine_info(
+    node: &Node,
+    content: &str,
+) -> Option<(String, Range, Range, MethodType)> {
     let mut is_public = true;
     let Some(statement_type) = node.named_child(0) else {
         eprintln!("Error: Expected Statement node to have child at index 0");
@@ -967,6 +973,7 @@ pub fn get_subroutine_info(node: &Node, content: &str) -> Option<(String, Range,
     };
     return Some((
         method_name,
+        tag.range(),
         subroutine_range,
         MethodType::Subroutine(is_public),
     ));

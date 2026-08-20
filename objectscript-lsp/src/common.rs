@@ -32,13 +32,22 @@ pub fn diagnostic_message(node: Node, error_text: &str) -> Option<String> {
                                                 "set_target" | "set_target_list" => {
                                                     if let Some(next_sib) = child.next_sibling() {
                                                         if next_sib.kind() == "=" {
-                                                            return Some(format!("Syntax Error: Expected an expression, {} is not a valid expression.", error_text));
+                                                            return Some(format!(
+                                                                "Syntax Error: Expected an expression, {} is not a valid expression.",
+                                                                error_text
+                                                            ));
                                                         }
                                                     };
-                                                    return Some(format!("Syntax Error: Expected '=' or another variable name separated with by a comma and contained within parenthesis, got {}", error_text));
+                                                    return Some(format!(
+                                                        "Syntax Error: Expected '=' or another variable name separated with by a comma and contained within parenthesis, got {}",
+                                                        error_text
+                                                    ));
                                                 }
                                                 "expression" => {
-                                                    return Some(format!("Syntax Error: Unexpected, {} after an expression. Expected a binary operator or end of SET command", error_text));
+                                                    return Some(format!(
+                                                        "Syntax Error: Unexpected, {} after an expression. Expected a binary operator or end of SET command",
+                                                        error_text
+                                                    ));
                                                 }
 
                                                 _ => return None,

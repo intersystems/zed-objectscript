@@ -5,7 +5,7 @@ ClassMethod Shared()
     Write "base"
 }
 
-Method Common()
+ClassMethod Common()
 {
     Write "base common"
 }

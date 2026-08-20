@@ -2,6 +2,7 @@ use crate::scope_structures::ScopeId;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::hash::Hasher;
+use tower_lsp::lsp_types::Range as LspRange;
 use tree_sitter::Range;
 /// Stores the Index into `GlobalSemanticModel::classes`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -158,7 +159,7 @@ pub struct Class {
     // if inheritance keyword == left, leftmost supersedes all (default)
     // if inheritancedirection == right, right supersedes
     /// Direct parent classes in the `Extends` list.
-    pub inherited_classes: Vec<String>,
+    pub inherited_classes: Vec<(String, LspRange)>,
     /// Inheritance conflict resolution direction (`left`, or `right`, default is `left`).
     pub inheritance_direction: Option<String>,
     /// Optional ProcedureBlock default for this class; If defined, methods will inherit this keyword if they don't specify it themselves.

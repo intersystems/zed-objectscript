@@ -38,8 +38,8 @@ Registered in `build_caps` (`lsp.rs:296`):
 ```rust
 diagnostic_provider: Some(DiagnosticServerCapabilities::Options(DiagnosticOptions {
     identifier: None,
-    inter_file_dependencies: false,
-    workspace_diagnostics: false,
+    inter_file_dependencies: true,
+    workspace_diagnostics: true,
     work_done_progress_options: Default::default(),
 }))
 ```

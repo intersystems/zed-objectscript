@@ -4,13 +4,13 @@ use petgraph::Direction;
 use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
 use petgraph::visit::EdgeRef;
 use std::collections::{HashMap, HashSet, VecDeque};
+use tower_lsp::lsp_types::Range as LspRange;
 use tree_sitter::Range;
-
 /// Stores all subclasses that depend on a given class through inheritance.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Dependents {
     pub dependent_classes: HashMap<ClassId, HashSet<ClassId>>,
-    pub direct_subclasses: HashMap<ClassId, HashSet<ClassId>>,
+    pub direct_subclasses: HashMap<ClassId, HashMap<ClassId, LspRange>>,
 }
 
 impl Dependents {
@@ -22,7 +22,7 @@ impl Dependents {
         }
     }
 
-    pub fn get_direct_subclasses(&self, class_id: &ClassId) -> Option<&HashSet<ClassId>> {
+    pub fn get_direct_subclasses(&self, class_id: &ClassId) -> Option<&HashMap<ClassId, LspRange>> {
         self.direct_subclasses.get(class_id)
     }
 
@@ -36,7 +36,7 @@ impl Dependents {
         let mut queue: VecDeque<ClassId> = VecDeque::new();
 
         if let Some(direct) = self.direct_subclasses.get(&class_id) {
-            queue.extend(direct.iter().copied());
+            queue.extend(direct.keys().copied());
         }
 
         while let Some(child) = queue.pop_front() {
@@ -44,7 +44,7 @@ impl Dependents {
                 continue;
             }
             if let Some(grandchildren) = self.direct_subclasses.get(&child) {
-                queue.extend(grandchildren.iter().copied());
+                queue.extend(grandchildren.keys().copied());
             }
         }
 

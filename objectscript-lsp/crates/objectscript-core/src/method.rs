@@ -720,7 +720,7 @@ impl Method {
                                     }
                                 }
                                 "line_ref" => {
-                                    let (method_name, routine_name, _) = parse_line_ref(
+                                    let (routine_name, method_name, offset) = parse_line_ref(
                                         routine_tag_call_child,
                                         content,
                                         class_name.to_string(),
@@ -729,7 +729,7 @@ impl Method {
                                     unresolved_method_refs.insert(UnresolvedMethodRef {
                                         class: routine_name,
                                         method: method_name,
-                                        offset: None,
+                                        offset,
                                         method_call_range: matched_node.range(),
                                     });
                                 }

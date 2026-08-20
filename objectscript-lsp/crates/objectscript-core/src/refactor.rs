@@ -688,7 +688,7 @@ fn refactor_old_else_statements(
     let start_byte = statement_struct.keyword_old_range.start_byte;
     let start_point = statement_struct.keyword_old_range.start_point;
     let base_indent = line_indent_before(updated_string, start_byte);
-    let mut replacement_string = String::from(format!("{base_indent}if $TEST = 0"));
+    let mut replacement_string = String::from("if $TEST = 0");
     let Some(statements) =
         normalized_statement_lines(updated_string, statement_struct.statement_ranges.as_slice())
     else {
@@ -945,13 +945,26 @@ fn build_replacement_string_block(
     newline: &str,
     statements: &[String],
 ) -> String {
-    let statement_indent = format!("{base_indent}   ");
+    let statement_indent = child_block_indent(base_indent);
     let mut new_str = String::new();
     new_str.push_str(format!(" {{{newline}").as_str());
     new_str
         .push_str(indent_statement_lines(statements, statement_indent.as_str(), newline).as_str());
     new_str.push_str(format!("{newline}{base_indent}}}").as_str());
     new_str
+}
+
+fn child_block_indent(base_indent: &str) -> String {
+    if !base_indent.is_empty() && base_indent.chars().all(|ch| ch == '\t') {
+        return format!("{base_indent}\t");
+    }
+
+    let base_width = base_indent
+        .chars()
+        .map(|ch| if ch == '\t' { 4 } else { 1 })
+        .sum::<usize>();
+
+    format!("{base_indent}{}", " ".repeat(4 - (base_width % 4)))
 }
 
 fn refactor_legacy_for_statement_to_block(

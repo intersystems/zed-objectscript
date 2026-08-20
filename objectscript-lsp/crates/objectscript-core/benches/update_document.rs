@@ -19,6 +19,9 @@ use tree_sitter::{InputEdit, Parser, Point, Range, Tree};
 use tree_sitter_objectscript::LANGUAGE_OBJECTSCRIPT_UDL;
 use tree_sitter_objectscript_routine::LANGUAGE_OBJECTSCRIPT_ROUTINE;
 
+const LARGE_DOTTED_STATEMENTS_FIXTURE: &str =
+    "objectscript-tests/local/test-large-dotted-statements-full.mac";
+
 #[derive(Clone)]
 struct PreparedEdit {
     old_content: String,
@@ -32,6 +35,7 @@ struct PreparedEdit {
     is_rtn: bool,
     new_class_range: Range,
     new_class_name: String,
+    new_class_name_def: Range,
 }
 
 struct BenchConfig {
@@ -98,6 +102,7 @@ fn bench_update_document(c: &mut Criterion) {
                             black_box(prepared.changed_ranges.clone()),
                             black_box(prepared.new_class_name.clone()),
                             black_box(prepared.new_class_range),
+                            black_box(prepared.new_class_name_def),
                         );
                         assert_eq!(
                             full_update_document_call_count(),
@@ -196,9 +201,12 @@ fn build_project_data(prepared: &PreparedEdit) -> ProjectData {
         dependency_graph: DependencyGraph::new(),
         unresolved_inheritance_references: HashMap::new(),
         unresolved_method_references: HashMap::new(),
+        inheritance_diagonstics: HashMap::new(),
+        method_reference_diagnostics: HashMap::new(),
+        other_class_diagnostics: HashMap::new(),
     };
 
-    let (class_range, class_name) = get_member_name_and_range_from_root(
+    let (class_range, class_name, _class_name_def) = get_member_name_and_range_from_root(
         &prepared.old_content,
         prepared.old_tree.root_node(),
         prepared.is_rtn,
@@ -236,6 +244,17 @@ fn prepared_inputs_from_env() -> Vec<(String, PreparedEdit)> {
         return vec![(label, prepared)];
     }
 
+    if let Ok(preset) = env::var("BENCH_INPUT_PRESET") {
+        let path = input_preset_path(&preset);
+        let prepared = prepare_file_edit(&path);
+        let label = format!(
+            "preset_{}_bytes_{}",
+            sanitize_label(&preset),
+            prepared.old_content.len()
+        );
+        return vec![(label, prepared)];
+    }
+
     bench_configs_from_env()
         .into_iter()
         .map(|config| {
@@ -249,6 +268,19 @@ fn prepared_inputs_from_env() -> Vec<(String, PreparedEdit)> {
             (label, prepared)
         })
         .collect()
+}
+
+fn input_preset_path(preset: &str) -> PathBuf {
+    match preset {
+        "large_dotted_statements" | "large-dotted-statements" | "large_dotted" => {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(LARGE_DOTTED_STATEMENTS_FIXTURE)
+        }
+        other => {
+            panic!("unsupported BENCH_INPUT_PRESET {other:?}; expected \"large_dotted_statements\"")
+        }
+    }
 }
 
 fn prepare_synthetic_edit(config: &BenchConfig) -> PreparedEdit {
@@ -306,7 +338,7 @@ fn prepare_synthetic_edit(config: &BenchConfig) -> PreparedEdit {
         end_point: point_for_byte(&new_content, marker_start + new_marker.len()),
     }];
 
-    let (new_class_range, new_class_name) =
+    let (new_class_range, new_class_name, new_class_name_def) =
         get_member_name_and_range_from_root(&new_content, new_tree.root_node(), is_rtn)
             .expect("new generated class should have a class name");
 
@@ -325,6 +357,7 @@ fn prepare_synthetic_edit(config: &BenchConfig) -> PreparedEdit {
         is_rtn,
         new_class_range,
         new_class_name,
+        new_class_name_def,
     }
 }
 
@@ -371,7 +404,7 @@ fn prepare_file_edit(path: &Path) -> PreparedEdit {
         end_point: point_for_byte(&new_content, insert_at + insertion.len()),
     }];
 
-    let (new_class_range, new_class_name) =
+    let (new_class_range, new_class_name, new_class_name_def) =
         get_member_name_and_range_from_root(&new_content, new_tree.root_node(), is_rtn)
             .unwrap_or_else(|| panic!("benchmark input file {path:?} should have a member name"));
 
@@ -390,6 +423,7 @@ fn prepare_file_edit(path: &Path) -> PreparedEdit {
         is_rtn,
         new_class_range,
         new_class_name,
+        new_class_name_def,
     }
 }
 

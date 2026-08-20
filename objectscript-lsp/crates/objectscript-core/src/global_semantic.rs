@@ -723,7 +723,7 @@ impl GlobalSemanticModel {
                     primary_parent: c
                         .inherited_classes
                         .get(0)
-                        .and_then(|name| name_to_id.get(name))
+                        .and_then(|(name, _)| name_to_id.get(name))
                         .copied(),
                 }
             })
@@ -814,18 +814,18 @@ impl GlobalSemanticModel {
             .collect();
 
         let n = entries.len();
-        let mut children: Vec<Vec<ClassId>> = vec![Vec::new(); n];
+        let mut children = vec![Vec::new(); n];
         let mut index = Dependents::new();
 
         for (child_id, cls) in entries.iter() {
             if !cls.active {
                 continue;
             }
-            for parent_name in &cls.inherited_classes {
+            for (parent_name, parent_range) in &cls.inherited_classes {
                 if let Some(&parent_id) = name_to_id.get(parent_name) {
                     if let Some(&parent_idx) = id_to_idx.get(&parent_id) {
                         if entries[parent_idx].1.active {
-                            children[parent_idx].push(*child_id);
+                            children[parent_idx].push((*child_id, parent_range.clone()));
                         }
                     }
                 }
@@ -836,7 +836,7 @@ impl GlobalSemanticModel {
             if !cls.active {
                 continue;
             }
-            let direct: HashSet<ClassId> = children[i].iter().copied().collect();
+            let direct = children[i].iter().cloned().collect();
             index.direct_subclasses.insert(*class_id, direct);
         }
 
@@ -845,7 +845,7 @@ impl GlobalSemanticModel {
 
         fn dfs(
             idx: usize,
-            children: &Vec<Vec<ClassId>>,
+            children: &Vec<Vec<(ClassId, tower_lsp::lsp_types::Range)>>,
             id_to_idx: &HashMap<ClassId, usize>,
             memo: &mut Vec<Option<HashSet<ClassId>>>,
             state: &mut Vec<DfsState>,
@@ -863,9 +863,9 @@ impl GlobalSemanticModel {
             state[idx] = DfsState::Visiting;
 
             let mut table: HashSet<ClassId> = HashSet::new();
-            for &child in &children[idx] {
-                table.insert(child);
-                if let Some(&child_idx) = id_to_idx.get(&child) {
+            for (child, _) in &children[idx] {
+                table.insert(*child);
+                if let Some(&child_idx) = id_to_idx.get(child) {
                     table.extend(dfs(child_idx, children, id_to_idx, memo, state));
                 }
             }

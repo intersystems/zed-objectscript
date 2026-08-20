@@ -5,7 +5,7 @@ ClassMethod Shared()
     Write "right"
 }
 
-Method Common()
+ClassMethod Common()
 {
     Write "right common"
 }

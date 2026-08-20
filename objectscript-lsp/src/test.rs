@@ -1,7 +1,9 @@
 #[cfg(test)]
 mod tests {
     use crate::backend_testing::BackendTester;
-    use objectscript_core::common::{get_keyword_and_value, parse_line_ref};
+    use objectscript_core::common::{
+        advance_point, get_keyword_and_value, parse_line_ref, point_to_byte, position_to_point,
+    };
     use objectscript_core::parse_structures::{
         FileType, Language, MethodRef, RefactorLevel, VariableRef,
     };
@@ -11,8 +13,8 @@ mod tests {
     use std::env;
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
-    use tower_lsp::lsp_types::Url;
-    use tree_sitter::{Parser, Point, Range};
+    use tower_lsp::lsp_types::{Position, Url};
+    use tree_sitter::{InputEdit, Parser, Point, Range};
     use tree_sitter_objectscript::LANGUAGE_OBJECTSCRIPT_UDL;
     use tree_sitter_objectscript_playground::LANGUAGE_OBJECTSCRIPT;
     use tree_sitter_objectscript_routine::LANGUAGE_OBJECTSCRIPT_ROUTINE;
@@ -245,6 +247,20 @@ mod tests {
         eprintln!("METHODS {:?}", methods);
         let method_ref = methods.get("print2").unwrap();
         assert_eq!(method_ref, superclass_method_ref);
+
+        let unresolved_key = ("hksubclass".to_string(), "print2".to_string());
+        assert!(
+            !project_data
+                .unresolved_method_references
+                .contains_key(&unresolved_key),
+            "inherited relative method call should not remain unresolved"
+        );
+        assert!(
+            !project_data
+                .method_reference_diagnostics
+                .contains_key(&unresolved_key),
+            "inherited relative method call should not keep a stale diagnostic"
+        );
     }
 
     #[tokio::test]
@@ -400,11 +416,19 @@ mod tests {
         };
 
         assert_eq!(
-            sub_one_class_inherited.inherited_classes,
+            sub_one_class_inherited
+                .inherited_classes
+                .iter()
+                .map(|(class_name, _)| class_name.clone())
+                .collect::<Vec<_>>(),
             vec!["SuperClass".to_string()]
         );
         assert_eq!(
-            sub_two_class_inherited.inherited_classes,
+            sub_two_class_inherited
+                .inherited_classes
+                .iter()
+                .map(|(class_name, _)| class_name.clone())
+                .collect::<Vec<_>>(),
             vec!["SuperClass".to_string()]
         );
     }
@@ -756,7 +780,7 @@ check()
  i x = 2 {
     w hi
     i y = 5 {
-       w goodbye
+        w goodbye
     }
  }
  quit
@@ -795,6 +819,34 @@ Method Test()
     }
 
     #[test]
+    fn refactors_old_if_in_indented_cls_method_to_next_indent_level() {
+        let input = r#"Class Bench.Refactor
+{
+Method Test()
+{
+    i x = 2 set y = 5 set z = 6
+    quit
+}
+}
+"#;
+        let expected = r#"Class Bench.Refactor
+{
+Method Test()
+{
+    i x = 2 {
+        set y = 5
+        set z = 6
+    }
+    quit
+}
+}
+"#;
+
+        let actual = refactor_conditionals_for_test(input, FileType::Cls);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn refactors_old_if_else_in_cls_method_into_braced_blocks() {
         let input = r#"Class Bench.Refactor
 {
@@ -817,6 +869,31 @@ Method Test()
  }
  quit
 }
+}
+"#;
+
+        let actual = refactor_conditionals_for_test(input, FileType::Cls);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn refactors_standalone_old_else_in_indented_cls_method_without_duplicate_indent() {
+        let input = r#"Class LegacyIfCode
+{
+    Method validElse()
+    {
+        else  w "yes this is valid"
+    }
+}
+"#;
+        let expected = r#"Class LegacyIfCode
+{
+    Method validElse()
+    {
+        if $TEST = 0 {
+            w "yes this is valid"
+        }
+    }
 }
 "#;
 
@@ -1171,13 +1248,25 @@ Method Test()
             .get("Demo.ChildDefault")
             .expect("Demo.ChildDefault should exist");
 
-        let child_url = Url::from_file_path(project_root.join("child-default.cls")).unwrap();
+        let child_url = Url::from_file_path(project_root.join("child-left.cls")).unwrap();
         let locations =
             project_data.get_method_superclass("UseParent".to_string(), child_class_id, &child_url);
         // UseParent is not in any parent, so no superclass resolution
         assert!(
             locations.is_empty(),
             "UseParent is unique to ChildDefault, no superclass def"
+        );
+
+        let common_ref = project_data
+            .method_defs
+            .get("Demo.ChildDefault")
+            .and_then(|methods| methods.get("Common"))
+            .expect("Demo.ChildDefault should see inherited Common");
+        let common_url = method_owner_url(&project_data, common_ref);
+        assert!(
+            common_url.path().ends_with("base.cls"),
+            "default left inheritance should resolve Common through LeftParent to Demo.Base, got {}",
+            common_url.path()
         );
 
         // Verify inheritance is recorded (left parent first)
@@ -1188,6 +1277,59 @@ Method Test()
         assert!(
             !class.inherited_classes.is_empty(),
             "should have inherited classes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_goto_def_multiple_inheritance_late_left_parent_prefers_base() {
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("gotodef")
+            .join("multiple-inheritance");
+
+        let state = ProjectState::new();
+        state.project_root_path.set(Some(project_root.clone())).ok();
+        let backend = BackendTester::new();
+        let uri = Url::from_file_path(project_root.clone()).unwrap();
+        backend.add_project(uri.clone(), state);
+        let project_state = backend.get_project(&uri).expect("missing project state");
+
+        for file_name in [
+            "base.cls",
+            "right-parent.cls",
+            "child-left.cls",
+            "left-parent.cls",
+        ] {
+            let url = Url::from_file_path(project_root.join(file_name)).unwrap();
+            let content = std::fs::read_to_string(project_root.join(file_name)).unwrap();
+            project_state.handle_document_opened(url, content, FileType::Cls, 1);
+        }
+
+        let project_data = project_state.data.read();
+        let common_ref = project_data
+            .override_index
+            .effective_methods
+            .get("Demo.ChildDefault")
+            .and_then(|methods| methods.get("Common"))
+            .expect("Demo.ChildDefault should have effective Common");
+        let common_url = method_owner_url(&project_data, common_ref);
+        assert!(
+            common_url.path().ends_with("base.cls"),
+            "late LeftParent indexing should move Common from RightParent to Demo.Base, got {}",
+            common_url.path()
+        );
+
+        let method_defs_ref = project_data
+            .method_defs
+            .get("Demo.ChildDefault")
+            .and_then(|methods| methods.get("Common"))
+            .expect("goto-def should see inherited Common through method_defs");
+        let method_defs_url = method_owner_url(&project_data, method_defs_ref);
+        assert!(
+            method_defs_url.path().ends_with("base.cls"),
+            "goto-def should resolve Common through method_defs to Demo.Base, got {}",
+            method_defs_url.path()
         );
     }
 
@@ -1215,6 +1357,18 @@ Method Test()
         assert!(
             !class.inherited_classes.is_empty(),
             "should have inherited classes"
+        );
+
+        let common_ref = project_data
+            .method_defs
+            .get("Demo.ChildRight")
+            .and_then(|methods| methods.get("Common"))
+            .expect("Demo.ChildRight should see inherited Common");
+        let common_url = method_owner_url(&project_data, common_ref);
+        assert!(
+            common_url.path().ends_with("right-parent.cls"),
+            "right inheritance should resolve Common through RightParent, got {}",
+            common_url.path()
         );
     }
 
@@ -1426,6 +1580,116 @@ Method Test()
         let tree = parse_routine(&content);
         let errors = objectscript_core::common::collect_error_nodes(tree.root_node());
         assert!(errors.is_empty(), "clean .mac should have no parse errors");
+    }
+
+    #[test]
+    fn test_diagnostics_postconditional_do_dotted_block_has_no_errors() {
+        let content = r#"ROUTINE test
+
+dottedComment
+ do
+ . /*w hi*/
+ . set x = 1
+ . if x {
+ .    w "bye" if z d
+ .    w "in z"
+ . }
+"#;
+
+        let tree = parse_routine(content);
+        let errors = objectscript_core::common::collect_error_nodes(tree.root_node());
+        let details = errors
+            .iter()
+            .map(|node| {
+                format!(
+                    "{} missing={} [{}:{} - {}:{}]",
+                    node.kind(),
+                    node.is_missing(),
+                    node.start_position().row + 1,
+                    node.start_position().column + 1,
+                    node.end_position().row + 1,
+                    node.end_position().column + 1
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert!(
+            errors.is_empty(),
+            "postconditional DO dotted block should have no parse errors: {details}"
+        );
+    }
+
+    #[test]
+    fn test_incremental_edit_postconditional_do_dotted_block_matches_full_parse() {
+        let old_content = std::fs::read_to_string(
+            env::current_dir()
+                .unwrap()
+                .join("objectscript-tests")
+                .join("dotted-block")
+                .join("test-dotted-block.mac"),
+        )
+        .unwrap();
+        let old_text = ".    w \"bye\"";
+        let new_text = ".    w \"bye\" if z d\n .    w \"in z\"";
+        let new_content = old_content.replace(old_text, new_text);
+
+        with_refactor_parser(FileType::Routine, |parser| {
+            let mut incremental_text = old_content.clone();
+            let mut incremental_tree =
+                parse_for_file_type(incremental_text.as_str(), FileType::Routine, parser);
+            let full_tree = parse_for_file_type(new_content.as_str(), FileType::Routine, parser);
+
+            let start_byte = old_content
+                .find(old_text)
+                .expect("old text should exist in fixture");
+            let old_end_byte = start_byte + old_text.len();
+            let start_point = point_from_byte_index(old_content.as_str(), start_byte);
+            let old_end_point = point_from_byte_index(old_content.as_str(), old_end_byte);
+            let start_position = Position {
+                line: start_point.row as u32,
+                character: start_point.column as u32,
+            };
+            let old_end_position = Position {
+                line: old_end_point.row as u32,
+                character: old_end_point.column as u32,
+            };
+
+            let start_position = position_to_point(incremental_text.as_str(), start_position);
+            let start_byte = point_to_byte(incremental_text.as_str(), start_position);
+            let old_end_position = position_to_point(incremental_text.as_str(), old_end_position);
+            let old_end_byte = point_to_byte(incremental_text.as_str(), old_end_position);
+            let new_end_byte = start_byte + new_text.len();
+            let new_end_position =
+                advance_point(start_position.row, start_position.column, new_text);
+
+            let input_edit = InputEdit {
+                start_byte,
+                old_end_byte,
+                new_end_byte,
+                start_position,
+                old_end_position,
+                new_end_position,
+            };
+            incremental_text.replace_range(start_byte..old_end_byte, new_text);
+            incremental_tree.edit(&input_edit);
+            let incremental_tree = parser
+                .parse(incremental_text.as_str(), Some(&incremental_tree))
+                .expect("incremental parse should succeed");
+
+            let full_errors = objectscript_core::common::collect_error_nodes(full_tree.root_node());
+            let incremental_errors =
+                objectscript_core::common::collect_error_nodes(incremental_tree.root_node());
+            assert_eq!(
+                full_errors.len(),
+                incremental_errors.len(),
+                "incremental parse should report the same number of errors as a full parse"
+            );
+            assert_eq!(
+                full_tree.root_node().to_sexp(),
+                incremental_tree.root_node().to_sexp(),
+                "incremental parse should match a full parse"
+            );
+        });
     }
 
     #[test]
@@ -1750,6 +2014,81 @@ Method Test()
                 .nth(locations[0].1.start_point.row)
                 .unwrap(),
             " w !, \"line after main\""
+        );
+
+        let correct_key = ("offsetgoto".to_string(), "main".to_string());
+        let swapped_key = ("main".to_string(), "offsetgoto".to_string());
+        assert!(
+            !project_data
+                .unresolved_method_references
+                .contains_key(&correct_key),
+            "main+3 should resolve to the main tag in the current routine"
+        );
+        assert!(
+            !project_data
+                .method_reference_diagnostics
+                .contains_key(&correct_key),
+            "main+3 should not create an unresolved-method diagnostic"
+        );
+        assert!(
+            !project_data
+                .unresolved_method_references
+                .contains_key(&swapped_key),
+            "line_ref parsing should not swap routine and tag names"
+        );
+        assert!(
+            !project_data
+                .method_reference_diagnostics
+                .contains_key(&swapped_key),
+            "line_ref parsing should not leave a stale swapped-key diagnostic"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_routine_variable_definition_keeps_distinct_call_paths() {
+        let project_root = env::current_dir().unwrap().join("routines");
+        let (backend, uri) = setup_backend_and_workspace(project_root.clone()).await;
+        let project_state = backend.get_project(&uri).expect("missing project state");
+        let project_data = project_state.data.read();
+
+        let tagcalls_url = Url::from_file_path(project_root.join("tag-calls.mac")).unwrap();
+        let tagcalls_doc = project_data
+            .documents
+            .get(&tagcalls_url)
+            .expect("tag-calls.mac should be indexed");
+        let x_use_point = point_for_substring(&tagcalls_doc.content, "x\n w !, \"helping\"");
+
+        let locations =
+            project_data.get_variable_definition(&tagcalls_url, x_use_point, "x".to_string());
+        let mut resolved_lines = HashSet::new();
+        for (url, range) in &locations {
+            let file_name = PathBuf::from(url.path())
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            let document = project_data
+                .documents
+                .get(url)
+                .expect("definition document should be indexed");
+            let line = document
+                .content
+                .lines()
+                .nth(range.start_point.row)
+                .unwrap()
+                .trim()
+                .to_string();
+            resolved_lines.insert((file_name, line));
+        }
+
+        assert_eq!(
+            locations.len(),
+            2,
+            "x in tagcalls.helper should resolve to the nearest definition on each call path"
+        );
+        assert!(resolved_lines.contains(&("tag-calls.mac".to_string(), "set x = 1".to_string())));
+        assert!(
+            resolved_lines.contains(&("offset-goto.mac".to_string(), "set x = 72".to_string()))
         );
     }
 

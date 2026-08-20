@@ -1,4 +1,4 @@
-use objectscript_core::common::get_member_name_and_range_from_root;
+use objectscript_core::common::{get_member_name_and_range_from_root, ts_range_to_lsp_range};
 use objectscript_core::config::Config;
 use objectscript_core::dependency_tracker::{DependencyGraph, Dependents};
 use objectscript_core::global_semantic::GlobalSemanticModel;
@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::env;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
-use tower_lsp::lsp_types::Url;
+use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Url};
 use tree_sitter::{InputEdit, Parser, Point, Range, Tree};
 use tree_sitter_objectscript::LANGUAGE_OBJECTSCRIPT_UDL;
 
@@ -27,6 +27,7 @@ struct PreparedEdit {
     url: Url,
     new_class_range: Range,
     new_class_name: String,
+    new_class_name_def: Range,
 }
 
 struct BenchConfig {
@@ -150,6 +151,7 @@ fn collect_samples(
                     black_box(prepared.changed_ranges.clone()),
                     black_box(prepared.new_class_name.clone()),
                     black_box(prepared.new_class_range),
+                    black_box(prepared.new_class_name_def),
                 );
                 let fallback_calls = full_update_document_call_count();
                 assert_eq!(
@@ -184,14 +186,42 @@ fn build_project_data(prepared: &PreparedEdit) -> ProjectData {
         dependency_graph: DependencyGraph::new(),
         unresolved_inheritance_references: HashMap::new(),
         unresolved_method_references: HashMap::new(),
+        inheritance_diagonstics: HashMap::new(),
+        method_reference_diagnostics: HashMap::new(),
+        other_class_diagnostics: HashMap::new(),
     };
 
-    let (class_range, class_name) = get_member_name_and_range_from_root(
+    let (class_range, class_name, new_class_name_def) = get_member_name_and_range_from_root(
         &prepared.old_content,
         prepared.old_tree.root_node(),
         false,
     )
     .expect("old generated class should have a class name");
+    if data.classes.contains_key(&class_name) {
+        let lsp_range = ts_range_to_lsp_range(&prepared.old_content, new_class_name_def);
+        let diagnostic = Diagnostic {
+            range: lsp_range,
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: None,
+            code_description: None,
+            source: Some("ObjectScript".to_string()),
+            message: format!(
+                "A Class named {:?} already exists in this workspace.",
+                &class_name
+            ),
+            related_information: None,
+            tags: None,
+            data: None,
+        };
+        data.other_class_diagnostics
+            .entry(prepared.url.clone())
+            .or_insert(Vec::new())
+            .push(diagnostic);
+        eprintln!(
+            "Error: A class with name {:?} already exists, aborting (incremental_update_document)",
+            &class_name
+        );
+    }
     let class_id = ClassId(data.global_semantic_model.next_id());
 
     data.add_document(
@@ -261,7 +291,7 @@ fn prepare_edit(config: &BenchConfig) -> PreparedEdit {
         end_point: point_for_byte(&new_content, marker_start + new_marker.len()),
     }];
 
-    let (new_class_range, new_class_name) =
+    let (new_class_range, new_class_name, new_class_name_def) =
         get_member_name_and_range_from_root(&new_content, new_tree.root_node(), false)
             .expect("new generated class should have a class name");
 
@@ -277,6 +307,7 @@ fn prepare_edit(config: &BenchConfig) -> PreparedEdit {
         url,
         new_class_range,
         new_class_name,
+        new_class_name_def,
     }
 }
 

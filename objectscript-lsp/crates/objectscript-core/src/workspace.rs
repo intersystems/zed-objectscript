@@ -1,6 +1,6 @@
 use crate::common::{
     find_class_definition, generic_exit_statements, get_member_name_and_range_from_root,
-    initial_build_scope_tree, point_to_byte,
+    initial_build_scope_tree, point_to_byte, ts_range_to_lsp_range,
 };
 use crate::config::Config;
 use crate::dependency_tracker::{DependencyGraph, Dependents};
@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 #[cfg(feature = "update-bench")]
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tower_lsp::lsp_types::Url;
+use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Range as LspRange, Url};
 use tree_sitter::{Parser, Point, Range, Tree};
 use tree_sitter_objectscript::LANGUAGE_OBJECTSCRIPT_UDL;
 use tree_sitter_objectscript_routine::LANGUAGE_OBJECTSCRIPT_ROUTINE;
@@ -131,9 +131,12 @@ pub struct ProjectData {
     /// Graph of all calls to methods/procedures/subroutines for each class
     pub dependency_graph: DependencyGraph,
     /// Unresolved Class Name -> Class Id that tried to inherit it
-    pub unresolved_inheritance_references: HashMap<String, HashSet<ClassId>>,
+    pub unresolved_inheritance_references: HashMap<String, Vec<(ClassId, LspRange)>>,
     /// (Unresolved ClassName, Unresolved Method Name) -> HashSet<(MethodRef, Range)> representing the place the unresolved reference took place.
     pub unresolved_method_references: HashMap<(String, String), HashSet<(MethodRef, Range)>>,
+    pub inheritance_diagonstics: HashMap<String, HashMap<Url, Diagnostic>>,
+    pub method_reference_diagnostics: HashMap<(String, String), HashMap<Url, Diagnostic>>,
+    pub other_class_diagnostics: HashMap<Url, Vec<Diagnostic>>,
 }
 
 /// Concurrency wrapper for a workspace’s state and parsers.
@@ -152,6 +155,22 @@ pub struct ProjectState {
 }
 
 impl ProjectData {
+    pub fn clear_diagnostics_for_url(&mut self, url: &Url) {
+        self.other_class_diagnostics.remove(url);
+
+        self.inheritance_diagonstics
+            .retain(|_, diagnostics_by_url| {
+                diagnostics_by_url.remove(url);
+                !diagnostics_by_url.is_empty()
+            });
+
+        self.method_reference_diagnostics
+            .retain(|_, diagnostics_by_url| {
+                diagnostics_by_url.remove(url);
+                !diagnostics_by_url.is_empty()
+            });
+    }
+
     /// Return basic immutable snapshot information for a document.
     ///
     /// Produces `(file_type, content, version, tree)` for the document at `url`. The text and tree
@@ -380,26 +399,17 @@ impl ProjectData {
 
     fn resolve_method_references(
         &mut self,
+        content: &str,
         unresolved_method_refs: &HashSet<UnresolvedMethodRef>,
         method_ref: MethodRef,
         class_id: ClassId,
     ) {
         for unresolved_method_ref in unresolved_method_refs {
-            let referenced_method_in_class = self
-                .global_semantic_model
-                .get_class(&class_id)
-                .and_then(|c| c.methods.get(&unresolved_method_ref.method).copied());
-            if let Some(referenced_method) = self
-                .method_defs
-                .get(&unresolved_method_ref.class)
-                .and_then(|methods| methods.get(&unresolved_method_ref.method))
-            {
-                self.dependency_graph.add_edge(
-                    method_ref,
-                    *referenced_method,
-                    unresolved_method_ref.method_call_range,
-                );
-            } else if let Some(referenced_method) = referenced_method_in_class {
+            if let Some(referenced_method) = self.resolve_accessible_method_ref(
+                &unresolved_method_ref.class,
+                &unresolved_method_ref.method,
+                Some(class_id),
+            ) {
                 self.dependency_graph.add_edge(
                     method_ref,
                     referenced_method,
@@ -413,11 +423,72 @@ impl ProjectData {
                     ))
                     .or_insert(HashSet::new())
                     .insert((method_ref, unresolved_method_ref.method_call_range));
+                if let Some(cls_sym) = self
+                    .global_semantic_model
+                    .get_class_symbol(&method_ref.class)
+                {
+                    let lsp_range =
+                        ts_range_to_lsp_range(content, unresolved_method_ref.method_call_range);
+                    let diagnostic = Diagnostic {
+                        range: lsp_range,
+                        severity: Some(DiagnosticSeverity::WARNING),
+                        code: None,
+                        code_description: None,
+                        source: Some("ObjectScript".to_string()),
+                        message: format!(
+                            "Method referenced has either not yet been indexed or does not exist"
+                        ),
+                        related_information: None,
+                        tags: None,
+                        data: None,
+                    };
+                    self.method_reference_diagnostics
+                        .entry((
+                            unresolved_method_ref.class.clone(),
+                            unresolved_method_ref.method.clone(),
+                        ))
+                        .or_insert(HashMap::new())
+                        .insert(cls_sym.url.clone(), diagnostic);
+                }
             }
         }
     }
 
-    fn fully_remove_old_class_members(&mut self, class_id: &ClassId) {
+    fn resolve_accessible_method_ref(
+        &self,
+        class_name: &str,
+        method_name: &str,
+        fallback_class_id: Option<ClassId>,
+    ) -> Option<MethodRef> {
+        self.method_defs
+            .get(class_name)
+            .and_then(|methods| methods.get(method_name))
+            .copied()
+            .or_else(|| {
+                self.override_index
+                    .effective_methods
+                    .get(class_name)
+                    .and_then(|methods| methods.get(method_name))
+                    .copied()
+            })
+            .or_else(|| {
+                self.classes
+                    .get(class_name)
+                    .copied()
+                    .or_else(|| {
+                        fallback_class_id.and_then(|class_id| {
+                            self.global_semantic_model
+                                .get_class(&class_id)
+                                .and_then(|class| (class.name == class_name).then_some(class_id))
+                        })
+                    })
+                    .and_then(|class_id| self.global_semantic_model.get_class(&class_id))
+                    .and_then(|class| class.methods.get(method_name))
+                    .copied()
+            })
+    }
+
+    fn fully_remove_old_class_members(&mut self, class_id: &ClassId, content: &str) {
         let classes: HashSet<ClassId> = self.classes.values().copied().collect();
         let (class_name, inherited_classes) =
             if let Some(class) = self.global_semantic_model.get_class(&class_id) {
@@ -436,6 +507,32 @@ impl ProjectData {
                     let method_caller_refs = self
                         .dependency_graph
                         .remove_incoming_calls_to_node(*stale_node_index);
+                    for (method_ref, method_call_range) in &method_caller_refs {
+                        let lsp_range = ts_range_to_lsp_range(content, *method_call_range);
+                        let Some(cls_sym) = self
+                            .global_semantic_model
+                            .get_class_symbol(&method_ref.class)
+                        else {
+                            continue;
+                        };
+                        let diagnostic = Diagnostic {
+                            range: lsp_range,
+                            severity: Some(DiagnosticSeverity::WARNING),
+                            code: None,
+                            code_description: None,
+                            source: Some("ObjectScript".to_string()),
+                            message: format!(
+                                "Method referenced has either not yet been indexed or does not exist"
+                            ),
+                            related_information: None,
+                            tags: None,
+                            data: None,
+                        };
+                        self.method_reference_diagnostics
+                            .entry((class_name.to_string(), stale_method_name.clone()))
+                            .or_insert(HashMap::new())
+                            .insert(cls_sym.url.clone(), diagnostic);
+                    }
                     self.unresolved_method_references
                         .entry((class_name.to_string(), stale_method_name.clone()))
                         .or_insert(HashSet::new())
@@ -461,7 +558,7 @@ impl ProjectData {
             class.clear(class_name, false);
         }
 
-        self.build_override_index_for_classes(&classes);
+        self.rebuild_override_index_for_classes_and_apply(&classes);
     }
 
     pub fn full_update_document(
@@ -477,6 +574,7 @@ impl ProjectData {
     ) {
         #[cfg(feature = "update-bench")]
         FULL_UPDATE_DOCUMENT_CALLS.fetch_add(1, Ordering::Relaxed);
+        self.clear_diagnostics_for_url(&url);
 
         if filetype == FileType::Xml {
             let document = Document::new(
@@ -491,7 +589,7 @@ impl ProjectData {
             self.documents.insert(url, document);
             return;
         } else if filetype == FileType::Routine || filetype == FileType::Cls {
-            self.fully_remove_old_class_members(&class_id);
+            self.fully_remove_old_class_members(&class_id, content);
             self.global_semantic_model.remove_class(&class_id);
             self.documents.remove(&url);
             self.add_document(
@@ -527,6 +625,8 @@ impl ProjectData {
         version: Option<i32>,
         class_range: Range,
     ) {
+        self.clear_diagnostics_for_url(&url);
+
         if filetype == FileType::Xml {
             let document = Document::new(
                 content.to_string(),
@@ -580,20 +680,23 @@ impl ProjectData {
                 node
             };
             // this is a new class, so some things returned from this function are not applicable
-            let (_, _, methods, properties, parameters, inherited_classes, _) = class.build_class(
-                starting_node,
-                content,
-                is_rtn,
-                &class_id,
-                class_range,
-                &class_name,
-            );
+            let (_, _, methods, properties, parameters, inherited_classes, _, class_diagnostics) =
+                class.build_class(
+                    starting_node,
+                    content,
+                    is_rtn,
+                    &class_id,
+                    class_range,
+                    &class_name,
+                );
 
             class.build_imports(tree, content);
 
             // adds class and class symbol to global semantic model
             self.global_semantic_model
                 .new_class(class, class_id, class_range, url.clone());
+            self.other_class_diagnostics
+                .insert(url.clone(), class_diagnostics);
             // inherits is_procedure_block, is_final, language from leftmost inherited class if applicable
             self.rebuild_keyword_inheritance_for_class(&class_id);
             // NOTE: this must be checked after the keyword inheritance is completed.
@@ -611,6 +714,7 @@ impl ProjectData {
                 &inherited_classes,
                 class_is_final.unwrap_or(false),
                 &mut classes_to_recompute_inheritance,
+                &url,
             );
             classes_to_recompute_inheritance.insert(class_id);
             let mut unresolved_orefs = HashMap::new();
@@ -756,7 +860,12 @@ impl ProjectData {
                     .entry(class_name.clone())
                     .or_insert_with(HashMap::new)
                     .insert(method_name.clone(), method_ref);
-                self.resolve_method_references(&unresolved_method_refs, method_ref, class_id);
+                self.resolve_method_references(
+                    content,
+                    &unresolved_method_refs,
+                    method_ref,
+                    class_id,
+                );
                 unresolved_orefs.insert(method_ref, unresolved_oref_method_refs);
                 if !method.is_public {
                     // creates method symbol in scope tree (private)
@@ -798,6 +907,32 @@ impl ProjectData {
                         &document.scope_tree,
                     );
                     for (key, value) in unresolved {
+                        for (method_ref, method_call_range) in &value {
+                            let lsp_range = ts_range_to_lsp_range(content, *method_call_range);
+                            let Some(cls_sym) = self
+                                .global_semantic_model
+                                .get_class_symbol(&method_ref.class)
+                            else {
+                                continue;
+                            };
+                            let diagnostic = Diagnostic {
+                                range: lsp_range,
+                                severity: Some(DiagnosticSeverity::WARNING),
+                                code: None,
+                                code_description: None,
+                                source: Some("ObjectScript".to_string()),
+                                message: format!(
+                                    "Method referenced has either not yet been indexed or does not exist"
+                                ),
+                                related_information: None,
+                                tags: None,
+                                data: None,
+                            };
+                            self.method_reference_diagnostics
+                                .entry(key.clone())
+                                .or_insert(HashMap::new())
+                                .insert(cls_sym.url.clone(), diagnostic);
+                        }
                         self.unresolved_method_references
                             .entry(key)
                             .or_insert(HashSet::new())
@@ -873,10 +1008,10 @@ impl ProjectData {
     fn remove_stale_class_from_dependent_classes(
         &mut self,
         class_id: ClassId,
-        inherited_classes: &Vec<String>,
+        inherited_classes: &Vec<(String, LspRange)>,
     ) -> Vec<ClassId> {
         let mut stale_classes = Vec::new();
-        for old_inherited_class in inherited_classes {
+        for (old_inherited_class, _) in inherited_classes {
             if let Some(inherited_class_id) = self.classes.get(old_inherited_class) {
                 stale_classes.push(*inherited_class_id);
                 if let Some(inherited_class_dependents) = self
@@ -898,16 +1033,17 @@ impl ProjectData {
     fn add_dependent_class_to_inherited_class(
         &mut self,
         dependent_class_id: ClassId,
-        inherited_classes: &Vec<String>,
+        dependent_document_url: Url,
+        inherited_classes: &Vec<(String, LspRange)>,
         classes_to_recompute_inheritance: &mut HashSet<ClassId>,
     ) {
-        for inherited_cls_name in inherited_classes {
+        for (inherited_cls_name, inherited_class_ref_range) in inherited_classes {
             if let Some(inherited_class_id) = self.classes.get(inherited_cls_name).copied() {
                 self.dependent_class_index
                     .direct_subclasses
                     .entry(inherited_class_id)
-                    .or_insert(HashSet::new())
-                    .insert(dependent_class_id);
+                    .or_insert(HashMap::new())
+                    .insert(dependent_class_id, inherited_class_ref_range.clone());
                 self.dependent_class_index
                     .dependent_classes
                     .entry(inherited_class_id)
@@ -926,10 +1062,27 @@ impl ProjectData {
                     .extend(new_class_dependents.clone());
                 classes_to_recompute_inheritance.extend(new_class_dependents);
             } else {
+                let diagnostic = Diagnostic {
+                    range: inherited_class_ref_range.clone(),
+                    severity: Some(DiagnosticSeverity::WARNING),
+                    code: None,
+                    code_description: None,
+                    source: Some("ObjectScript".to_string()),
+                    message:
+                        "Reference to Class that has either not yet been indexed or does not exist"
+                            .to_string(),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                };
                 self.unresolved_inheritance_references
                     .entry(inherited_cls_name.clone())
-                    .or_insert(HashSet::new())
-                    .insert(dependent_class_id);
+                    .or_insert(Vec::new())
+                    .push((dependent_class_id, inherited_class_ref_range.clone()));
+                self.inheritance_diagonstics
+                    .entry(inherited_cls_name.clone())
+                    .or_insert(HashMap::new())
+                    .insert(dependent_document_url.clone(), diagnostic);
             }
         }
     }
@@ -937,6 +1090,7 @@ impl ProjectData {
     fn resolve_unresolved_class(
         &mut self,
         unresolved_class_name: &str,
+        unresolved_url: &Url,
         classes_to_recompute_inheritance: &mut HashSet<ClassId>,
     ) {
         // find any current classes that already extend this class
@@ -945,11 +1099,13 @@ impl ProjectData {
             .get(unresolved_class_name)
             .cloned()
         {
-            let inherited_class = &vec![unresolved_class_name.to_string()];
-            for dependent_class_id in classes_already_extending_current_class {
-                // inheritance class id represents
+            for (dependent_class_id, inherited_ref_range) in classes_already_extending_current_class
+            {
+                let inherited_class =
+                    &vec![(unresolved_class_name.to_string(), inherited_ref_range)];
                 self.add_dependent_class_to_inherited_class(
                     dependent_class_id,
+                    unresolved_url.clone(),
                     inherited_class,
                     classes_to_recompute_inheritance,
                 );
@@ -958,6 +1114,7 @@ impl ProjectData {
         }
         self.unresolved_inheritance_references
             .remove(unresolved_class_name);
+        self.inheritance_diagonstics.remove(unresolved_class_name);
     }
 
     fn resolve_unresolved_method(&mut self, key: &(String, String), method_ref: MethodRef) {
@@ -967,6 +1124,7 @@ impl ProjectData {
                     .add_edge(method_caller.0, method_ref, method_caller.1);
             }
         }
+        self.method_reference_diagnostics.remove(key);
     }
 
     fn update_class_name_in_workspace(&mut self, old_class_name: &str, new_class_name: &str) {
@@ -987,21 +1145,28 @@ impl ProjectData {
         &mut self,
         new_class_name: &str,
         class_id: ClassId,
-        new_inherited_classes: &Vec<String>,
+        new_inherited_classes: &Vec<(String, LspRange)>,
         new_class_is_final: bool,
         classes_to_recompute_inheritance: &mut HashSet<ClassId>,
+        current_url: &Url,
     ) {
         if !new_class_is_final {
-            self.resolve_unresolved_class(new_class_name, classes_to_recompute_inheritance);
+            self.resolve_unresolved_class(
+                new_class_name,
+                current_url,
+                classes_to_recompute_inheritance,
+            );
         }
         self.add_dependent_class_to_inherited_class(
             class_id,
+            current_url.clone(),
             new_inherited_classes,
             classes_to_recompute_inheritance,
         );
         let mut curr_class_hash = HashSet::new();
         curr_class_hash.insert(class_id);
-        self.build_override_index_for_classes(&curr_class_hash);
+        curr_class_hash.extend(classes_to_recompute_inheritance.iter().copied());
+        self.rebuild_override_index_for_classes_and_apply(&curr_class_hash);
     }
 
     // in this scenario, the override index should be recomputed for ALL classes everytime, so no need to track which ones
@@ -1009,7 +1174,7 @@ impl ProjectData {
         &mut self,
         class_name: &str,
         class_id: ClassId,
-        old_inherited_classes: &Vec<String>,
+        old_inherited_classes: &Vec<(String, LspRange)>,
     ) {
         if let Some(direct_dependents) = self
             .dependent_class_index
@@ -1018,8 +1183,30 @@ impl ProjectData {
         {
             self.unresolved_inheritance_references
                 .entry(class_name.to_string())
-                .or_insert(HashSet::new())
+                .or_insert(Vec::new())
                 .extend(direct_dependents.clone());
+            for (class_that_made_ref, lsp_range) in direct_dependents {
+                if let Some(cls_sym) = self
+                    .global_semantic_model
+                    .get_class_symbol(&class_that_made_ref)
+                {
+                    let diagnostic = Diagnostic {
+                        range: lsp_range,
+                        severity: Some(DiagnosticSeverity::WARNING),
+                        code: None,
+                        code_description: None,
+                        source: Some("ObjectScript".to_string()),
+                        message: "Reference to ObjectScript Class that has either not yet been indexed or doesn't exist".to_string(),
+                        related_information: None,
+                        tags: None,
+                        data: None,
+                    };
+                    self.inheritance_diagonstics
+                        .entry(class_name.to_string())
+                        .or_insert(HashMap::new())
+                        .insert(cls_sym.url.clone(), diagnostic);
+                }
+            }
         }
         self.remove_stale_class_from_dependent_classes(class_id, old_inherited_classes);
     }
@@ -1029,17 +1216,19 @@ impl ProjectData {
         old_class_name: &str,
         new_class_name: &str,
         class_id: ClassId,
-        old_inherited_classes: &Vec<String>,
-        new_inherited_classes: &Vec<String>,
+        old_inherited_classes: &Vec<(String, LspRange)>,
+        new_inherited_classes: &Vec<(String, LspRange)>,
         inheritance_changed: bool,
         old_class_is_final: bool,
         new_class_is_final: bool,
         classes_to_recompute_inheritance: &mut HashSet<ClassId>,
+        url: &Url,
+        content: &str,
     ) {
         // (bool) recompute inheritance for ALL class members for the subclasses
         // resolve any references from other classes -> the new class name
         if !new_class_is_final {
-            self.resolve_unresolved_class(new_class_name, classes_to_recompute_inheritance);
+            self.resolve_unresolved_class(new_class_name, url, classes_to_recompute_inheritance);
         }
         let class_name_changed = new_class_name != old_class_name;
         let is_final_changed = old_class_is_final != new_class_is_final;
@@ -1062,18 +1251,63 @@ impl ProjectData {
                     if new_class_is_final && !class_name_changed {
                         self.unresolved_inheritance_references
                             .entry(new_class_name.to_string())
-                            .or_insert(HashSet::new())
+                            .or_insert(Vec::new())
                             .extend(direct_dependents.clone());
+                        for (class_that_made_ref, lsp_range) in &direct_dependents {
+                            if let Some(cls_sym) = self
+                                .global_semantic_model
+                                .get_class_symbol(class_that_made_ref)
+                            {
+                                let diagnostic = Diagnostic {
+                                    range: *lsp_range,
+                                    severity: Some(DiagnosticSeverity::WARNING),
+                                    code: None,
+                                    code_description: None,
+                                    source: Some("ObjectScript".to_string()),
+                                    message: "Reference to ObjectScript Class that has either not yet been indexed or doesn't exist".to_string(),
+                                    related_information: None,
+                                    tags: None,
+                                    data: None,
+                                };
+                                self.inheritance_diagonstics
+                                    .entry(new_class_name.to_string())
+                                    .or_insert(HashMap::new())
+                                    .insert(cls_sym.url.clone(), diagnostic);
+                            }
+                        }
                     }
                     if class_name_changed {
+                        for (class_that_made_ref, lsp_range) in &direct_dependents {
+                            if let Some(cls_sym) = self
+                                .global_semantic_model
+                                .get_class_symbol(class_that_made_ref)
+                            {
+                                let diagnostic = Diagnostic {
+                                    range: *lsp_range,
+                                    severity: Some(DiagnosticSeverity::WARNING),
+                                    code: None,
+                                    code_description: None,
+                                    source: Some("ObjectScript".to_string()),
+                                    message: "Reference to ObjectScript Class that has either not yet been indexed or doesn't exist".to_string(),
+                                    related_information: None,
+                                    tags: None,
+                                    data: None,
+                                };
+                                self.inheritance_diagonstics
+                                    .entry(new_class_name.to_string())
+                                    .or_insert(HashMap::new())
+                                    .insert(cls_sym.url.clone(), diagnostic);
+                            }
+                        }
                         self.unresolved_inheritance_references
                             .entry(old_class_name.to_string())
-                            .or_insert(HashSet::new())
+                            .or_insert(Vec::new())
                             .extend(direct_dependents);
                     }
                 }
             }
             if is_final_changed && !new_class_is_final {
+                self.inheritance_diagonstics.remove(old_class_name);
                 if class_name_changed
                     && let Some(direct_dependents) = self
                         .unresolved_inheritance_references
@@ -1082,7 +1316,7 @@ impl ProjectData {
                     self.dependent_class_index
                         .direct_subclasses
                         .entry(class_id)
-                        .or_insert(HashSet::new())
+                        .or_insert(HashMap::new())
                         .extend(direct_dependents);
                     self.dependent_class_index
                         .rebuild_transitive_subclasses(class_id);
@@ -1090,10 +1324,11 @@ impl ProjectData {
                     .unresolved_inheritance_references
                     .remove(new_class_name)
                 {
+                    self.inheritance_diagonstics.remove(new_class_name);
                     self.dependent_class_index
                         .direct_subclasses
                         .entry(class_id)
-                        .or_insert(HashSet::new())
+                        .or_insert(HashMap::new())
                         .extend(direct_dependents);
                     self.dependent_class_index
                         .rebuild_transitive_subclasses(class_id);
@@ -1104,17 +1339,20 @@ impl ProjectData {
         curr_class_hash.insert(class_id);
         if !new_class_is_final {
             if let Some(dependents) = self.dependent_class_index.direct_subclasses.get(&class_id) {
-                curr_class_hash.extend(dependents)
+                curr_class_hash.extend(dependents.keys().copied())
             }
         }
         if inheritance_changed {
             self.remove_stale_class_from_dependent_classes(class_id, old_inherited_classes);
             self.add_dependent_class_to_inherited_class(
                 class_id,
+                url.clone(),
                 new_inherited_classes,
                 classes_to_recompute_inheritance,
             );
-            self.build_override_index_for_classes(&curr_class_hash);
+            let mut override_rebuild_classes = curr_class_hash.clone();
+            override_rebuild_classes.extend(classes_to_recompute_inheritance.iter().copied());
+            self.rebuild_override_index_for_classes_and_apply(&override_rebuild_classes);
         }
         if class_name_changed {
             // remove incoming edges from other classes in the dependency graph
@@ -1133,6 +1371,32 @@ impl ProjectData {
                 {
                     let old_method_name = old_method.name.clone();
                     let old_method_is_final = old_method.is_final;
+                    for (method_ref, method_call_range) in &method_caller_refs {
+                        let lsp_range = ts_range_to_lsp_range(content, *method_call_range);
+                        let Some(cls_sym) = self
+                            .global_semantic_model
+                            .get_class_symbol(&method_ref.class)
+                        else {
+                            continue;
+                        };
+                        let diagnostic = Diagnostic {
+                            range: lsp_range,
+                            severity: Some(DiagnosticSeverity::WARNING),
+                            code: None,
+                            code_description: None,
+                            source: Some("ObjectScript".to_string()),
+                            message: format!(
+                                "Method referenced has either not yet been indexed or does not exist"
+                            ),
+                            related_information: None,
+                            tags: None,
+                            data: None,
+                        };
+                        self.method_reference_diagnostics
+                            .entry((old_class_name.to_string(), old_method_name.clone()))
+                            .or_insert(HashMap::new())
+                            .insert(cls_sym.url.clone(), diagnostic);
+                    }
                     self.unresolved_method_references
                         .entry((old_class_name.to_string(), old_method_name.clone()))
                         .or_insert(HashSet::new())
@@ -1321,6 +1585,7 @@ impl ProjectData {
         new_class_is_final: bool,
         methods_already_rebuilt: &mut HashSet<String>,
         scope_tree: &mut ScopeTree,
+        content: &str,
     ) -> HashSet<MethodRef> {
         let mut stale_method_refs = HashSet::new();
         // first remove all stale members
@@ -1339,6 +1604,32 @@ impl ProjectData {
                         self.global_semantic_model.remove_method(&stale_method_ref)
                     {
                         let old_method_name = old_method.name.clone();
+                        for (method_ref, method_call_range) in &method_caller_refs {
+                            let lsp_range = ts_range_to_lsp_range(content, *method_call_range);
+                            let Some(cls_sym) = self
+                                .global_semantic_model
+                                .get_class_symbol(&method_ref.class)
+                            else {
+                                continue;
+                            };
+                            let diagnostic = Diagnostic {
+                                range: lsp_range,
+                                severity: Some(DiagnosticSeverity::WARNING),
+                                code: None,
+                                code_description: None,
+                                source: Some("ObjectScript".to_string()),
+                                message: format!(
+                                    "Method referenced has either not yet been indexed or does not exist"
+                                ),
+                                related_information: None,
+                                tags: None,
+                                data: None,
+                            };
+                            self.method_reference_diagnostics
+                                .entry((class_name.to_string(), old_method_name.clone()))
+                                .or_insert(HashMap::new())
+                                .insert(cls_sym.url.clone(), diagnostic);
+                        }
                         self.unresolved_method_references
                             .entry((class_name.to_string(), old_method_name.clone()))
                             .or_insert(HashSet::new())
@@ -1375,6 +1666,7 @@ impl ProjectData {
         old_class_is_final: bool,
         methods_already_rebuilt: &mut HashSet<String>,
         scope_tree: &mut ScopeTree,
+        content: &str,
     ) {
         self.remove_stale_methods(
             stale_methods,
@@ -1384,6 +1676,7 @@ impl ProjectData {
             new_class_is_final,
             methods_already_rebuilt,
             scope_tree,
+            content,
         );
         // remove all property_defs and parameter defs for the class (will be rebuilt fully)
         // note: already removed from scope tree because it was rebuilt and the old defs were not copied over for params/properties
@@ -1413,7 +1706,10 @@ impl ProjectData {
         changed_ranges: Vec<Range>,
         new_class_name: String,
         new_class_range: Range,
+        class_name_def_range: Range,
     ) {
+        self.clear_diagnostics_for_url(&url);
+
         if file_type == FileType::Xml {
             let Some(document) = self.get_document_mut(&url) else {
                 generic_exit_statements("Error: document DNE for path: {:?}", url.path());
@@ -1530,7 +1826,34 @@ impl ProjectData {
                     old_method_names,
                 )
             };
-
+            if &old_class_name != &new_class_name {
+                if self.classes.contains_key(&new_class_name) {
+                    let lsp_range = ts_range_to_lsp_range(content, class_name_def_range);
+                    let diagnostic = Diagnostic {
+                        range: lsp_range,
+                        severity: Some(DiagnosticSeverity::ERROR),
+                        code: None,
+                        code_description: None,
+                        source: Some("ObjectScript".to_string()),
+                        message: format!(
+                            "A Class named {:?} already exists in this workspace.",
+                            &new_class_name
+                        ),
+                        related_information: None,
+                        tags: None,
+                        data: None,
+                    };
+                    self.other_class_diagnostics
+                        .entry(url.clone())
+                        .or_insert(Vec::new())
+                        .push(diagnostic);
+                    eprintln!(
+                        "Error: A class with name {:?} already exists, aborting (incremental_update_document)",
+                        &new_class_name
+                    );
+                    return;
+                }
+            }
             // this updates all the class members in the class itself, and then use the
             // returned results to update the global semantic model/ local semantic model/ scope tree
             let (
@@ -1541,6 +1864,7 @@ impl ProjectData {
                 parameters_already_rebuilt,
                 new_inherited_classes,
                 all_methods,
+                class_diagnostics,
             ) = {
                 let Some(class) = self.global_semantic_model.get_mut_class(&old_class_id) else {
                     self.full_update_document(
@@ -1565,7 +1889,8 @@ impl ProjectData {
                     &new_class_name,
                 )
             };
-
+            self.other_class_diagnostics
+                .insert(url.clone(), class_diagnostics);
             let all_methods_set: HashSet<String> = all_methods.keys().cloned().collect();
             let total_methods: HashSet<String> =
                 old_method_names.union(&all_methods_set).cloned().collect();
@@ -1625,6 +1950,8 @@ impl ProjectData {
                 old_is_final.unwrap_or(false),
                 new_class_is_final.unwrap_or(false),
                 &mut classes_to_fully_recompute_inheritance,
+                &url,
+                content,
             );
             // this consists of all subclasses that are NOT in classes_to_fully_recompute_inheritance
             let subclasses_to_recompute_inheritance: HashSet<ClassId> = self
@@ -1646,6 +1973,7 @@ impl ProjectData {
                 old_is_final.unwrap_or(false),
                 &mut methods_already_rebuilt,
                 &mut scope_tree,
+                content,
             );
 
             let mut unresolved_orefs = HashMap::new();
@@ -1789,7 +2117,12 @@ impl ProjectData {
                     .entry(new_class_name.clone())
                     .or_insert_with(HashMap::new)
                     .insert(method_name.clone(), method_ref);
-                self.resolve_method_references(&unresolved_method_refs, method_ref, old_class_id);
+                self.resolve_method_references(
+                    content,
+                    &unresolved_method_refs,
+                    method_ref,
+                    old_class_id,
+                );
                 unresolved_orefs.insert(method_ref, unresolved_oref_method_refs);
                 if !method.is_public {
                     // creates method symbol in scope tree (private)
@@ -1830,6 +2163,32 @@ impl ProjectData {
                         &scope_tree,
                     );
                     for (key, value) in unresolved {
+                        for (method_ref, method_call_range) in &value {
+                            let lsp_range = ts_range_to_lsp_range(content, *method_call_range);
+                            let Some(cls_sym) = self
+                                .global_semantic_model
+                                .get_class_symbol(&method_ref.class)
+                            else {
+                                continue;
+                            };
+                            let diagnostic = Diagnostic {
+                                range: lsp_range,
+                                severity: Some(DiagnosticSeverity::WARNING),
+                                code: None,
+                                code_description: None,
+                                source: Some("ObjectScript".to_string()),
+                                message: format!(
+                                    "Method referenced has either not yet been indexed or does not exist"
+                                ),
+                                related_information: None,
+                                tags: None,
+                                data: None,
+                            };
+                            self.method_reference_diagnostics
+                                .entry(key.clone())
+                                .or_insert(HashMap::new())
+                                .insert(cls_sym.url.clone(), diagnostic);
+                        }
                         self.unresolved_method_references
                             .entry(key)
                             .or_insert(HashSet::new())
@@ -1915,7 +2274,7 @@ impl ProjectData {
                     .direct_subclasses
                     .get(&old_class_id)
                 {
-                    curr_class_hash.extend(dependents)
+                    curr_class_hash.extend(dependents.keys().copied())
                 }
             }
             let mut unresolved_orefs = HashMap::new();
@@ -2055,6 +2414,33 @@ impl ProjectData {
                                 let method_caller_refs = self
                                     .dependency_graph
                                     .remove_direct_ancestors(node_index, &curr_class_hash);
+                                for (method_ref, method_call_range) in &method_caller_refs {
+                                    let lsp_range =
+                                        ts_range_to_lsp_range(content, *method_call_range);
+                                    let Some(cls_sym) = self
+                                        .global_semantic_model
+                                        .get_class_symbol(&method_ref.class)
+                                    else {
+                                        continue;
+                                    };
+                                    let diagnostic = Diagnostic {
+                                        range: lsp_range,
+                                        severity: Some(DiagnosticSeverity::WARNING),
+                                        code: None,
+                                        code_description: None,
+                                        source: Some("ObjectScript".to_string()),
+                                        message: format!(
+                                            "Method referenced has either not yet been indexed or does not exist"
+                                        ),
+                                        related_information: None,
+                                        tags: None,
+                                        data: None,
+                                    };
+                                    self.method_reference_diagnostics
+                                        .entry((new_class_name.to_string(), method_name.clone()))
+                                        .or_insert(HashMap::new())
+                                        .insert(cls_sym.url.clone(), diagnostic);
+                                }
                                 self.unresolved_method_references
                                     .entry((new_class_name.to_string(), method_name.clone()))
                                     .or_insert(HashSet::new())
@@ -2067,6 +2453,7 @@ impl ProjectData {
                             );
                         }
                         self.resolve_method_references(
+                            content,
                             &unresolved_method_refs,
                             method_ref,
                             old_class_id,
@@ -2149,6 +2536,32 @@ impl ProjectData {
                         &scope_tree,
                     );
                     for (key, value) in unresolved {
+                        for (method_ref, method_call_range) in &value {
+                            let lsp_range = ts_range_to_lsp_range(content, *method_call_range);
+                            let Some(cls_sym) = self
+                                .global_semantic_model
+                                .get_class_symbol(&method_ref.class)
+                            else {
+                                continue;
+                            };
+                            let diagnostic = Diagnostic {
+                                range: lsp_range,
+                                severity: Some(DiagnosticSeverity::WARNING),
+                                code: None,
+                                code_description: None,
+                                source: Some("ObjectScript".to_string()),
+                                message: format!(
+                                    "Method referenced has either not yet been indexed or does not exist"
+                                ),
+                                related_information: None,
+                                tags: None,
+                                data: None,
+                            };
+                            self.method_reference_diagnostics
+                                .entry(key.clone())
+                                .or_insert(HashMap::new())
+                                .insert(cls_sym.url.clone(), diagnostic);
+                        }
                         self.unresolved_method_references
                             .entry(key)
                             .or_insert(HashSet::new())
@@ -2453,7 +2866,7 @@ impl ProjectData {
         let mut visited = HashSet::new();
 
         while pb.is_none() || lang.is_none() || is_final.is_none() {
-            let Some(parent_name) = current_parents.get(0) else {
+            let Some((parent_name, _)) = current_parents.get(0) else {
                 break;
             };
             if !visited.insert(parent_name.clone()) {
@@ -2487,6 +2900,33 @@ impl ProjectData {
             if class.is_final.is_none() {
                 class.is_final = is_final;
             }
+        }
+    }
+
+    fn rebuild_override_index_for_classes_and_apply(
+        &mut self,
+        affected_classes: &HashSet<ClassId>,
+    ) {
+        let (extended_methods, extended_properties, extended_parameters) =
+            self.build_override_index_for_classes(affected_classes);
+
+        for (class_name, methods) in extended_methods {
+            self.method_defs
+                .entry(class_name)
+                .or_insert_with(HashMap::new)
+                .extend(methods);
+        }
+        for (class_name, properties) in extended_properties {
+            self.property_defs
+                .entry(class_name)
+                .or_insert_with(HashMap::new)
+                .extend(properties);
+        }
+        for (class_name, parameters) in extended_parameters {
+            self.parameter_defs
+                .entry(class_name)
+                .or_insert_with(HashMap::new)
+                .extend(parameters);
         }
     }
 
@@ -2573,7 +3013,7 @@ impl ProjectData {
                     .map(|c| {
                         c.inherited_classes
                             .iter()
-                            .filter(|&p| cls_name_to_id.contains_key(p))
+                            .filter(|(parent_name, _)| cls_name_to_id.contains_key(parent_name))
                             .count()
                     })
                     .unwrap_or(0);
@@ -2591,11 +3031,11 @@ impl ProjectData {
         while let Some(cid) = queue.pop_front() {
             ordered.push(cid);
             if let Some(dependents) = self.dependent_class_index.direct_subclasses.get(&cid) {
-                for &child in dependents {
-                    if let Some(deg) = in_degree.get_mut(&child) {
+                for child in dependents.keys() {
+                    if let Some(deg) = in_degree.get_mut(child) {
                         *deg = deg.saturating_sub(1);
                         if *deg == 0 {
-                            queue.push_back(child);
+                            queue.push_back(*child);
                         }
                     }
                 }
@@ -2640,9 +3080,9 @@ impl ProjectData {
                 inheritance_direction
                 && inheritance_direction == "right"
             {
-                parents.iter().rev().cloned().collect()
+                parents.iter().rev().map(|(name, _)| name.clone()).collect()
             } else {
-                parents.iter().cloned().collect()
+                parents.iter().map(|(name, _)| name.clone()).collect()
             };
 
             for parent_name in &parent_names {
@@ -2745,6 +3185,10 @@ impl ProjectData {
             let mut effective_methods: HashMap<String, MethodRef> = HashMap::new();
             for (method_name, (method_ref, _)) in method_table {
                 effective_methods.insert(method_name.clone(), method_ref);
+                self.resolve_unresolved_method(
+                    &(class_name.clone(), method_name.clone()),
+                    method_ref,
+                );
                 if method_ref.class != class_id {
                     extended_methods
                         .entry(class_name.clone())
@@ -2890,7 +3334,7 @@ impl ProjectData {
                     .map(|c| {
                         c.inherited_classes
                             .iter()
-                            .filter(|&p| cls_name_to_id.contains_key(p))
+                            .filter(|(parent_name, _)| cls_name_to_id.contains_key(parent_name))
                             .count()
                     })
                     .unwrap_or(0);
@@ -2908,11 +3352,11 @@ impl ProjectData {
         while let Some(cid) = queue.pop_front() {
             ordered.push(cid);
             if let Some(dependents) = self.dependent_class_index.direct_subclasses.get(&cid) {
-                for &child in dependents {
-                    if let Some(deg) = in_degree.get_mut(&child) {
+                for child in dependents.keys() {
+                    if let Some(deg) = in_degree.get_mut(child) {
                         *deg = deg.saturating_sub(1);
                         if *deg == 0 {
-                            queue.push_back(child);
+                            queue.push_back(*child);
                         }
                     }
                 }
@@ -2940,9 +3384,9 @@ impl ProjectData {
                 inheritance_direction
                 && inheritance_direction == "right"
             {
-                parents.iter().rev().cloned().collect()
+                parents.iter().rev().map(|(name, _)| name.clone()).collect()
             } else {
-                parents.iter().cloned().collect()
+                parents.iter().map(|(name, _)| name.clone()).collect()
             };
 
             for parent_name in &parent_names {
@@ -3097,7 +3541,7 @@ impl ProjectData {
                     .map(|c| {
                         c.inherited_classes
                             .iter()
-                            .filter(|&p| cls_name_to_id.contains_key(p))
+                            .filter(|(parent_name, _)| cls_name_to_id.contains_key(parent_name))
                             .count()
                     })
                     .unwrap_or(0);
@@ -3115,11 +3559,11 @@ impl ProjectData {
         while let Some(cid) = queue.pop_front() {
             ordered.push(cid);
             if let Some(dependents) = self.dependent_class_index.direct_subclasses.get(&cid) {
-                for &child in dependents {
-                    if let Some(deg) = in_degree.get_mut(&child) {
+                for child in dependents.keys() {
+                    if let Some(deg) = in_degree.get_mut(child) {
                         *deg = deg.saturating_sub(1);
                         if *deg == 0 {
-                            queue.push_back(child);
+                            queue.push_back(*child);
                         }
                     }
                 }
@@ -3148,9 +3592,9 @@ impl ProjectData {
                 inheritance_direction
                 && inheritance_direction == "right"
             {
-                parents.iter().rev().cloned().collect()
+                parents.iter().rev().map(|(name, _)| name.clone()).collect()
             } else {
-                parents.iter().cloned().collect()
+                parents.iter().map(|(name, _)| name.clone()).collect()
             };
 
             for parent_name in &parent_names {
@@ -3305,7 +3749,7 @@ impl ProjectData {
                     .map(|c| {
                         c.inherited_classes
                             .iter()
-                            .filter(|&p| cls_name_to_id.contains_key(p))
+                            .filter(|(parent_name, _)| cls_name_to_id.contains_key(parent_name))
                             .count()
                     })
                     .unwrap_or(0);
@@ -3322,11 +3766,11 @@ impl ProjectData {
         while let Some(cid) = queue.pop_front() {
             ordered.push(cid);
             if let Some(dependents) = self.dependent_class_index.direct_subclasses.get(&cid) {
-                for &child in dependents {
-                    if let Some(deg) = in_degree.get_mut(&child) {
+                for child in dependents.keys() {
+                    if let Some(deg) = in_degree.get_mut(child) {
                         *deg = deg.saturating_sub(1);
                         if *deg == 0 {
-                            queue.push_back(child);
+                            queue.push_back(*child);
                         }
                     }
                 }
@@ -3353,9 +3797,9 @@ impl ProjectData {
                 inheritance_direction
                 && inheritance_direction == "right"
             {
-                parents.iter().rev().cloned().collect()
+                parents.iter().rev().map(|(name, _)| name.clone()).collect()
             } else {
-                parents.iter().cloned().collect()
+                parents.iter().map(|(name, _)| name.clone()).collect()
             };
 
             for parent_name in &parent_names {
@@ -3394,6 +3838,10 @@ impl ProjectData {
                     .entry(class_name.clone())
                     .or_default()
                     .insert(method_name.to_string(), mref);
+                self.resolve_unresolved_method(
+                    &(class_name.clone(), method_name.to_string()),
+                    mref,
+                );
                 if mref.class != class_id {
                     extended_methods
                         .entry(class_name)
@@ -3536,6 +3984,77 @@ impl ProjectData {
         return locations;
     }
 
+    fn public_variable_locations_before_call(
+        &self,
+        public_var_definitions: &HashMap<MethodRef, HashMap<ScopeId, Vec<VariableRef>>>,
+        ancestor_ref: &MethodRef,
+        method_call_range: &Range,
+    ) -> Vec<(Url, Range)> {
+        let mut locations = Vec::new();
+        let Some(variable_refs_hash_map) = public_var_definitions.get(ancestor_ref) else {
+            return locations;
+        };
+        let Some(def_cls_sym) = self
+            .global_semantic_model
+            .get_class_symbol(&ancestor_ref.class)
+        else {
+            return locations;
+        };
+        let Some(def_doc) = self.get_document(&def_cls_sym.url) else {
+            return locations;
+        };
+        let Some(method_scope_id) = def_doc
+            .scope_tree
+            .find_current_scope(method_call_range.start_point)
+        else {
+            return locations;
+        };
+
+        let mut location_hash = HashMap::new();
+        let mut seen_scope_ids = Vec::new();
+        let mut scope_children = def_doc.scope_tree.get_scope_children(&method_scope_id);
+        scope_children.insert(method_scope_id);
+        for (child_scope_id, variable_refs) in variable_refs_hash_map {
+            if !scope_children.contains(child_scope_id) {
+                continue;
+            }
+            for variable_ref in variable_refs {
+                if let Some(var_id) = variable_ref.pub_id
+                    && let Some(symbol) = self.global_semantic_model.get_variable_symbol(
+                        ancestor_ref,
+                        var_id.0,
+                        child_scope_id,
+                    )
+                    && symbol.location.end_byte < method_call_range.start_byte
+                {
+                    if !seen_scope_ids.contains(child_scope_id) {
+                        let index = locations.len();
+                        locations.push((symbol.url.clone(), symbol.location));
+                        seen_scope_ids.push(*child_scope_id);
+                        location_hash.insert(child_scope_id, index);
+                    } else if let Some(&index) = location_hash.get(child_scope_id) {
+                        let curr_indexed_sym_range = locations[index].1;
+                        if curr_indexed_sym_range.end_byte < symbol.location.start_byte {
+                            locations[index] = (symbol.url.clone(), symbol.location);
+                        }
+                    }
+                }
+            }
+        }
+        locations
+    }
+
+    fn push_unique_location(locations: &mut Vec<(Url, Range)>, location: (Url, Range)) {
+        let already_seen = locations.iter().any(|(url, range)| {
+            url == &location.0
+                && range.start_byte == location.1.start_byte
+                && range.end_byte == location.1.end_byte
+        });
+        if !already_seen {
+            locations.push(location);
+        }
+    }
+
     /// Finds all potential variable definitons for `variable_name`
     /// and finds the corresponding variables If there is another variable definition in the same scope
     /// and it comes after the first definition (but before either point or method_call based on the case),
@@ -3653,71 +4172,25 @@ impl ProjectData {
                 if let Some(&node_index) = self.dependency_graph.get_node(*method_ref)
                     && let Some(public_var_definitions) = self.pub_var_defs.get(&variable_name)
                 {
-                    let all_ancestors = self.dependency_graph.all_ancestors(node_index);
-                    let mut found_depth: Option<usize> = None;
-                    for (ancestor_ref, method_call_range, depth) in &all_ancestors {
-                        if let Some(fd) = found_depth {
-                            if *depth > fd {
-                                break;
-                            }
-                        }
-                        let Some(variable_refs_hash_map) = public_var_definitions.get(ancestor_ref)
-                        else {
-                            continue;
-                        };
-                        let Some(def_cls_sym) = self
-                            .global_semantic_model
-                            .get_class_symbol(&ancestor_ref.class)
-                        else {
-                            continue;
-                        };
-                        let Some(def_doc) = self.get_document(&def_cls_sym.url) else {
-                            continue;
-                        };
-                        let Some(method_scope_id) = def_doc
-                            .scope_tree
-                            .find_current_scope(method_call_range.start_point)
-                        else {
-                            continue;
-                        };
-                        let mut location_hash = HashMap::new();
-                        let mut seen_scope_ids = Vec::new();
-                        let mut scope_children =
-                            def_doc.scope_tree.get_scope_children(&method_scope_id);
-                        scope_children.insert(method_scope_id);
-                        for (child_scope_id, variable_refs) in variable_refs_hash_map {
-                            if !scope_children.contains(child_scope_id) {
-                                continue;
-                            }
-                            for variable_ref in variable_refs {
-                                if let Some(var_id) = variable_ref.pub_id
-                                    && let Some(symbol) = self
-                                        .global_semantic_model
-                                        .get_variable_symbol(ancestor_ref, var_id.0, child_scope_id)
-                                {
-                                    if symbol.location.end_byte < method_call_range.start_byte {
-                                        if !seen_scope_ids.contains(child_scope_id) {
-                                            let index = locations.len();
-                                            locations.push((symbol.url.clone(), symbol.location));
-                                            seen_scope_ids.push(*child_scope_id);
-                                            location_hash.insert(child_scope_id, index);
-                                        } else if let Some(&index) =
-                                            location_hash.get(child_scope_id)
-                                        {
-                                            let curr_indexed_sym_range = locations[index].1;
-                                            if curr_indexed_sym_range.end_byte
-                                                < symbol.location.start_byte
-                                            {
-                                                locations[index] =
-                                                    (symbol.url.clone(), symbol.location);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if !locations.is_empty() {
-                            found_depth = Some(*depth);
+                    let definers = self.dependency_graph.closest_definers(
+                        node_index,
+                        |ancestor_ref, method_call_range| {
+                            !self
+                                .public_variable_locations_before_call(
+                                    public_var_definitions,
+                                    ancestor_ref,
+                                    method_call_range,
+                                )
+                                .is_empty()
+                        },
+                    );
+                    for (ancestor_ref, method_call_range) in definers {
+                        for location in self.public_variable_locations_before_call(
+                            public_var_definitions,
+                            &ancestor_ref,
+                            &method_call_range,
+                        ) {
+                            Self::push_unique_location(&mut locations, location);
                         }
                     }
                     if !locations.is_empty() {
@@ -4044,7 +4517,7 @@ impl ProjectData {
     pub fn get_class_superclasses(&self, class_id: &ClassId) -> Vec<(Url, Range)> {
         let mut locations = Vec::new();
         if let Some(class) = self.global_semantic_model.get_class(class_id) {
-            for inherited_class_name in &class.inherited_classes {
+            for (inherited_class_name, _) in &class.inherited_classes {
                 if let Some(inherited_class_id) = self.classes.get(inherited_class_name)
                     && let Some(inherited_class) =
                         self.global_semantic_model.get_class(inherited_class_id)
@@ -4152,6 +4625,9 @@ impl ProjectState {
                 dependency_graph: DependencyGraph::new(),
                 unresolved_method_references: HashMap::new(),
                 unresolved_inheritance_references: HashMap::new(),
+                inheritance_diagonstics: HashMap::new(),
+                method_reference_diagnostics: HashMap::new(),
+                other_class_diagnostics: HashMap::new(),
             }),
         }
     }
@@ -4228,6 +4704,7 @@ impl ProjectState {
                             Vec::new(),
                             "XML".to_string(),
                             tree.root_node().range(),
+                            tree.root_node().range(),
                         );
                     } else if let Some(doc) = data.documents.get_mut(&url) {
                         doc.version = Some(version);
@@ -4242,7 +4719,7 @@ impl ProjectState {
                 false
             };
 
-            let Some((class_range, class_name)) =
+            let Some((class_range, class_name, class_name_def_range)) =
                 get_member_name_and_range_from_root(&text, tree.root_node(), is_rtn)
             else {
                 eprintln!(
@@ -4253,7 +4730,6 @@ impl ProjectState {
             };
             // Commit INSIDE one lock
             let mut data = self.data.write();
-
             let existing_snapshot = data
                 .documents
                 .get(&url)
@@ -4261,7 +4737,30 @@ impl ProjectState {
 
             match existing_snapshot {
                 None => {
+                    if data.classes.contains_key(&class_name) {
+                        let lsp_range = ts_range_to_lsp_range(&text, class_name_def_range);
+                        let diagnostic = Diagnostic {
+                            range: lsp_range,
+                            severity: Some(DiagnosticSeverity::ERROR),
+                            code: None,
+                            code_description: None,
+                            source: Some("ObjectScript".to_string()),
+                            message: format!(
+                                "A Class named {:?} already exists in this workspace.",
+                                &class_name
+                            ),
+                            related_information: None,
+                            tags: None,
+                            data: None,
+                        };
+                        data.other_class_diagnostics
+                            .entry(url.clone())
+                            .or_insert(Vec::new())
+                            .push(diagnostic);
+                        return;
+                    }
                     let class_id = data.global_semantic_model.next_id();
+
                     data.add_document(
                         url.clone(),
                         &text,
@@ -4286,6 +4785,7 @@ impl ProjectState {
                             Vec::new(),
                             class_name,
                             class_range,
+                            class_name_def_range,
                         );
                     } else {
                         if let Some(doc) = data.documents.get_mut(&url) {
@@ -4317,13 +4817,17 @@ impl ProjectState {
         } else {
             false
         };
-        let (class_range, class_name) = if file_type == FileType::Xml {
-            (tree.root_node().range(), "XML".to_string())
+        let (class_range, class_name, class_name_def_range) = if file_type == FileType::Xml {
+            (
+                tree.root_node().range(),
+                "XML".to_string(),
+                tree.root_node().range(),
+            )
         } else {
-            if let Some((class_range, class_name)) =
+            if let Some((class_range, class_name, class_name_def_range)) =
                 get_member_name_and_range_from_root(content, tree.root_node(), is_rtn)
             {
-                (class_range, class_name)
+                (class_range, class_name, class_name_def_range)
             } else {
                 eprintln!(
                     "Error: Failed to get name from root node for file url: {:?}",
@@ -4341,6 +4845,7 @@ impl ProjectState {
             changed_ranges,
             class_name,
             class_range,
+            class_name_def_range,
         );
     }
 

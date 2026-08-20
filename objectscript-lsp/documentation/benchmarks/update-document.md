@@ -84,7 +84,23 @@ cargo bench -p objectscript-core --features update-bench --bench update_document
 
 Set `BENCH_INPUT_FILE` to benchmark one existing source file instead of a generated synthetic class.
 
-For example, to run the update and parser benchmarks against the large dotted-statement routine fixture:
+The local large dotted-statement routine fixture also has a named preset:
+
+```bash
+BENCH_INPUT_PRESET=large_dotted_statements \
+BENCH_SAMPLE_SIZE=10 \
+BENCH_WARMUP_SECS=3 \
+BENCH_MEASUREMENT_SECS=10 \
+cargo bench -p objectscript-core --features update-bench --bench update_document
+```
+
+The preset loads:
+
+```text
+objectscript-tests/local/test-large-dotted-statements-full.mac
+```
+
+For example, to run the same update and parser benchmarks against an explicit file path:
 
 ```bash
 BENCH_INPUT_FILE=/Users/hkimura/zed-objectscript/objectscript-lsp/objectscript-tests/local/test-large-dotted-statements-full.mac \
@@ -97,7 +113,7 @@ cargo bench -p objectscript-core --features update-bench --bench update_document
 To run only the parser benchmarks for that file:
 
 ```bash
-BENCH_INPUT_FILE=/Users/hkimura/zed-objectscript/objectscript-lsp/objectscript-tests/local/test-large-dotted-statements-full.mac \
+BENCH_INPUT_PRESET=large_dotted_statements \
 BENCH_SAMPLE_SIZE=10 \
 BENCH_WARMUP_SECS=1 \
 BENCH_MEASUREMENT_SECS=1 \
@@ -107,20 +123,20 @@ cargo bench -p objectscript-core --features update-bench --bench update_document
 To run only the update benchmarks for that file:
 
 ```bash
-BENCH_INPUT_FILE=/Users/hkimura/zed-objectscript/objectscript-lsp/objectscript-tests/local/test-large-dotted-statements-full.mac \
+BENCH_INPUT_PRESET=large_dotted_statements \
 BENCH_SAMPLE_SIZE=10 \
 BENCH_WARMUP_SECS=1 \
 BENCH_MEASUREMENT_SECS=1 \
 cargo bench -p objectscript-core --features update-bench --bench update_document -- update_document --quiet
 ```
 
-The real-file mode supports `.cls`, `.mac`, `.inc`, `.rtn`, and `.int` files. When `BENCH_INPUT_FILE` is set, it overrides `BENCH_METHODS`, `BENCH_METHODS_LIST`, and `BENCH_BODY_LINES`.
+The real-file mode supports `.cls`, `.mac`, `.inc`, `.rtn`, and `.int` files. When `BENCH_INPUT_FILE` or `BENCH_INPUT_PRESET` is set, it overrides `BENCH_METHODS`, `BENCH_METHODS_LIST`, and `BENCH_BODY_LINES`. `BENCH_INPUT_FILE` has priority if both are set.
 
 The large dotted-statement fixture is currently about 87 KB:
 
 ```text
-1182 lines
-87462 bytes
+1181 lines
+87458 bytes
 ```
 
 The real-file benchmark makes one small insertion near the middle of the file. For routine files, it inserts an ObjectScript comment line and preserves the existing leading whitespace or dotted indentation. For class files, it inserts a comment line.
@@ -158,6 +174,7 @@ It also produces `full_parse_document` and `incremental_parse_document` measurem
 | `BENCH_METHODS_LIST` | unset | Comma-separated method counts used to benchmark multiple document sizes in one run. Example: `20,50,100`. |
 | `BENCH_BODY_LINES` | `12` | Number of repeated body lines generated inside each method. |
 | `BENCH_INPUT_FILE` | unset | Path to a real `.cls`, `.mac`, `.inc`, `.rtn`, or `.int` file to benchmark instead of generating a synthetic class. |
+| `BENCH_INPUT_PRESET` | unset | Named real-file fixture to benchmark. Supported value: `large_dotted_statements`. Ignored when `BENCH_INPUT_FILE` is set. |
 | `BENCH_SAMPLE_SIZE` | `10` | Criterion sample count. The benchmark enforces Criterion's minimum of 10. |
 | `BENCH_WARMUP_SECS` | `3` | Criterion warmup duration in seconds. |
 | `BENCH_MEASUREMENT_SECS` | `10` | Criterion measurement duration in seconds. |
@@ -368,15 +385,15 @@ Use your own presentation run as the source of truth, but this gives the expecte
 For the 87 KB `test-large-dotted-statements-full.mac` fixture, a short local parser-only run produced:
 
 ```text
-full_parse_document:            [33.946 ms 34.029 ms 34.112 ms]
-incremental_parse_document:     [2.1627 ms 2.1652 ms 2.1690 ms]
+full_parse_document:            [23.161 ms 23.747 ms 24.182 ms]
+incremental_parse_document:     [1.5329 ms 1.5414 ms 1.5603 ms]
 ```
 
 For the same 87 KB fixture, a short local update-only run produced:
 
 ```text
-full_update_document:           [2.8057 s 2.8153 s 2.8291 s]
-incremental_update_document:    [1.1869 s 1.2009 s 1.2205 s]
+full_update_document:           [1.9634 s 1.9810 s 1.9981 s]
+incremental_update_document:    [822.05 ms 824.07 ms 826.59 ms]
 ```
 
 The real-file update result is still guarded against fallback: if `incremental_update_document` calls `full_update_document`, the benchmark fails instead of reporting the number.

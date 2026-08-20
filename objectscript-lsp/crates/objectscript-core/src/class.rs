@@ -1,7 +1,7 @@
 use crate::common::{
     get_dotted_subroutine_info, get_keyword_and_value, get_node_children, get_parameter_name,
     get_procedure_info, get_property_name, get_routine_method_range, get_string_at_byte_range,
-    get_subroutine_info,
+    get_subroutine_info, ts_range_to_lsp_range,
 };
 
 use crate::parse_structures::{
@@ -10,6 +10,7 @@ use crate::parse_structures::{
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
+use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Range as LspRange};
 use tree_sitter::{
     Language as TsLanguage, Node, Query, QueryCursor, Range, StreamingIterator, Tree,
 };
@@ -199,8 +200,9 @@ impl Class {
         HashMap<String, (Method, Range, MethodRef, HashSet<String>)>, // new methods
         HashMap<String, (Property, Range, PropertyRef)>, // new properties
         HashMap<String, (Parameter, Range, ParameterRef)>, // new parameters
-        Vec<String>,     // new inherited classes
+        Vec<(String, LspRange)>, // new inherited classes
         HashMap<String, (Range, MethodType, HashSet<String>)>, // all methods info
+        Vec<Diagnostic>,
     ) {
         // (inheritance_changed, recompute_inheritance_keyword, class_name_changed, class_is_final, class_is_procedure_block, class_name)
         // // stale methods, stale prop, stale param
@@ -211,6 +213,7 @@ impl Class {
         let mut new_properties = HashMap::new();
         let mut new_parameters = HashMap::new();
         let mut all_methods = HashMap::new();
+        let mut diagnostics = Vec::new();
         let mut old_methods: HashSet<String> = self.methods.keys().cloned().collect();
         let mut inheritance_changed = false;
         let old_inheritance_direction = self.inheritance_direction.clone();
@@ -235,8 +238,10 @@ impl Class {
                         if let Some(inherited_cls_name) =
                             get_string_at_byte_range(content, capture.node.byte_range())
                         {
-                            inherited_classes.push(inherited_cls_name.clone());
-                            if let Some(old_inherited_class) =
+                            let lsp_range = ts_range_to_lsp_range(content, capture.node.range());
+                            inherited_classes.push((inherited_cls_name.clone(), lsp_range));
+                            // inherited_class_ranges.insert(inherited_cls_name.clone(), lsp_range);
+                            if let Some((old_inherited_class, _)) =
                                 self.inherited_classes.get(inherited_count)
                             {
                                 if &inherited_cls_name != old_inherited_class {
@@ -334,12 +339,32 @@ impl Class {
                                 let procedure_statement_node = capture.node;
                                 if let Some((
                                     method_name,
+                                    method_name_range,
                                     method_range,
                                     method_type,
                                     public_variables_declared,
                                 )) = get_procedure_info(&procedure_statement_node, content)
                                 {
                                     let existed = old_methods.remove(&method_name);
+                                    if all_methods.contains_key(&method_name) {
+                                        let lsp_range =
+                                            ts_range_to_lsp_range(content, method_name_range);
+                                        let diagnostic = Diagnostic {
+                                            range: lsp_range,
+                                            severity: Some(DiagnosticSeverity::ERROR),
+                                            code: None,
+                                            code_description: None,
+                                            source: Some("ObjectScript".to_string()),
+                                            message: format!(
+                                                "A Method named {:?} already exists in this class.",
+                                                &method_name
+                                            ),
+                                            related_information: None,
+                                            tags: None,
+                                            data: None,
+                                        };
+                                        diagnostics.push(diagnostic);
+                                    }
                                     if !existed {
                                         {
                                             let new_method_id = self.get_next_method_id();
@@ -375,10 +400,34 @@ impl Class {
                             }
                             MemberType::DottedStatementTag => {
                                 let subroutine_statement_node = capture.node;
-                                if let Some((method_name, method_range, method_type)) =
+                                if let Some((
+                                    method_name,
+                                    method_name_range,
+                                    method_range,
+                                    method_type,
+                                )) =
                                     get_dotted_subroutine_info(&subroutine_statement_node, content)
                                 {
                                     let existed = old_methods.remove(&method_name);
+                                    if all_methods.contains_key(&method_name) {
+                                        let lsp_range =
+                                            ts_range_to_lsp_range(content, method_name_range);
+                                        let diagnostic = Diagnostic {
+                                            range: lsp_range,
+                                            severity: Some(DiagnosticSeverity::ERROR),
+                                            code: None,
+                                            code_description: None,
+                                            source: Some("ObjectScript".to_string()),
+                                            message: format!(
+                                                "A Method named {:?} already exists in this class.",
+                                                &method_name
+                                            ),
+                                            related_information: None,
+                                            tags: None,
+                                            data: None,
+                                        };
+                                        diagnostics.push(diagnostic);
+                                    }
                                     if !existed {
                                         {
                                             let new_method_id = self.get_next_method_id();
@@ -409,10 +458,33 @@ impl Class {
                             }
                             MemberType::RoutineMethodCall => {
                                 let subroutine_statement_node = capture.node;
-                                if let Some((method_name, method_range, method_type)) =
-                                    get_subroutine_info(&subroutine_statement_node, content)
+                                if let Some((
+                                    method_name,
+                                    method_name_range,
+                                    method_range,
+                                    method_type,
+                                )) = get_subroutine_info(&subroutine_statement_node, content)
                                 {
                                     let existed = old_methods.remove(&method_name);
+                                    if all_methods.contains_key(&method_name) {
+                                        let lsp_range =
+                                            ts_range_to_lsp_range(content, method_name_range);
+                                        let diagnostic = Diagnostic {
+                                            range: lsp_range,
+                                            severity: Some(DiagnosticSeverity::ERROR),
+                                            code: None,
+                                            code_description: None,
+                                            source: Some("ObjectScript".to_string()),
+                                            message: format!(
+                                                "A Method named {:?} already exists in this class.",
+                                                &method_name
+                                            ),
+                                            related_information: None,
+                                            tags: None,
+                                            data: None,
+                                        };
+                                        diagnostics.push(diagnostic);
+                                    }
                                     if !existed {
                                         {
                                             let new_method_id = self.get_next_method_id();
@@ -492,6 +564,27 @@ impl Class {
                                     )
                                 {
                                     let existed = old_methods.remove(&method_name);
+                                    if all_methods.contains_key(&method_name) {
+                                        let lsp_range = ts_range_to_lsp_range(
+                                            content,
+                                            method_name_node.range(),
+                                        );
+                                        let diagnostic = Diagnostic {
+                                            range: lsp_range,
+                                            severity: Some(DiagnosticSeverity::ERROR),
+                                            code: None,
+                                            code_description: None,
+                                            source: Some("ObjectScript".to_string()),
+                                            message: format!(
+                                                "A Method named {:?} already exists in this class.",
+                                                &method_name
+                                            ),
+                                            related_information: None,
+                                            tags: None,
+                                            data: None,
+                                        };
+                                        diagnostics.push(diagnostic);
+                                    }
                                     if !existed {
                                         {
                                             let new_method_id = self.get_next_method_id();
@@ -540,6 +633,27 @@ impl Class {
                                     )
                                 {
                                     let existed = old_methods.remove(&method_name);
+                                    if all_methods.contains_key(&method_name) {
+                                        let lsp_range = ts_range_to_lsp_range(
+                                            content,
+                                            method_name_node.range(),
+                                        );
+                                        let diagnostic = Diagnostic {
+                                            range: lsp_range,
+                                            severity: Some(DiagnosticSeverity::ERROR),
+                                            code: None,
+                                            code_description: None,
+                                            source: Some("ObjectScript".to_string()),
+                                            message: format!(
+                                                "A Method named {:?} already exists in this class.",
+                                                &method_name
+                                            ),
+                                            related_information: None,
+                                            tags: None,
+                                            data: None,
+                                        };
+                                        diagnostics.push(diagnostic);
+                                    }
                                     if !existed {
                                         {
                                             let new_method_id = self.get_next_method_id();
@@ -643,6 +757,7 @@ impl Class {
             new_parameters,
             inherited_classes,
             all_methods,
+            diagnostics,
         )
     }
 

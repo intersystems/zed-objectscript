@@ -1,8 +1,12 @@
 ROUTINE crossref
 entry
- set x  = 1
+ w "entering"
  do helper^tagcalls
  quit
 
 testOne
+ set x = 25
+ q
 testTwo
+ set x = 26
+ q
