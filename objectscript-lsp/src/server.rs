@@ -278,6 +278,7 @@ impl Backend {
                     }
                 }
             }
+            eprintln!("INFO: Finished indexing workspace");
         });
         // Wait for completion (and handle join errors)
         if let Err(join_err) = handle.await {
