@@ -50,7 +50,7 @@ impl ObjectScriptExtension {
         );
 
         let release = zed::latest_github_release(
-            "hkimura-intersys/zed-objectscript",
+            "intersystems/zed-objectscript",
             zed::GithubReleaseOptions {
                 require_assets: true,
                 pre_release: false,
