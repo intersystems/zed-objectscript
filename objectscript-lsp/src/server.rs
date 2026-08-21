@@ -28,6 +28,7 @@ pub(crate) struct Backend {
     /// Stores Url -> ProjectState for each Workspace.
     pub(crate) projects: Arc<RwLock<HashMap<Url, Arc<ProjectState>>>>,
     pub(crate) diagnostic_refresh_supported: AtomicBool,
+    pub(crate) configuration_supported: AtomicBool,
 }
 
 impl Backend {
@@ -37,11 +38,17 @@ impl Backend {
             client,
             projects: Arc::new(RwLock::new(HashMap::new())),
             diagnostic_refresh_supported: AtomicBool::new(false),
+            configuration_supported: AtomicBool::new(false),
         }
     }
 
     pub(crate) fn set_diagnostic_refresh_supported(&self, supported: bool) {
         self.diagnostic_refresh_supported
+            .store(supported, Ordering::Relaxed);
+    }
+
+    pub(crate) fn set_configuration_supported(&self, supported: bool) {
+        self.configuration_supported
             .store(supported, Ordering::Relaxed);
     }
 

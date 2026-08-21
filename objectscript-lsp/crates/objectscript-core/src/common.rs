@@ -495,7 +495,7 @@ pub fn find_return_type(typename: String) -> ReturnType {
         "sqlidentifier" => ReturnType::SqlIdentifier,
         "configvalue" => ReturnType::ConfigValue,
         _ => {
-            eprintln!("Unimplemented return type: {:?}", typename);
+            // eprintln!("Unimplemented return type: {:?}", typename);
             ReturnType::Other(typename)
         }
     };

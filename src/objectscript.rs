@@ -1,11 +1,6 @@
 use std::fs;
 
-use zed_extension_api::{
-    self as zed,
-    settings::LspSettings,
-    LanguageServerId,
-    Result,
-};
+use zed_extension_api::{self as zed, settings::LspSettings, LanguageServerId, Result};
 
 struct ObjectScriptBinary {
     path: String,
@@ -111,7 +106,7 @@ impl ObjectScriptExtension {
                     zed::Os::Windows => zed::DownloadedFileType::Zip,
                 },
             )
-                .map_err(|e| format!("failed to download file: {e}"))?;
+            .map_err(|e| format!("failed to download file: {e}"))?;
 
             let entries =
                 fs::read_dir(".").map_err(|e| format!("failed to list working directory {e}"))?;

@@ -43,9 +43,18 @@ For XML files that contain ObjectScript code inside `<Implementation>` CDATA blo
 
 This provides syntax checking for ObjectScript code that is embedded within XML class export files.
 
+### Project Semantic Diagnostics
+
+Project semantic diagnostics are produced from workspace indexes and cross-document semantic state. These include unresolved method-reference diagnostics such as `"Method referenced has either not yet been indexed or does not exist"`.
+
+These diagnostics are included only when `enableStrictMode` is `true`.
+
 ## Behavior
 
 - Diagnostics are computed on-demand via the `textDocument/diagnostic` pull model (not push-based `textDocument/publishDiagnostics`)
 - Each diagnostic request returns a full report for the requested document
-- Inter-file dependencies are not tracked (a change in one file does not trigger diagnostics in another)
-- Workspace-level diagnostics are not supported (only per-document)
+- Workspace-level diagnostics are returned via `workspace/diagnostic` for tracked documents
+- `enableLint: false` disables diagnostics
+- `enableStrictMode: false` keeps syntax diagnostics enabled but filters out project semantic diagnostics, including unresolved method-reference diagnostics
+- Runtime changes sent through `workspace/didChangeConfiguration` update diagnostic behavior without restarting the server
+- Empty configuration notifications and unrelated LSP settings are ignored so they do not reset strict mode to its default

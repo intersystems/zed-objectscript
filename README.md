@@ -14,6 +14,14 @@ This Zed extension uses the [tree-sitter-objectscript](https://github.com/inters
 
 The current features supported in the `ObjectScript language server` are `goto_definition`, `goto_implementation`, `refactor`, and `diagnostics`. These features are described in detail in the `objectscript-lsp/documentation/features` folder.
 
+### Setup Dev Extension 
+If you want the most up-to-date version of this extension (including experimental parts that have not yet been merged into [zed-industries/extensions](https://github.com/zed-industries/extensions), follow these steps:   
+1. Make sure you have [rust](https://rust-lang.org/tools/install/) installed.  
+2. Clone this repository into your local folders and cd into the objectscript-lsp folder (`cd zed-objectscript/objectscript-lsp`).  
+3. Build a local copy of the binary: `cargo b && cargo install --path . --force`  
+4. Go to Zed, and do `Cmd + Shift + P`, and then choose `zed:Extensions`. Then choose `Install Dev Extension` and point it at your local copy of this directory.
+5. NOTE: If rebuilding, sometimes you have to quit out of Zed and re-enter it for the changes to show.
+
 ## Reporting Issues
 
 Please report issues via [GitHub Issues](https://github.com/intersystems/zed-objectscript/issues).

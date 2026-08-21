@@ -2,7 +2,7 @@
 
 ## Entry Point
 
-`lsp.rs:588` — `async fn diagnostic`
+`src/lsp.rs` — `async fn diagnostic`
 
 ## Architecture
 
@@ -10,9 +10,11 @@
 ┌─────────────────────────────────────────────────────────────┐
 │  LSP Handler (lsp.rs:diagnostic)                            │
 │  - Gets document snapshot (file_type, content, tree)        │
+│  - Checks ProjectData.config diagnostic gates               │
 │  - Calls push_host_syntax_diagnostics for all file types    │
 │  - For XML: additionally calls                              │
 │    push_xml_injected_objectscript_diagnostics               │
+│  - In strict mode: adds project semantic diagnostics        │
 │  - Returns FullDocumentDiagnosticReport                     │
 └────────────────────────────┬────────────────────────────────┘
                              │
@@ -33,7 +35,7 @@
 
 ## Server Capabilities
 
-Registered in `build_caps` (`lsp.rs:296`):
+Registered in `build_caps` in `src/lsp.rs`:
 
 ```rust
 diagnostic_provider: Some(DiagnosticServerCapabilities::Options(DiagnosticOptions {
@@ -46,23 +48,39 @@ diagnostic_provider: Some(DiagnosticServerCapabilities::Options(DiagnosticOption
 
 This registers pull-based diagnostics (client requests via `textDocument/diagnostic`), not push-based.
 
-## Handler Flow (`lsp.rs:588`)
+## Handler Flow (`src/lsp.rs`)
 
 ```
 1. Get document URI from params
 2. Get project from document URL
-3. Take snapshot: (file_type, content, tree) from project state
-4. Call push_host_syntax_diagnostics(diagnostics, content, tree, file_type)
-5. If file_type == XML:
-   a. Record host error count
-   b. Call push_xml_injected_objectscript_diagnostics(diagnostics, content, tree)
-   c. Log host vs total error counts
-6. Return FullDocumentDiagnosticReport with all diagnostics
+3. Read the workspace `ProjectData`
+4. Return no diagnostics if `data.config.enable_lint` is false
+5. Call push_host_syntax_diagnostics(diagnostics, content, tree, file_type)
+6. If file_type == XML, call push_xml_injected_objectscript_diagnostics(diagnostics, content, tree)
+7. If `data.config.enable_strict_mode` is true, add project semantic diagnostics
+8. Return FullDocumentDiagnosticReport with the selected diagnostics
 ```
+
+## Configuration Flow
+
+Startup config is parsed from `initialize.initializationOptions` with `Config::from_lsp_value` and stored in each workspace's `ProjectData.config`.
+
+Runtime config changes are handled by `did_change_configuration`:
+
+```
+1. If the client supports workspace/configuration, request current settings
+2. Parse the first response that contains ObjectScript config keys with Config::from_lsp_value_if_present
+3. If workspace/configuration is unavailable, parse the notification's settings payload
+4. Ignore empty payloads and unrelated LSP settings
+5. Apply the parsed config to each workspace ProjectData
+6. Refresh workspace diagnostics when the effective config changed
+```
+
+This guard matters because many clients send `workspace/didChangeConfiguration` with an empty payload, or return broad LSP settings from `workspace/configuration`. Those payloads must not be treated as `Config::default()`, because that would reset `enable_strict_mode` to `true` and re-enable semantic diagnostics.
 
 ## Key Functions
 
-### `push_host_syntax_diagnostics` (`lsp.rs:131`)
+### `push_host_syntax_diagnostics` (`src/lsp.rs`)
 
 Finds all error nodes in the document's tree-sitter parse tree and converts them to LSP diagnostics.
 
@@ -78,7 +96,7 @@ Finds all error nodes in the document's tree-sitter parse tree and converts them
    d. Push Diagnostic with severity ERROR
 ```
 
-### `push_xml_injected_objectscript_diagnostics` (`lsp.rs:164`)
+### `push_xml_injected_objectscript_diagnostics` (`src/lsp.rs`)
 
 Finds ObjectScript code embedded in XML `<Implementation>` blocks and runs syntax checking on each.
 
