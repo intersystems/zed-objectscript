@@ -4,9 +4,4 @@ ClassMethod Shared()
 {
     Write "left"
 }
-
-Method Common()
-{
-    Write "left common"
-}
 }

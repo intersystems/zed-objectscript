@@ -1,7 +1,8 @@
 ROUTINE offsetgoto
 
 main
- set x = 1
+ set x = 72
+ d entry^crossref
  do main+3
  w !, "line after main"
  w !, "target of main+2"

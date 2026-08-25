@@ -2,7 +2,7 @@
 
 ## Overview
 
-The goto-implementation feature navigates from a class or method definition to its **subclass overrides**. This is the inverse of goto-definition's superclass navigation — where goto-def goes "up" the inheritance chain, goto-implementation goes "down" to find subclasses and overriding methods.
+The goto-implementation feature navigates from a class or method definition to its **subclass method_overrides**. This is the inverse of goto-definition's superclass navigation — where goto-def goes "up" the inheritance chain, goto-implementation goes "down" to find subclasses and overriding methods.
 
 ## Supported Symbols
 

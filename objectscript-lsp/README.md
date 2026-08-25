@@ -1,14 +1,15 @@
 # ObjectScript LSP
 
-Language Server Protocol implementation for InterSystems ObjectScript using `tower-lsp` and `tree-sitter`.
+Language Server & Language Server Protocol implementation for InterSystems ObjectScript using `tower-lsp` and `tree-sitter`.
 
-Goal: provide editor-independent ObjectScript semantics for VS Code, Zed, Neovim, and other LSP clients without requiring a live InterSystems server connection.
+We built this language server to provide editor-independent ObjectScript semantics for VS Code, Zed, Neovim, and other LSP clients without requiring a live InterSystems server connection.
 
 ## Current Features
 
 - Workspace indexing for `.cls`, `.inc`, `.rtn`, `.mac`, and `.int`
+- Everything is rebuilt incrementally.
 - Multi-workspace support through LSP workspace folders, with deepest-parent routing per document
-- Go-to-definition for ObjectScript variables with ProcedureBlock-aware private/public resolution
+- Go-to-definition for ObjectScript variables, orefs, methods, properties, classes, parameters with ProcedureBlock-aware private/public resolution
 - Go-to-implementation for inherited and overridden methods and classes
 - Syntax diagnostics for tracked ObjectScript documents
 - Mixed-language diagnostics for ObjectScript captured from XML `Implementation` blocks
@@ -18,6 +19,7 @@ Goal: provide editor-independent ObjectScript semantics for VS Code, Zed, Neovim
   - Legacy `FOR` rewrites
   - document-scoped and workspace-scoped edits
 - Inheritance modeling and override index build
+- Dependency modeling and dependencyGraph build (shows all paths to a given method)
 
 
 ## Architecture Summary
@@ -43,6 +45,10 @@ Goal: provide editor-independent ObjectScript semantics for VS Code, Zed, Neovim
   - `textDocument/implementation`
   - `textDocument/diagnostic`
 - Code actions and execute commands for refactor rewrites
+
+## Configuration
+
+Editor-specific configuration examples for Zed, Neovim, and VS Code are documented in [documentation/configuration.md](documentation/configuration.md).
 
 
 ## Build and Test
@@ -70,9 +76,9 @@ In this case, the `DependencyGraph` is used to determine all possible paths to t
 ## Grammar Baseline
 
 - `tree-sitter = 0.26.6`
-- `tree-sitter-objectscript = 1.9.13`
-- `tree-sitter-objectscript-routine = 1.9.13`
-- `tree-sitter-objectscript-playground = 1.9.13`
+- `tree-sitter-objectscript = 1.9.16`
+- `tree-sitter-objectscript-routine = 1.9.16`
+- `tree-sitter-objectscript-playground = 1.9.16`
 - `tree-sitter-xml = 0.7.0`
 
 ## Roadmap

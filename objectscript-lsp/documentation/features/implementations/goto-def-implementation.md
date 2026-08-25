@@ -65,7 +65,7 @@ Additionally, bare `routine_name` nodes and `numeric_literal` nodes (for line of
 ### `get_method_superclass` (`workspace.rs:1503`)
 
 - Finds the `MethodRef` for the method in the current class
-- Looks up `override_index.overrides` to find the superclass `MethodRef` it overrides
+- Looks up `override_index.method_overrides` to find the superclass `MethodRef` it overrides
 - Returns the location from the superclass method symbol
 
 ### `get_class_definition` (`workspace.rs:1439`)
@@ -120,17 +120,52 @@ A directed graph (`petgraph::DiGraph<MethodRef, Range>`) where:
 ### OverrideIndex (`override_index.rs`)
 
 Tracks method overriding relationships:
-- `overrides`: subclass `MethodRef` → superclass `MethodRef` it overrides
-- `overridden_by`: superclass `MethodRef` → all subclass `MethodRef`s that override it
-- `effective_public_methods`: per-class map of method name → resolved `MethodRef`
+- `method_overrides`: subclass `MethodRef` → superclass `MethodRef` it overrides
+- `method_overridden_by`: superclass `MethodRef` → all subclass `MethodRef`s that override it
+- `effective_methods`: per-class map of method name → resolved `MethodRef`
 
 Used by `get_method_superclass` for navigating up the inheritance chain.
+
+#### Multiple Inheritance Precedence
+
+`build_override_index_for_classes` builds each class's effective member tables from its parents before overlaying the class's own members. Parent order is significant:
+- Default inheritance processes `class.inherited_classes` from left to right.
+- `[Inheritance = right]` processes the same list in reverse order.
+- Parent members are inserted with first-wins semantics, so the first parent that exposes a method/property/parameter name owns that effective entry.
+
+This means inherited parent members are treated the same as members declared directly on a parent. In the multiple-inheritance regression fixture, `Demo.ChildDefault Extends (Demo.LeftParent, Demo.RightParent)`, `Demo.LeftParent Extends Demo.Base`, `Demo.Base` defines `Common`, and `Demo.RightParent` also defines `Common`. Because default inheritance is left-to-right, `Demo.ChildDefault.Common` must resolve to `Demo.Base.Common`, not `Demo.RightParent.Common`.
+
+#### Late Indexing and Stale Effective Tables
+
+Workspace indexing and `didOpen` events can arrive in an order where a child is indexed before one of its parents. The failing scenario was:
+- `Demo.Base` and `Demo.RightParent` were known.
+- `Demo.ChildDefault` was indexed while `Demo.LeftParent` was still unresolved, so `Common` could temporarily resolve through `Demo.RightParent`.
+- `Demo.LeftParent` was indexed later and inherited `Common` from `Demo.Base`.
+- The child effective table was not always rebuilt after that parent became resolvable, so goto-definition could keep returning `Demo.RightParent.Common`.
+
+The fix keeps the override index and the goto-definition lookup maps synchronized when inheritance resolution changes:
+- `new_class_inheritance` adds classes collected while resolving unresolved parent references to the full override rebuild set before rebuilding.
+- `update_class_inheritance` does the same for inheritance edits by rebuilding the current class, direct dependents, and any additional classes gathered while reconnecting inheritance edges.
+- `rebuild_override_index_for_classes_and_apply` wraps `build_override_index_for_classes` and merges returned inherited methods, properties, and parameters into `method_defs`, `property_defs`, and `parameter_defs`.
+
+The final step matters because relative method goto-definition consults `method_defs[class_name][method_name]` before falling back to `override_index.effective_methods`. If the override index is correct but `method_defs` is stale or missing an inherited method, goto-definition can still navigate to the wrong place or fail to navigate.
+
+The regression tests cover both sides of the rule:
+- `test_goto_def_multiple_inheritance_default_left` verifies `Demo.ChildDefault.Common` resolves through `Demo.LeftParent` to `Demo.Base`.
+- `test_goto_def_multiple_inheritance_late_left_parent_prefers_base` indexes `Base`, `RightParent`, `ChildDefault`, then `LeftParent` to reproduce the stale-state ordering and verifies both `override_index.effective_methods` and `method_defs` point at `Demo.Base.Common`.
+- `test_goto_def_multiple_inheritance_right_direction` verifies `[Inheritance = right]` still resolves `Common` through `Demo.RightParent`.
+
+Relevant code paths:
+- `ProjectData::new_class_inheritance` and `ProjectData::update_class_inheritance` decide which classes must be rebuilt after inheritance resolution changes.
+- `ProjectData::build_override_index_for_classes` computes effective inherited members in parent-precedence order.
+- `ProjectData::rebuild_override_index_for_classes_and_apply` keeps the override index and goto-definition lookup maps aligned.
+- The regression tests live in `src/test.rs` near the multiple-inheritance goto-definition tests.
 
 ### GlobalSemanticModel
 
 Stores workspace-wide symbols:
 - Class symbols (`ClassGlobalSymbol`) — name, url, location
-- Method symbols (`MethodGlobalSymbol`) — for public methods
+- Method symbols (`MethodSymbol`) — for public methods
 - Variable symbols (`VariableGlobalSymbol`) — for public variables
 
 ### ProjectState Fields

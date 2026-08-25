@@ -1,4 +1,4 @@
-use crate::parse_structures::{ReturnType, Variable};
+use crate::parse_structures::{TypeName, Variable};
 
 impl Variable {
     /// Construct a `Variable` with an optional declared argument type and inferred expression types.
@@ -7,7 +7,7 @@ impl Variable {
     /// types/atoms observed in the RHS/default expression.
     pub fn new(
         var_name: String,
-        arg_type: Option<ReturnType>,
+        arg_type: Option<TypeName>,
         is_public: bool,
         is_oref: bool,
         cls: Option<String>,

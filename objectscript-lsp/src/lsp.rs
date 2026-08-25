@@ -10,26 +10,30 @@ use objectscript_core::common::{
 };
 use objectscript_core::config::Config;
 use objectscript_core::parse_structures::{ClassId, FileType, MemberType, RefactorLevel};
-use objectscript_core::workspace::ProjectState;
+use objectscript_core::workspace::{ProjectData, ProjectState};
 use serde_json;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tower_lsp::LanguageServer;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::request::{GotoImplementationParams, GotoImplementationResponse};
 use tower_lsp::lsp_types::{
     CodeAction, CodeActionKind, CodeActionOptions, CodeActionParams, CodeActionProviderCapability,
-    CodeActionResponse, CodeActionTriggerKind, Command, Diagnostic, DiagnosticOptions,
-    DiagnosticServerCapabilities, DiagnosticSeverity, DidChangeTextDocumentParams,
-    DidChangeWatchedFilesParams, DidChangeWatchedFilesRegistrationOptions,
-    DidOpenTextDocumentParams, DocumentDiagnosticParams, DocumentDiagnosticReport,
-    DocumentDiagnosticReportResult, ExecuteCommandOptions, ExecuteCommandParams, FileChangeType,
-    FileSystemWatcher, FullDocumentDiagnosticReport, GlobPattern, GotoDefinitionParams,
-    GotoDefinitionResponse, ImplementationProviderCapability, InitializeParams, InitializeResult,
-    InitializedParams, Location, MessageType, OneOf, Position, Range as LspRange, Range,
-    Registration, RelatedFullDocumentDiagnosticReport, ServerCapabilities, ServerInfo,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, WatchKind, WorkspaceEdit,
+    CodeActionResponse, CodeActionTriggerKind, Command, ConfigurationItem, Diagnostic,
+    DiagnosticOptions, DiagnosticServerCapabilities, DiagnosticSeverity,
+    DidChangeConfigurationParams, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
+    DidChangeWatchedFilesRegistrationOptions, DidOpenTextDocumentParams, DocumentDiagnosticParams,
+    DocumentDiagnosticReport, DocumentDiagnosticReportResult, ExecuteCommandOptions,
+    ExecuteCommandParams, FileChangeType, FileSystemWatcher, FullDocumentDiagnosticReport,
+    GlobPattern, GotoDefinitionParams, GotoDefinitionResponse, ImplementationProviderCapability,
+    InitializeParams, InitializeResult, InitializedParams, Location, MessageType, OneOf, Position,
+    Range as LspRange, Range, Registration, RelatedFullDocumentDiagnosticReport,
+    ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
+    Url, WatchKind, WorkspaceDiagnosticParams, WorkspaceDiagnosticReport,
+    WorkspaceDiagnosticReportResult, WorkspaceDocumentDiagnosticReport, WorkspaceEdit,
+    WorkspaceFullDocumentDiagnosticReport,
 };
 use tree_sitter::{InputEdit, Parser, Point, Tree};
 use tree_sitter_objectscript_playground::LANGUAGE_OBJECTSCRIPT;
@@ -108,13 +112,8 @@ fn refactor_title(refactor_level: RefactorLevel, scope: &str) -> String {
 }
 
 fn selectable_document_refactor_levels(file_type: FileType) -> &'static [RefactorLevel] {
-    const ROUTINE_LEVELS: [RefactorLevel; 4] = [
+    const OBJECTSCRIPT_LEVELS: [RefactorLevel; 4] = [
         RefactorLevel::DoCommands,
-        RefactorLevel::Conditionals,
-        RefactorLevel::ForCommands,
-        RefactorLevel::All,
-    ];
-    const CLASS_LEVELS: [RefactorLevel; 3] = [
         RefactorLevel::Conditionals,
         RefactorLevel::ForCommands,
         RefactorLevel::All,
@@ -122,8 +121,8 @@ fn selectable_document_refactor_levels(file_type: FileType) -> &'static [Refacto
     const XML_LEVELS: [RefactorLevel; 0] = [];
 
     match file_type {
-        FileType::Routine => &ROUTINE_LEVELS,
-        FileType::Cls => &CLASS_LEVELS,
+        FileType::Routine => &OBJECTSCRIPT_LEVELS,
+        FileType::Cls => &OBJECTSCRIPT_LEVELS,
         FileType::Xml => &XML_LEVELS,
     }
 }
@@ -190,6 +189,55 @@ fn push_xml_injected_objectscript_diagnostics(
 
         push_host_syntax_diagnostics(diagnostics, content, &tree, FileType::Routine);
     }
+}
+
+fn push_project_semantic_diagnostics(
+    diagnostics: &mut Vec<Diagnostic>,
+    data: &ProjectData,
+    uri: &Url,
+) {
+    if let Some(class_diagnostics) = data.other_class_diagnostics.get(uri) {
+        diagnostics.extend(class_diagnostics.iter().cloned());
+    }
+
+    for diagnostics_by_url in data.inheritance_diagonstics.values() {
+        if let Some(diagnostic) = diagnostics_by_url.get(uri) {
+            diagnostics.push(diagnostic.clone());
+        }
+    }
+
+    for diagnostics_by_url in data.method_reference_diagnostics.values() {
+        if let Some(diagnostic) = diagnostics_by_url.get(uri) {
+            diagnostics.push(diagnostic.clone());
+        }
+    }
+}
+
+fn collect_document_diagnostics(data: &ProjectData, uri: &Url) -> Option<Vec<Diagnostic>> {
+    let document = data.documents.get(uri)?;
+    if !data.config.enable_lint {
+        return Some(Vec::new());
+    }
+
+    let mut diagnostics = Vec::new();
+    let content = document.content.as_str();
+
+    push_host_syntax_diagnostics(
+        &mut diagnostics,
+        content,
+        &document.tree,
+        document.file_type.clone(),
+    );
+
+    if document.file_type == FileType::Xml {
+        push_xml_injected_objectscript_diagnostics(&mut diagnostics, content, &document.tree);
+    }
+
+    if data.config.enable_strict_mode {
+        push_project_semantic_diagnostics(&mut diagnostics, data, uri);
+    }
+
+    Some(diagnostics)
 }
 
 fn build_refactor_command(
@@ -295,8 +343,8 @@ fn build_caps(cfg: &Config) -> ServerCapabilities {
         })),
         diagnostic_provider: Some(DiagnosticServerCapabilities::Options(DiagnosticOptions {
             identifier: None,
-            inter_file_dependencies: false,
-            workspace_diagnostics: false,
+            inter_file_dependencies: true,
+            workspace_diagnostics: true,
             work_done_progress_options: Default::default(),
         })),
         execute_command_provider: Some(ExecuteCommandOptions {
@@ -317,14 +365,127 @@ fn build_caps(cfg: &Config) -> ServerCapabilities {
     }
 }
 
+impl BackendWrapper {
+    fn apply_config_to_projects(&self, config: &Config) -> bool {
+        let projects: Vec<_> = self.0.projects.read().values().cloned().collect();
+        let mut changed = false;
+
+        for project in projects {
+            let mut data = project.data.write();
+            if data.config != *config {
+                data.config = config.clone();
+                changed = true;
+            }
+        }
+
+        changed
+    }
+
+    async fn request_client_config(&self) -> Option<Config> {
+        if !self.0.configuration_supported.load(Ordering::Relaxed) {
+            return None;
+        }
+
+        let values = match self
+            .0
+            .client
+            .configuration(vec![
+                ConfigurationItem {
+                    scope_uri: None,
+                    section: Some("objectscript".to_string()),
+                },
+                ConfigurationItem {
+                    scope_uri: None,
+                    section: Some("objectscript-lsp".to_string()),
+                },
+                ConfigurationItem {
+                    scope_uri: None,
+                    section: None,
+                },
+            ])
+            .await
+        {
+            Ok(values) => values,
+            Err(error) => {
+                self.0
+                    .client
+                    .log_message(
+                        MessageType::WARNING,
+                        format!("Failed to request ObjectScript configuration: {error}"),
+                    )
+                    .await;
+                return None;
+            }
+        };
+
+        for value in values {
+            if value.is_null() {
+                continue;
+            }
+            if value.as_object().is_some_and(|object| object.is_empty()) {
+                continue;
+            }
+
+            match Config::from_lsp_value_if_present(value) {
+                Ok(Some(config)) => return Some(config),
+                Ok(None) => continue,
+                Err(error) => {
+                    self.0
+                        .client
+                        .log_message(
+                            MessageType::WARNING,
+                            format!(
+                                "Failed to parse requested ObjectScript configuration: {error}"
+                            ),
+                        )
+                        .await;
+                }
+            }
+        }
+
+        None
+    }
+}
+
 #[tower_lsp::async_trait]
 impl LanguageServer for BackendWrapper {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
-        // negotiate w/ client to set config for formatting, lint, snippets
-        let negotiations: Config = params
-            .initialization_options
-            .and_then(|v| serde_json::from_value::<Config>(v).ok())
-            .unwrap_or_default();
+        let diagnostic_refresh_supported = params
+            .capabilities
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.diagnostic.as_ref())
+            .and_then(|diagnostic| diagnostic.refresh_support)
+            .unwrap_or(false);
+        self.0
+            .set_diagnostic_refresh_supported(diagnostic_refresh_supported);
+        let configuration_supported = params
+            .capabilities
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.configuration)
+            .unwrap_or(false);
+        self.0.set_configuration_supported(configuration_supported);
+
+        // Negotiate with the client to set config for formatting, lint, snippets, and diagnostics.
+        let negotiations = match params.initialization_options {
+            Some(value) => match Config::from_lsp_value(value) {
+                Ok(config) => config,
+                Err(error) => {
+                    self.0
+                        .client
+                        .log_message(
+                            MessageType::WARNING,
+                            format!(
+                                "Failed to parse ObjectScript initializationOptions; using defaults: {error}"
+                            ),
+                        )
+                        .await;
+                    Config::default()
+                }
+            },
+            None => Config::default(),
+        };
 
         if let Some(folders) = params.workspace_folders {
             for folder in folders {
@@ -337,6 +498,7 @@ impl LanguageServer for BackendWrapper {
                 };
                 // create projectState and set the projectRoot
                 let state = ProjectState::new();
+                state.data.write().config = negotiations.clone();
                 if state.project_root_path.set(Some(project_root)).is_err() {
                     self.0
                         .client
@@ -404,6 +566,39 @@ impl LanguageServer for BackendWrapper {
                     let _ = backend.index_workspace(&workspace.uri).await;
                 });
             }
+        }
+
+        if let Some(config) = self.request_client_config().await {
+            if self.apply_config_to_projects(&config) {
+                self.0.refresh_workspace_diagnostics_if_supported().await;
+            }
+        }
+    }
+
+    async fn did_change_configuration(&self, params: DidChangeConfigurationParams) {
+        let config = if let Some(config) = self.request_client_config().await {
+            config
+        } else {
+            match Config::from_lsp_value_if_present(params.settings) {
+                Ok(Some(config)) => config,
+                Ok(None) => return,
+                Err(error) => {
+                    self.0
+                        .client
+                    .log_message(
+                        MessageType::WARNING,
+                        format!(
+                            "Failed to parse ObjectScript configuration change; keeping existing config: {error}"
+                        ),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        };
+
+        if self.apply_config_to_projects(&config) {
+            self.0.refresh_workspace_diagnostics_if_supported().await;
         }
     }
 
@@ -478,6 +673,7 @@ impl LanguageServer for BackendWrapper {
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        let mut changed_any = false;
         for change in params.changes {
             let Some(file_type) = file_type_from_path(change.uri.path()) else {
                 continue;
@@ -501,6 +697,11 @@ impl LanguageServer for BackendWrapper {
                 .unwrap_or(0);
 
             project.handle_document_opened(change.uri, text, file_type, version);
+            changed_any = true;
+        }
+
+        if changed_any {
+            self.0.refresh_workspace_diagnostics_if_supported().await;
         }
     }
 
@@ -590,7 +791,6 @@ impl LanguageServer for BackendWrapper {
         params: DocumentDiagnosticParams,
     ) -> Result<DocumentDiagnosticReportResult> {
         let uri = params.text_document.uri;
-        let mut diagnostics: Vec<Diagnostic> = Vec::new();
         let Some(project) = self.0.get_project_from_document_url(&uri) else {
             self.0
                 .client
@@ -599,14 +799,12 @@ impl LanguageServer for BackendWrapper {
             generic_exit_statements("LSP", "diagnostic");
             return Ok(empty_diagnostic_report());
         };
-        let doc_snapshot: Option<(FileType, String, Tree)> = {
+        let diagnostics = {
             let data = project.data.read();
-            data.documents
-                .get(&uri)
-                .map(|d| (d.file_type.clone(), d.content.clone(), d.tree.clone()))
+            collect_document_diagnostics(&data, &uri)
         };
 
-        let (file_type, content, tree) = match doc_snapshot {
+        let diagnostics = match diagnostics {
             Some(v) => v,
             None => {
                 self.0
@@ -616,24 +814,7 @@ impl LanguageServer for BackendWrapper {
                 return Ok(empty_diagnostic_report());
             }
         };
-        let content = content.as_str();
-        push_host_syntax_diagnostics(&mut diagnostics, content, &tree, file_type.clone());
-        if file_type == FileType::Xml {
-            let host_count = diagnostics.len();
-            push_xml_injected_objectscript_diagnostics(&mut diagnostics, content, &tree);
-            self.0
-                .client
-                .log_message(
-                    MessageType::INFO,
-                    format!(
-                        "XML diagnostic for {} -> host errors: {}, total errors after injected ObjectScript pass: {}",
-                        uri,
-                        host_count,
-                        diagnostics.len()
-                    ),
-                )
-                .await;
-        }
+
         Ok(
             DocumentDiagnosticReport::Full(RelatedFullDocumentDiagnosticReport {
                 related_documents: None,
@@ -644,6 +825,36 @@ impl LanguageServer for BackendWrapper {
             })
             .into(),
         )
+    }
+
+    async fn workspace_diagnostic(
+        &self,
+        _params: WorkspaceDiagnosticParams,
+    ) -> Result<WorkspaceDiagnosticReportResult> {
+        let projects: Vec<_> = self.0.projects.read().values().cloned().collect();
+        let mut items = Vec::new();
+
+        for project in projects {
+            let data = project.data.read();
+            for (uri, document) in &data.documents {
+                let Some(diagnostics) = collect_document_diagnostics(&data, uri) else {
+                    continue;
+                };
+
+                items.push(WorkspaceDocumentDiagnosticReport::Full(
+                    WorkspaceFullDocumentDiagnosticReport {
+                        uri: uri.clone(),
+                        version: document.version.map(i64::from),
+                        full_document_diagnostic_report: FullDocumentDiagnosticReport {
+                            result_id: None,
+                            items: diagnostics,
+                        },
+                    },
+                ));
+            }
+        }
+
+        Ok(WorkspaceDiagnosticReport { items }.into())
     }
 
     async fn goto_definition(
@@ -674,9 +885,7 @@ impl LanguageServer for BackendWrapper {
                 return Ok(None);
             };
 
-            let Some(class_name) = document.class_name.clone() else {
-                return Ok(None);
-            };
+            let class_name = document.class_name.clone();
             (
                 document.content.clone(),
                 document.tree.clone(),
@@ -726,13 +935,79 @@ impl LanguageServer for BackendWrapper {
                 MemberType::MethodDef => {
                     definitions = {
                         let data = project.data.read();
-                        data.get_method_superclass(name_string, &class_id)
+                        data.get_method_superclass(name_string, &class_id, &uri)
+                    }
+                }
+                MemberType::PropertyDef => {
+                    definitions = {
+                        let data = project.data.read();
+                        data.get_property_superclass(name_string, &class_id, &uri)
+                    }
+                }
+                MemberType::ParameterDef => {
+                    definitions = {
+                        let data = project.data.read();
+                        data.get_parameter_superclass(name_string, &class_id)
                     }
                 }
                 MemberType::Class => {
                     definitions = {
                         let data = project.data.read();
                         data.get_class_definition(&name_string)
+                    }
+                }
+                MemberType::RelativeParameter => {
+                    definitions = {
+                        let data = project.data.read();
+                        let parameter_ref = if let Some(p_ref) = data
+                            .parameter_defs
+                            .get(&class_name)
+                            .and_then(|parameters| parameters.get(&name_string))
+                        {
+                            p_ref
+                        } else {
+                            if let Some(p_ref) = data
+                                .override_index
+                                .effective_parameters
+                                .get(&class_name)
+                                .and_then(|parameters| parameters.get(&name_string))
+                            {
+                                eprintln!(
+                                    "Error: Parameter is defined in override index but NOT in parameter_defs"
+                                );
+                                p_ref
+                            } else {
+                                return Ok(None);
+                            }
+                        };
+                        data.get_parameter_definition(parameter_ref)
+                    }
+                }
+                MemberType::RelativeProperty => {
+                    definitions = {
+                        let data = project.data.read();
+                        let property_ref = if let Some(p_ref) = data
+                            .property_defs
+                            .get(&class_name)
+                            .and_then(|properties| properties.get(&name_string))
+                        {
+                            p_ref
+                        } else {
+                            if let Some(p_ref) = data
+                                .override_index
+                                .effective_properties
+                                .get(&class_name)
+                                .and_then(|properties| properties.get(&name_string))
+                            {
+                                eprintln!(
+                                    "Error: Property is defined in override index but NOT in property_defs"
+                                );
+                                p_ref
+                            } else {
+                                return Ok(None);
+                            }
+                        };
+                        data.get_property_definition(property_ref)
                     }
                 }
                 MemberType::RelativeMethodCall => {
@@ -745,7 +1020,19 @@ impl LanguageServer for BackendWrapper {
                         {
                             m_ref
                         } else {
-                            return Ok(None);
+                            if let Some(m_ref) = data
+                                .override_index
+                                .effective_methods
+                                .get(&class_name)
+                                .and_then(|methods| methods.get(&name_string))
+                            {
+                                eprintln!(
+                                    "Error: Method is defined in override index but NOT in method_defs"
+                                );
+                                m_ref
+                            } else {
+                                return Ok(None);
+                            }
                         };
                         data.get_method_definition(method_ref, None)
                     }
@@ -818,6 +1105,11 @@ impl LanguageServer for BackendWrapper {
                                         content,
                                         class_name.clone(),
                                     );
+
+                                    eprintln!(
+                                        "ROUTINE NAME: {:?}, METHOD NAME: {:?}, OFFSET: {:?}",
+                                        &routine_name, &method_name, offset
+                                    );
                                     let method_ref = if let Some(m_ref) = data
                                         .method_defs
                                         .get(&routine_name)
@@ -825,6 +1117,7 @@ impl LanguageServer for BackendWrapper {
                                     {
                                         m_ref
                                     } else {
+                                        eprintln!("Error: method ref not found");
                                         return Ok(None);
                                     };
                                     data.get_method_definition(method_ref, offset)
@@ -1301,7 +1594,14 @@ impl LanguageServer for BackendWrapper {
                                     .get(&class_name_str)
                                     .and_then(|methods| methods.get(&name_string))
                                 {
-                                    data.get_method_overrides(method_ref)
+                                    let Some(method_url) = data
+                                        .global_semantic_model
+                                        .get_class_symbol(&method_ref.class)
+                                        .map(|symbol| symbol.url.clone())
+                                    else {
+                                        return Ok(None);
+                                    };
+                                    data.get_method_overrides(method_ref, &method_url)
                                 } else {
                                     return Ok(None);
                                 }
@@ -1315,11 +1615,17 @@ impl LanguageServer for BackendWrapper {
                         if let Some(class) = data.global_semantic_model.get_class(&class_id)
                             && let Some(method_ref) = class.methods.get(&name_string)
                         {
-                            data.get_method_overrides(&method_ref)
+                            data.get_method_overrides(&method_ref, &uri)
                         } else {
                             return Ok(None);
                         }
                     };
+                }
+                MemberType::ClassDef => {
+                    overrides = {
+                        let data = project.data.read();
+                        data.get_class_implementations(&class_id)
+                    }
                 }
                 _ => return Ok(None),
             }
@@ -1398,6 +1704,7 @@ impl LanguageServer for BackendWrapper {
             file_type,
             params.text_document.version,
         );
+        self.0.refresh_workspace_diagnostics_if_supported().await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -1453,6 +1760,7 @@ impl LanguageServer for BackendWrapper {
             // Reuse normal open handling so XML docs are tracked and ObjectScript docs still
             // populate their semantic state when a change arrives before an explicit didOpen.
             project.handle_document_opened(uri, text, file_type, new_version);
+            self.0.refresh_workspace_diagnostics_if_supported().await;
             return;
         };
 
@@ -1561,9 +1869,11 @@ impl LanguageServer for BackendWrapper {
                 doc.version = Some(new_version);
                 doc.file_type = file_type.clone();
             }
+            data.clear_diagnostics_for_url(&uri);
         }
 
         if file_type == FileType::Xml {
+            self.0.refresh_workspace_diagnostics_if_supported().await;
             return;
         }
 
@@ -1572,8 +1882,19 @@ impl LanguageServer for BackendWrapper {
                 .client
                 .log_message(MessageType::ERROR, format!("New Tree has Errors"))
                 .await;
+            self.0.refresh_workspace_diagnostics_if_supported().await;
         } else {
-            project.update_document(uri, new_tree, file_type, new_version, old_text.as_str());
+            let changed_ranges: Vec<tree_sitter::Range> =
+                new_tree.changed_ranges(&old_tree).collect();
+            project.update_document(
+                uri,
+                &new_tree,
+                file_type,
+                new_version,
+                old_text.as_str(),
+                changed_ranges,
+            );
+            self.0.refresh_workspace_diagnostics_if_supported().await;
         }
     }
 }
@@ -1727,7 +2048,7 @@ if  {
 
         assert_eq!(document.file_type, FileType::Xml);
         assert!(document.class_id.is_none());
-        assert!(document.class_name.is_none());
+        assert_eq!(&document.class_name, "XML");
     }
 
     #[test]
@@ -1869,6 +2190,158 @@ set = 1
         assert!(
             !items.is_empty(),
             "expected diagnostic() to return injected ObjectScript errors for XML"
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_indexing_keeps_clean_xml_diagnostics_empty() {
+        let (service, _socket) = LspService::build(|client| BackendWrapper::new(client)).finish();
+        let backend = service.inner();
+
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("diagnostics");
+        let workspace_uri = Url::from_file_path(&project_root).unwrap();
+        let state = ProjectState::new();
+        state
+            .project_root_path
+            .set(Some(project_root.clone()))
+            .expect("failed to set workspace root");
+        backend.0.add_project(workspace_uri.clone(), state);
+        backend.0.index_workspace(&workspace_uri).await;
+
+        let clean_xml_uri = Url::from_file_path(project_root.join("injected-clean.xml")).unwrap();
+        let project = backend
+            .0
+            .get_project(&workspace_uri)
+            .expect("missing project state");
+        let data = project.data.read();
+        let diagnostics = collect_document_diagnostics(&data, &clean_xml_uri)
+            .expect("indexed XML document should be tracked");
+
+        assert!(
+            diagnostics.is_empty(),
+            "clean XML should not inherit parse errors from workspace indexing: {diagnostics:#?}"
+        );
+    }
+
+    #[test]
+    fn collect_document_diagnostics_filters_semantic_diagnostics_when_strict_mode_is_disabled() {
+        let state = ProjectState::new();
+        let uri = Url::parse("file:///tmp/example.mac").unwrap();
+        let content = "ROUTINE example\n\nmain\n quit\n";
+        state.handle_document_opened(uri.clone(), content.to_string(), FileType::Routine, 1);
+
+        let mut data = state.data.write();
+        data.other_class_diagnostics
+            .entry(uri.clone())
+            .or_default()
+            .push(Diagnostic {
+                range: Range::new(Position::new(0, 0), Position::new(0, 1)),
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: None,
+                code_description: None,
+                source: Some("ObjectScript".to_string()),
+                message: "semantic diagnostic".to_string(),
+                related_information: None,
+                tags: None,
+                data: None,
+            });
+
+        data.config.enable_strict_mode = false;
+        let non_strict = collect_document_diagnostics(&data, &uri)
+            .expect("document should have diagnostics in non-strict mode");
+        assert!(
+            non_strict.is_empty(),
+            "non-strict mode should filter semantic diagnostics from a clean document"
+        );
+
+        data.config.enable_strict_mode = true;
+        let strict = collect_document_diagnostics(&data, &uri)
+            .expect("document should have diagnostics in strict mode");
+        assert_eq!(strict.len(), 1);
+        assert_eq!(strict[0].message, "semantic diagnostic");
+    }
+
+    #[test]
+    fn collect_document_diagnostics_returns_empty_when_lint_is_disabled() {
+        let state = ProjectState::new();
+        let uri = Url::parse("file:///tmp/example.mac").unwrap();
+        let content = "ROUTINE example\n\nmain\n set = 1\n";
+        state.handle_document_opened(uri.clone(), content.to_string(), FileType::Routine, 1);
+
+        let mut data = state.data.write();
+        data.config.enable_lint = false;
+
+        let diagnostics = collect_document_diagnostics(&data, &uri)
+            .expect("document should have diagnostics when lint is disabled");
+        assert!(diagnostics.is_empty());
+    }
+
+    #[tokio::test]
+    async fn did_change_configuration_updates_project_config() {
+        let (service, _socket) = LspService::build(|client| BackendWrapper::new(client)).finish();
+        let backend = service.inner();
+
+        let project_root = env::current_dir().unwrap();
+        let workspace_uri = Url::from_file_path(&project_root).unwrap();
+        let state = ProjectState::new();
+        state
+            .project_root_path
+            .set(Some(project_root.clone()))
+            .expect("failed to set workspace root");
+        backend.0.add_project(workspace_uri.clone(), state);
+
+        backend
+            .did_change_configuration(DidChangeConfigurationParams {
+                settings: serde_json::json!({
+                    "objectscript": {
+                        "enableStrictMode": false,
+                        "enableLint": false
+                    }
+                }),
+            })
+            .await;
+
+        let project = backend
+            .0
+            .get_project(&workspace_uri)
+            .expect("missing project state");
+        let data = project.data.read();
+        assert!(!data.config.enable_strict_mode);
+        assert!(!data.config.enable_lint);
+    }
+
+    #[tokio::test]
+    async fn did_change_configuration_ignores_empty_settings() {
+        let (service, _socket) = LspService::build(|client| BackendWrapper::new(client)).finish();
+        let backend = service.inner();
+
+        let project_root = env::current_dir().unwrap();
+        let workspace_uri = Url::from_file_path(&project_root).unwrap();
+        let state = ProjectState::new();
+        state
+            .project_root_path
+            .set(Some(project_root.clone()))
+            .expect("failed to set workspace root");
+        state.data.write().config.enable_strict_mode = false;
+        backend.0.add_project(workspace_uri.clone(), state);
+
+        backend
+            .did_change_configuration(DidChangeConfigurationParams {
+                settings: serde_json::json!({}),
+            })
+            .await;
+
+        let project = backend
+            .0
+            .get_project(&workspace_uri)
+            .expect("missing project state");
+        let data = project.data.read();
+        assert!(
+            !data.config.enable_strict_mode,
+            "empty configuration notifications should not reset strict mode to the default"
         );
     }
 

@@ -1,11 +1,11 @@
-use objectscript_core::common::get_member_name_from_root;
+use objectscript_core::common::{get_member_name_and_range_from_root, ts_range_to_lsp_range};
 use objectscript_core::parse_structures::FileType;
 use objectscript_core::workspace::ProjectState;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tower_lsp::lsp_types::Url;
+use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Url};
 use tree_sitter::Parser;
 use tree_sitter_objectscript::LANGUAGE_OBJECTSCRIPT_UDL;
 use tree_sitter_objectscript_routine::LANGUAGE_OBJECTSCRIPT_ROUTINE;
@@ -140,28 +140,44 @@ impl BackendTester {
                     false
                 };
 
-                let member_name =
-                    get_member_name_from_root(code.as_str(), tree.root_node(), is_rtn);
-
-                // Commit inside the ProjectData lock
+                if let Some((member_range, member_name, class_name_def_range)) =
+                    get_member_name_and_range_from_root(code.as_str(), tree.root_node(), is_rtn)
                 {
                     let mut data = project.data.write();
+                    let workspace_contains_class_name = data.classes.contains_key(&member_name);
                     let already_exists = data.add_document_if_absent(
                         url.clone(),
-                        code,
-                        tree,
+                        code.clone(),
+                        &tree,
                         filetype,
-                        member_name,
+                        member_name.clone(),
+                        member_range,
                         None,
                     );
                     if already_exists {
                         documents_already_existing.push(url);
+                    } else if !already_exists && workspace_contains_class_name {
+                        let lsp_range = ts_range_to_lsp_range(code.as_str(), class_name_def_range);
+                        let diagnostic = Diagnostic {
+                            range: lsp_range,
+                            severity: Some(DiagnosticSeverity::ERROR),
+                            code: None,
+                            code_description: None,
+                            source: Some("ObjectScript".to_string()),
+                            message: format!(
+                                "A Class named {:?} already exists in this workspace.",
+                                &member_name
+                            ),
+                            related_information: None,
+                            tags: None,
+                            data: None,
+                        };
+                        data.other_class_diagnostics
+                            .entry(url.clone())
+                            .or_insert(Vec::new())
+                            .push(diagnostic);
                     }
                 }
-            }
-            {
-                let mut data = project.data.write();
-                data.build_inheritance_and_variables(None, documents_already_existing);
             }
         });
         // Wait for completion (and handle join errors)

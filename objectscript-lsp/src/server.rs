@@ -1,15 +1,17 @@
-use objectscript_core::common::get_member_name_from_root;
+use objectscript_core::common::{get_member_name_and_range_from_root, ts_range_to_lsp_range};
 use objectscript_core::parse_structures::FileType;
 use objectscript_core::workspace::ProjectState;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tower_lsp::Client;
-use tower_lsp::lsp_types::{MessageType, Url};
+use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, MessageType, Url};
 use tree_sitter::Parser;
 use tree_sitter_objectscript::LANGUAGE_OBJECTSCRIPT_UDL;
 use tree_sitter_objectscript_routine::LANGUAGE_OBJECTSCRIPT_ROUTINE;
+use tree_sitter_xml::LANGUAGE_XML;
 use walkdir::WalkDir;
 
 /// Arc-wrapped backend providing the LSP language server implementation.
@@ -25,6 +27,8 @@ pub(crate) struct Backend {
     pub(crate) client: Client,
     /// Stores Url -> ProjectState for each Workspace.
     pub(crate) projects: Arc<RwLock<HashMap<Url, Arc<ProjectState>>>>,
+    pub(crate) diagnostic_refresh_supported: AtomicBool,
+    pub(crate) configuration_supported: AtomicBool,
 }
 
 impl Backend {
@@ -33,6 +37,24 @@ impl Backend {
         Self {
             client,
             projects: Arc::new(RwLock::new(HashMap::new())),
+            diagnostic_refresh_supported: AtomicBool::new(false),
+            configuration_supported: AtomicBool::new(false),
+        }
+    }
+
+    pub(crate) fn set_diagnostic_refresh_supported(&self, supported: bool) {
+        self.diagnostic_refresh_supported
+            .store(supported, Ordering::Relaxed);
+    }
+
+    pub(crate) fn set_configuration_supported(&self, supported: bool) {
+        self.configuration_supported
+            .store(supported, Ordering::Relaxed);
+    }
+
+    pub(crate) async fn refresh_workspace_diagnostics_if_supported(&self) {
+        if self.diagnostic_refresh_supported.load(Ordering::Relaxed) {
+            let _ = self.client.workspace_diagnostic_refresh().await;
         }
     }
 
@@ -93,7 +115,7 @@ impl Backend {
         project.handle_document_opened(uri, text, file_type, version);
     }
 
-    /// Index all `.cls` and `.inc` files under the workspace root containing `uri`.
+    /// Index all supported ObjectScript and XML files under the workspace root containing `uri`.
     ///
     /// This runs filesystem walking and parsing on Tokio's blocking thread pool. Each file is read,
     /// parsed with the appropriate Tree-sitter grammar, and inserted into the project's document
@@ -133,6 +155,12 @@ impl Backend {
                 return;
             }
 
+            let mut xml_parser = Parser::new();
+            if xml_parser.set_language(&LANGUAGE_XML.into()).is_err() {
+                eprintln!("Error: Failed to load XML grammar");
+                return;
+            }
+
             let mut documents_already_existing = Vec::new();
             for entry in WalkDir::new(&root).into_iter().filter_map(|e| e.ok()) {
                 let path = entry.path();
@@ -167,58 +195,95 @@ impl Backend {
                     }
                 };
 
-                let tree = if is_rtn {
-                    match routine_parser.parse(&content, None) {
+                let tree = match filetype {
+                    FileType::Routine => match routine_parser.parse(&content, None) {
                         Some(t) => t,
                         None => {
                             eprintln!("Failed to parse file for: {:?}", path.display());
                             continue;
                         }
-                    }
-                } else {
-                    match cls_parser.parse(&content, None) {
+                    },
+                    FileType::Cls => match cls_parser.parse(&content, None) {
                         Some(t) => t,
                         None => {
                             eprintln!("Failed to parse file for: {:?}", path.display());
                             continue;
                         }
-                    }
+                    },
+                    FileType::Xml => match xml_parser.parse(&content, None) {
+                        Some(t) => t,
+                        None => {
+                            eprintln!("Failed to parse file for: {:?}", path.display());
+                            continue;
+                        }
+                    },
                 };
 
-                let member_name = get_member_name_from_root(&content, tree.root_node(), is_rtn);
-
-                if member_name.is_none() {
-                    eprintln!(
-                        "Error: Failed to get name from root node for file url: {:?}",
-                        url.path()
-                    );
-                    continue;
-                }
+                let (class_range, class_name, class_name_def_range) = if filetype == FileType::Xml {
+                    (
+                        tree.root_node().range(),
+                        "XML".to_string(),
+                        tree.root_node().range(),
+                    )
+                } else {
+                    if let Some((class_range, class_name, class_name_def_range)) =
+                        get_member_name_and_range_from_root(&content, tree.root_node(), is_rtn)
+                    {
+                        (class_range, class_name, class_name_def_range)
+                    } else {
+                        eprintln!(
+                            "Error: Failed to get name from root node for file url: {:?}",
+                            url.path()
+                        );
+                        continue;
+                    }
+                };
 
                 // Commit inside the ProjectData lock
                 {
                     let mut data = project.data.write();
+                    let workspace_contains_class_name = data.classes.contains_key(&class_name);
                     let already_exists = data.add_document_if_absent(
                         url.clone(),
-                        content,
-                        tree,
+                        content.clone(),
+                        &tree,
                         filetype,
-                        member_name,
+                        class_name.clone(),
+                        class_range,
                         None,
                     );
                     if already_exists {
                         documents_already_existing.push(url);
+                    } else if !already_exists && workspace_contains_class_name {
+                        let lsp_range =
+                            ts_range_to_lsp_range(content.as_str(), class_name_def_range);
+                        let diagnostic = Diagnostic {
+                            range: lsp_range,
+                            severity: Some(DiagnosticSeverity::ERROR),
+                            code: None,
+                            code_description: None,
+                            source: Some("ObjectScript".to_string()),
+                            message: format!(
+                                "A Class named {:?} already exists in this workspace.",
+                                &class_name
+                            ),
+                            related_information: None,
+                            tags: None,
+                            data: None,
+                        };
+                        data.other_class_diagnostics
+                            .entry(url.clone())
+                            .or_insert(Vec::new())
+                            .push(diagnostic);
                     }
                 }
             }
-            {
-                let mut data = project.data.write();
-                data.build_inheritance_and_variables(None, documents_already_existing);
-            }
+            eprintln!("INFO: Finished indexing workspace");
         });
         // Wait for completion (and handle join errors)
         if let Err(join_err) = handle.await {
             eprintln!("Error: index_workspace_scope spawn_blocking failed: {join_err:?}");
         }
+        self.refresh_workspace_diagnostics_if_supported().await;
     }
 }

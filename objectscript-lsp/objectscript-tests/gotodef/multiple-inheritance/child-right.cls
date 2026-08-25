@@ -1,7 +1,8 @@
 Class Demo.ChildRight Extends (Demo.LeftParent, Demo.RightParent) [Inheritance = right]
 {
-Method UseParent()
+ClassMethod UseParent()
 {
     do ##class(Demo.RightParent).Shared()
+    d ..Common()
 }
 }

@@ -78,7 +78,9 @@ Scopes that create boundaries for variable resolution:
 
 ## Inheritance Rules for Superclass Navigation
 
-When navigating from a method definition to its superclass override, the LSP uses the OverrideIndex which respects ObjectScript's inheritance rules: if a class inherits from multiple superclasses that define the same method, the override resolution follows the language's defined precedence order.
+When navigating from a method definition to its superclass override, or from a relative method call to an inherited method, the LSP uses the OverrideIndex. For multiple inheritance, the default precedence is left-to-right through the `Extends (...)` list. If the class declares `[Inheritance = right]`, the precedence is right-to-left.
+
+Inherited members count when applying that precedence. For example, if `Demo.ChildDefault Extends (Demo.LeftParent, Demo.RightParent)`, `Demo.LeftParent Extends Demo.Base`, `Demo.Base` defines `Common`, and `Demo.RightParent` also defines `Common`, goto-definition from `Demo.ChildDefault` should resolve `Common` to `Demo.Base`. `Demo.LeftParent` comes first, so its effective inherited `Common` wins over `Demo.RightParent.Common`.
 
 ## TODO 
 I still need to use `kill` and `new` statements in my analysis of what variable definitions are actually valid from a given method. If a `kill` statement appears, any definitions that came before that should be nullified.

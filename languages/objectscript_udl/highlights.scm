@@ -5,6 +5,8 @@
 [
   (json_boolean_literal)
   (json_null_literal)
+  (false)
+  (true)
 ] @boolean
 
 (json_object_literal_pair
@@ -84,7 +86,15 @@
 ] @variant
 
 (method_arg) @variable.parameter
-
+[(line_comment_1)
+(line_comment_2)
+(line_comment_3)
+(line_comment_4)
+(block_comment)
+(inline_comment)
+(argumentless_inline_comment)
+] @comment
+(documatic_line) @comment.doc
 ; I didn't include ( or ) in this, because they are often grouped
 ; as part of a sequence that gets turned into a single token, so they
 ; don't get matched, and one ends up getting colored differently than the other.
@@ -251,13 +261,6 @@
 ] @punctuation.special
 
 [
-  (line_comment_1)
-  (line_comment_2)
-  (line_comment_3)
-  (line_comment_4)
-  (block_comment)
-  (inline_comment)
-  (argumentless_inline_comment)
   (pound_if_special_case_else)
   (pound_if_special_case)
 ] @comment
@@ -296,6 +299,8 @@
 ; === END CORE ===
 ; === BEGIN LOCAL ===
 (iris_username) @preproc
+
+(keyword_class) @attribute
 
 [
   (keyword_import)
@@ -337,9 +342,7 @@
   (xdata_keyword)
   (xdata_keyword_mimetype)
   (property_keyword)
-] @attribute
-
-(documatic_line) @comment.doc
+] @type.builtin
 
 [
   (query_name)

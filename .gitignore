@@ -11,3 +11,6 @@ Cargo.lock
 vscode/
 objectscript-lsp/objectscript-tests/local/
 objectscript-lsp/documentation/code-changes-AI
+objectscript-lsp/documentation/local
+objectscript-lsp/claude-code-objectscript-lsp/
+objectscript-lsp/.claude-plugin/

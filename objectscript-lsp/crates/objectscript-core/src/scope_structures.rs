@@ -17,19 +17,30 @@ pub struct VariableGlobalSymbol {
     pub var_dependencies: Vec<String>,
 }
 
-/// A method definition symbol for a public method.
+/// A parameter definition symbol for a parameter.
 #[derive(Clone, Debug)]
-pub struct MethodGlobalSymbol {
-    /// Method Name
+pub struct ParameterSymbol {
+    /// parameter Name
     pub name: String,
-    /// Document URl containing the method definition.
+    /// Document URl containing the parameter definition.
     pub url: Url,
-    /// Source range of the method definition.
+    /// Source range of the parameter definition.
     pub location: Range,
     /// Ranges of references/uses associated with this symbol.
     pub references: Vec<Range>,
-    /// Ranges of outgoing method calls associated with this symbol.
-    pub method_dependencies: Vec<MethodRef>,
+}
+
+/// A property definition symbol for a property.
+#[derive(Clone, Debug)]
+pub struct PropertySymbol {
+    /// Property Name
+    pub name: String,
+    /// Document URl containing the property definition.
+    pub url: Url,
+    /// Source range of the property definition.
+    pub location: Range,
+    /// Ranges of references/uses associated with this symbol.
+    pub references: Vec<Range>,
 }
 
 /// A class definition symbol (definition site + liveness flag).
@@ -56,7 +67,7 @@ pub struct VariableSymbol {
     pub var_dependencies: Vec<String>,
 }
 
-/// A Private Method Symbol
+/// A method definition symbol for an ObjectScript method.
 #[derive(Clone, Debug)]
 pub struct MethodSymbol {
     /// Method name
@@ -67,6 +78,6 @@ pub struct MethodSymbol {
     pub references: Vec<(Url, Range)>,
     /// Ranges of dependencies associated with this symbol.
     pub method_dependencies: Vec<MethodRef>,
-    /// MethodRef associated with this method.
-    pub method_ref: MethodRef,
+    /// Document URl containing the method definition.
+    pub url: Url,
 }

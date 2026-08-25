@@ -6,12 +6,40 @@ An [ObjectScript](https://docs.intersystems.com/latest/csp/docbook/DocBook.UI.Pa
 
 # Introduction
 
-This Zed extension uses the [tree-sitter-objectscript](https://github.com/intersystems/tree-sitter-objectscript) grammars and the `objectscript-lsp` crate (local to this repo) to provide syntax highlighting, code injections, and language support for `.cls`, `.mac`, `.rtn`, `.inc`, `.int` and `.xml` files containing ObjectScript.  Install the following extensions below to get syntax highlighting for any code injected into objectscript that is `sql` or `html`. 
+This Zed extension uses the [tree-sitter-objectscript](https://github.com/intersystems/tree-sitter-objectscript) grammars and the `objectscript-lsp` crate (local to this repo) to provide syntax highlighting, code injections, and language support for `.cls`, `.mac`, `.rtn`, `.inc`, `.int` and `.xml` files containing ObjectScript.  Install the following extensions below to get syntax highlighting for any code injected into objectscript that is `sql`, `html`, or special comments (TODO, NOTE, etc). 
 
 - [SQL](https://zed.dev/extensions/sql)
 - [HTML](https://zed.dev/extensions/html)
+- [Comment](https://zed.dev/extensions/comment)
 
 The current features supported in the `ObjectScript language server` are `goto_definition`, `goto_implementation`, `refactor`, and `diagnostics`. These features are described in detail in the `objectscript-lsp/documentation/features` folder.
+
+# Setup Dev Extension 
+If you want the most up-to-date version of this extension (including experimental parts that have not yet been merged into [zed-industries/extensions](https://github.com/zed-industries/extensions), follow these steps:   
+1. Make sure you have [rust](https://rust-lang.org/tools/install/) installed.  
+2. Clone this repository into your local folders and cd into the objectscript-lsp folder (`cd zed-objectscript/objectscript-lsp`).  
+3. Build a local copy of the binary: `cargo b && cargo install --path . --force`  
+4. Go to Zed, and do `Cmd + Shift + P`, and then choose `zed:Extensions`. Then choose `Install Dev Extension` and point it at your local copy of this directory.
+5. NOTE: If rebuilding, sometimes you have to quit out of Zed and re-enter it for the changes to show.
+
+
+# User Config Settings 
+Right now we have a `strict mode` setting. If true, diagnostics will send warnings for any class or method not defined in the current workspace. Additionally, duplicate class names/ method names in the same class will be filed as a diagnostic. If false, only syntax errors will be filed in diagnostics.
+
+The default is true. To set it to false, go to the Zed settings.json: (Cmd + Shift + P -> settings -> open settings.json)
+and add this: 
+```json
+"lsp": {
+        "objectscript-lsp": {
+          "initialization_options": {
+            "enableStrictMode": false
+          },
+          "settings": {
+            "enableStrictMode": false
+          }
+        }
+      },
+```
 
 ## Reporting Issues
 

@@ -13,12 +13,12 @@
 │  Code Action Provider (lsp.rs:code_action)                  │
 │  - Checks if refactor.rewrite kind is requested             │
 │  - Builds menu of available refactor commands per file type │
-│  - Returns CodeAction list with command references           │
+│  - Returns CodeAction list with command references          │
 └────────────────────────────┬────────────────────────────────┘
                              │ user selects action
                              ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  Execute Command (lsp.rs:execute_command)                    │
+│  Execute Command (lsp.rs:execute_command)                   │
 │  - Parses URI + RefactorLevel from command arguments        │
 │  - Dispatches to document or workspace refactor             │
 │  - Sends workspace/applyEdit to editor                      │
@@ -29,8 +29,8 @@
               ▼              ▼              ▼
    ┌──────────────┐  ┌─────────────┐  ┌─────────────┐
    │ refactor_    │  │ refactor_   │  │ refactor_   │
-   │ legacy_do_  │  │ conditionals│  │ for_        │
-   │ statements()│  │ ()          │  │ statements()│
+   │ legacy_do_  │  │ conditionals │   │ for_        │
+   │ statements()│  │ ()          │   │ statements()│
    └──────────────┘  └─────────────┘  └─────────────┘
 ```
 
@@ -240,7 +240,7 @@ Uses tree-sitter queries to find legacy statements with no body (no expression +
 | Function | Purpose |
 |---|---|
 | `remove_unreachable_for_statements` | First pass: removes dead for statements |
-| `refactor_legacy_for_statements` | Loop converting old for → block form |
+| `refactor_legacy_for_statement_to_block` | Loop converting old for → block form |
 | `refactor_old_for_statements` | Single transformation of one for statement |
 
 ---

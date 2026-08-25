@@ -4,3 +4,12 @@ main
  set x = 1
  w x
  quit
+
+dottedComment
+  do
+  . /*w hi*/
+  . set x = 1
+  . if x {
+  .    w "bye" if z d
+  .    w "in z"
+  . }
