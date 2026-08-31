@@ -20,7 +20,9 @@
 [
   (keyword_super)
   (keyword_pound_pound_class)
-] @keyword
+  (keyword_quote_directive)
+  (keyword_pound_expression)
+] @property
 
 (system_defined_function) @constant.builtin
 
@@ -78,6 +80,7 @@
   (ssvn)
   (system_defined_variable)
   "$$"
+  (keyword_this)
 ] @variable.special
 
 [
@@ -86,7 +89,15 @@
 ] @variant
 
 (method_arg) @variable.parameter
-
+[(line_comment_1)
+(line_comment_2)
+(line_comment_3)
+(line_comment_4)
+(block_comment)
+(inline_comment)
+(argumentless_inline_comment)
+] @comment
+(documatic_line) @comment.doc
 ; I didn't include ( or ) in this, because they are often grouped
 ; as part of a sequence that gets turned into a single token, so they
 ; don't get matched, and one ends up getting colored differently than the other.
@@ -139,16 +150,15 @@
   "?"
 ] @operator
 
-; === END EXPR ===
-; === BEGIN CORE ===
 (macro_arg) @variant
 
 (macro_value) @constant.builtin
 
-(macro_def) @preproc
+(macro_def) @property
 
 [
   (keyword_pound_define)
+  (keyword_sqlcompile)
   (keyword_pound_def1arg)
   (keyword_pound_if)
   (keyword_pound_elseif)
@@ -162,7 +172,8 @@
   (keyword_pound_delay)
   (locktype)
   (tag_end_if)
-] @preproc
+  (pound_execute)
+] @property
 
 [
   (keyword_as)
@@ -193,6 +204,7 @@
   (keyword_ztrap)
   (keyword_zz)
   (keyword_print)
+  (keyword_select)
   (keyword_zprint)
   (keyword_set)
   (keyword_write)
@@ -234,6 +246,7 @@
   (keyword_throw)
   (keyword_try)
   (keyword_catch)
+  (keyword_zedit)
 ] @keyword
 
 [
@@ -251,6 +264,11 @@
   (html_marker)
   (html_marker_reversed)
 ] @punctuation.special
+
+[
+  (pound_if_special_case_else)
+  (pound_if_special_case)
+] @comment
 
 (tag) @function
 
@@ -284,8 +302,7 @@
   "." @constant.builtin)
 
 ; === END CORE ===
-; === BEGIN LOCAL ===
-(iris_username) @preproc
+(iris_username) @property
 
 [
   (keyword_import)
@@ -293,6 +310,7 @@
   (keyword_includegenerator)
   (keyword_method)
   (keyword_classmethod)
+  (keyword_clientmethod)
   (keyword_extends)
   (keyword_property)
   (keyword_relationship)
@@ -329,7 +347,6 @@
   (property_keyword)
 ] @type.builtin
 
-
 [
   (query_name)
   (trigger_name)
@@ -341,19 +358,14 @@
   (xdata_name)
   (storage_name)
   (xml_identifier)
-  (index_property)
   (column_name)
 ] @variant
 
 [
-  (return_type)
   (keyword_list)
-  (parameter_type)
-  (index_type)
-  (index_property_type)
   (typename)
 ] @type.builtin
-; === END UDL ===
+
 ; routine
 (routine_type) @type.builtin
 

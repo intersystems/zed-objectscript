@@ -20,7 +20,9 @@
 [
   (keyword_super)
   (keyword_pound_pound_class)
-] @keyword
+  (keyword_quote_directive)
+  (keyword_pound_expression)
+] @property
 
 (system_defined_function) @constant.builtin
 
@@ -78,6 +80,7 @@
   (ssvn)
   (system_defined_variable)
   "$$"
+  (keyword_this)
 ] @variable.special
 
 [
@@ -153,10 +156,11 @@
 
 (macro_value) @constant.builtin
 
-(macro_def) @preproc
+(macro_def) @property
 
 [
   (keyword_pound_define)
+  (keyword_sqlcompile)
   (keyword_pound_def1arg)
   (keyword_pound_if)
   (keyword_pound_elseif)
@@ -170,7 +174,8 @@
   (keyword_pound_delay)
   (locktype)
   (tag_end_if)
-] @preproc
+  (pound_execute)
+] @property
 
 [
   (keyword_as)
@@ -201,6 +206,7 @@
   (keyword_ztrap)
   (keyword_zz)
   (keyword_print)
+  (keyword_select)
   (keyword_zprint)
   (keyword_set)
   (keyword_write)
@@ -242,6 +248,7 @@
   (keyword_throw)
   (keyword_try)
   (keyword_catch)
+  (keyword_zedit)
 ] @keyword
 
 [
@@ -298,7 +305,7 @@
 
 ; === END CORE ===
 ; === BEGIN LOCAL ===
-(iris_username) @preproc
+(iris_username) @property
 
 (keyword_class) @attribute
 
@@ -308,6 +315,7 @@
   (keyword_includegenerator)
   (keyword_method)
   (keyword_classmethod)
+  (keyword_clientmethod)
   (keyword_extends)
   (keyword_property)
   (keyword_relationship)
@@ -355,16 +363,11 @@
   (xdata_name)
   (storage_name)
   (xml_identifier)
-  (index_property)
   (column_name)
 ] @variant
 
 [
-  (return_type)
   (keyword_list)
-  (parameter_type)
-  (index_type)
-  (index_property_type)
   (typename)
 ] @type.builtin
 

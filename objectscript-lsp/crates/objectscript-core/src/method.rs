@@ -632,12 +632,14 @@ impl Method {
                                             method_name_node.byte_range(),
                                         )
                                     {
-                                        unresolved_method_refs.insert(UnresolvedMethodRef {
-                                            class: class_name.to_string(),
-                                            method: method_name,
-                                            offset: None,
-                                            method_call_range: matched_node.range(),
-                                        });
+                                        if method_name_node.kind() == "string_literal" {
+                                            unresolved_method_refs.insert(UnresolvedMethodRef {
+                                                class: class_name.to_string(),
+                                                method: method_name,
+                                                offset: None,
+                                                method_call_range: matched_node.range(),
+                                            });
+                                        }
                                     }
                                 } else {
                                     if let Some(classname_method_arg) = matched_node.named_child(0)
@@ -660,12 +662,14 @@ impl Method {
                                             method_name_node.byte_range(),
                                         )
                                     {
-                                        unresolved_method_refs.insert(UnresolvedMethodRef {
-                                            class: classname_var,
-                                            method: method_name,
-                                            offset: None,
-                                            method_call_range: matched_node.range(),
-                                        });
+                                        if method_name_node.kind() == "string_literal" {
+                                            unresolved_method_refs.insert(UnresolvedMethodRef {
+                                                class: classname_var,
+                                                method: method_name,
+                                                offset: None,
+                                                method_call_range: matched_node.range(),
+                                            });
+                                        }
                                     }
                                 }
                             } else if func_name.eq_ignore_ascii_case("$system") {
