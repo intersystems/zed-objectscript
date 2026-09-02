@@ -76,9 +76,9 @@ In this case, the `DependencyGraph` is used to determine all possible paths to t
 ## Grammar Baseline
 
 - `tree-sitter = 0.26.6`
-- `tree-sitter-objectscript = 1.9.18`
-- `tree-sitter-objectscript-routine = 1.9.18`
-- `tree-sitter-objectscript-playground = 1.9.18`
+- `tree-sitter-objectscript = 1.9.20`
+- `tree-sitter-objectscript-routine = 1.9.20`
+- `tree-sitter-objectscript-playground = 1.9.20`
 - `tree-sitter-xml = 0.7.0`
 
 ## Roadmap

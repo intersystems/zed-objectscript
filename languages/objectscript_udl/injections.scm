@@ -141,11 +141,12 @@
   (#any-of? @_mt "text/css" "\"text/css\"")
   (#set! injection.language "css"))
 
-; -----------------------------------------
-; XDATA default (no MimeType): XML fallback
-; -----------------------------------------
-(xdata
-  (external_method_body_content) @injection.content
+; --------------------------------------------
+; XDATA default (no MimeType header): XML fallback
+; --------------------------------------------
+((xdata
+  (external_method_body_content) @injection.content) @_xdata
+  (#not-match? @_xdata "^[^{}]*[Mm][Ii][Mm][Ee][Tt][Yy][Pp][Ee][ \t\r\n]*=")
   (#set! injection.include-children "true")
   (#set! injection.language "xml"))
 
