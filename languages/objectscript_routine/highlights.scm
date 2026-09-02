@@ -22,7 +22,9 @@
 [
   (keyword_super)
   (keyword_pound_pound_class)
-] @keyword
+  (keyword_quote_directive)
+  (keyword_pound_expression)
+] @property
 
 (system_defined_function) @constant.builtin
 
@@ -55,7 +57,7 @@
 [
   (routine_name)
   (class_name)
-] @type
+] @enum
 
 [
   (macro_function)
@@ -77,6 +79,7 @@
 [
   (ssvn)
   (system_defined_variable)
+  (keyword_this)
   "$$"
 ] @variable.special
 
@@ -86,6 +89,15 @@
 ] @variant
 
 (method_arg) @variable.parameter
+[(line_comment_1)
+(line_comment_2)
+(line_comment_3)
+(line_comment_4)
+(block_comment)
+(inline_comment)
+(argumentless_inline_comment)
+] @comment
+(documatic_line) @comment.doc
 
 ; I didn't include ( or ) in this, because they are often grouped
 ; as part of a sequence that gets turned into a single token, so they
@@ -145,7 +157,7 @@
 
 (macro_value) @constant.builtin
 
-(macro_def) @preproc
+(macro_def) @property
 
 [
   (keyword_pound_define)
@@ -157,12 +169,14 @@
   (keyword_pound_ifdef)
   (keyword_pound_ifndef)
   (keyword_dim)
+  (keyword_sqlcompile)
   (keyword_pound_import)
   (keyword_pound_include)
   (keyword_pound_delay)
   (locktype)
+  (pound_execute)
   (tag_end_if)
-] @preproc
+] @property
 
 [
   (keyword_as)
@@ -195,6 +209,7 @@
   (keyword_print)
   (keyword_zprint)
   (keyword_set)
+  (keyword_select)
   (keyword_write)
   (keyword_zwrite)
   (keyword_do)
@@ -220,6 +235,7 @@
   (keyword_zremove)
   (command_keyword)
   (keyword_zload)
+  (keyword_zsave)
   (keyword_for)
   (keyword_while)
   (keyword_continue)
@@ -234,7 +250,8 @@
   (keyword_throw)
   (keyword_try)
   (keyword_catch)
-] @type.builtin
+  (keyword_zedit)
+] @keyword
 
 [
   (keyword_embedded_html)
@@ -258,6 +275,7 @@
 ] @comment
 
 (tag) @function
+(typename) @type.builtin
 
 "--" @operator
 

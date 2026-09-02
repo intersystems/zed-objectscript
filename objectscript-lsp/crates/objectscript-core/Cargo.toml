@@ -18,9 +18,9 @@ required-features = ["update-bench"]
 tower-lsp = "0.20.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "fs"] }
 tree-sitter = "0.26.6"
-tree-sitter-objectscript = "1.9.16"
-tree-sitter-objectscript-routine = "1.9.16"
-tree-sitter-objectscript-playground = "1.9.16"
+tree-sitter-objectscript = "1.9.20"
+tree-sitter-objectscript-routine = "1.9.20"
+tree-sitter-objectscript-playground = "1.9.20"
 tree-sitter-xml = "0.7.0"
 serde = "1.0.228"
 serde_json = "1.0.145"
