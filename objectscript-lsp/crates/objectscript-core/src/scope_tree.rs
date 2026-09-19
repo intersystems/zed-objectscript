@@ -1,5 +1,5 @@
 use crate::common::{generic_exit_statements, point_in_range};
-use crate::parse_structures::{ClassId, MethodRef, PropertyRef, VariableRef};
+use crate::parse_structures::{MethodRef, PropertyRef, VariableRef};
 use crate::scope_structures::*;
 use std::collections::{HashMap, HashSet};
 use tower_lsp::lsp_types::Url;
@@ -151,8 +151,6 @@ pub struct ScopeTree {
     pub private_method_defs: HashMap<MethodRef, MethodSymbol>,
     /// Stores PropertyRef -> Property Symbol for all private properties in the document.
     pub private_property_defs: HashMap<PropertyRef, PropertySymbol>,
-    /// The Id corresponding to the class definition symbol for this document when this is a class file.
-    pub class_def: Option<ClassId>,
 }
 
 impl Clone for ScopeTree {
@@ -164,14 +162,13 @@ impl Clone for ScopeTree {
             next_scope_id: self.next_scope_id,
             private_method_defs: self.private_method_defs.clone(),
             private_property_defs: self.private_property_defs.clone(),
-            class_def: self.class_def,
         }
     }
 }
 
 impl ScopeTree {
     /// Creates a new scope tree with a root scope spanning the entire document.
-    pub fn new(class_def: Option<ClassId>) -> Self {
+    pub fn new() -> Self {
         let root_id = ScopeId(0);
         let root_scope = Scope::new(
             Point { row: 0, column: 0 },
@@ -191,7 +188,6 @@ impl ScopeTree {
             next_scope_id: 1,
             private_method_defs: HashMap::new(),
             private_property_defs: HashMap::new(),
-            class_def,
         }
     }
 
@@ -361,19 +357,19 @@ impl ScopeTree {
         true
     }
 
-    /// Inserts a private variable symbol into the scope containing its start point.
-    pub fn new_variable_symbol(
+    /// Inserts a private variable symbol into an already-resolved scope.
+    pub fn new_variable_symbol_at_scope(
         &mut self,
+        scope_id: ScopeId,
         name: String,
         range: Range,
         var_deps: Vec<String>,
         variable_reference: VariableRef,
     ) {
-        let Some(scope) = self.get_mut_scope(range.start_point) else {
-            eprintln!("Error: couldn't get scope for variable {:?}", name);
+        let Some(scope) = self.scopes.get_mut(&scope_id) else {
             return;
         };
-        scope.new_variable_symbol(name, range, var_deps, variable_reference)
+        scope.new_variable_symbol(name, range, var_deps, variable_reference);
     }
 
     /// Register a private method definition symbol in this document.
@@ -416,26 +412,6 @@ impl ScopeTree {
         self.private_property_defs
             .insert(property_ref, property_symbol);
     }
-    /// Get a mutable reference to the innermost scope containing `point`.
-    ///
-    /// Logs a warning and returns `None` if no containing scope is found.
-    fn get_mut_scope(&mut self, point: Point) -> Option<&mut Scope> {
-        let Some(scope_id) = self.find_current_scope(point) else {
-            eprintln!("Warning: Scope Id not found for Point {:?}", point);
-            return None;
-        };
-
-        let scopes = self.scopes.clone();
-        let Some(scope) = self.scopes.get_mut(&scope_id) else {
-            eprintln!(
-                "Warning: Scope not found, Scope Id {:?} DNE in scopes hashmap: \n {:?} \n\n",
-                scope_id, scopes
-            );
-            return None;
-        };
-        Some(scope)
-    }
-
     /// Get an immutable reference to the innermost scope containing `point`.
     ///
     /// Logs a warning and returns `None` if no containing scope is found.
@@ -482,18 +458,17 @@ impl ScopeTree {
         children
     }
 
-    /// Record a public variable symbol in the scope that contains `range.start_point`.
-    pub fn new_public_var_symbol(
+    /// Records a public variable symbol in an already-resolved scope.
+    pub fn new_public_var_symbol_at_scope(
         &mut self,
+        scope_id: ScopeId,
         name: String,
-        range: Range,
         variable_reference: VariableRef,
     ) {
-        let Some(scope) = self.get_mut_scope(range.start_point) else {
-            generic_exit_statements("Scope", "new_public_var_symbol");
+        let Some(scope) = self.scopes.get_mut(&scope_id) else {
             return;
         };
-        scope.new_symbol_pub_variable(name.clone(), variable_reference);
+        scope.new_symbol_pub_variable(name, variable_reference);
     }
 
     /// Returns the method name associated with the scope containing the given position.

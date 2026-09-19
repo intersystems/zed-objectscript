@@ -2,8 +2,8 @@ use crate::common::generic_exit_statements;
 use crate::dependency_tracker::Dependents;
 use crate::local_semantic::LocalSemanticModel;
 use crate::parse_structures::{
-    Class, ClassId, DfsState, Language, Method, MethodRef, Parameter, ParameterRef, Property,
-    PropertyRef, PublicVarId, Variable, VariableRef,
+    Class, ClassId, DfsState, Method, MethodRef, Parameter, ParameterRef, Property, PropertyRef,
+    PublicVarId, Variable, VariableDefType, VariableRef,
 };
 use crate::scope_structures::{
     ClassGlobalSymbol, MethodSymbol, ParameterSymbol, PropertySymbol, ScopeId,
@@ -124,19 +124,18 @@ impl GlobalSemanticModel {
         private_variable_symbols: &Vec<VariableSymbol>, // the private variable symbols in a scope
     ) -> Option<(Range, String)> {
         let mut variable_definition: Option<Range> = None;
-        let mut oref_class = None;
-        let mut potential_variable_indices = HashSet::new();
+        let mut oref_class: Option<String> = None;
         if let Some(variables) = self
             .variables
             .get(&method_ref)
             .and_then(|scopes| scopes.get(&scope_id))
         {
+            let mut potential_variable_indices = HashSet::new();
             for (i, variable) in variables.iter().enumerate() {
-                if variable.is_oref
-                    && &variable.name == variable_name
-                    && let Some(oref_cls) = &variable.cls
+                if &variable.name == variable_name
+                    && let VariableDefType::OrefDef(oref_cls) = &variable.variable_type
                 {
-                    potential_variable_indices.insert((i, oref_cls));
+                    potential_variable_indices.insert((i, oref_cls.clone()));
                 }
             }
             for (i, oref_cls) in &potential_variable_indices {
@@ -150,11 +149,11 @@ impl GlobalSemanticModel {
                         if let Some(curr_var_def) = variable_definition {
                             if variable_def.location.start_byte > curr_var_def.start_byte {
                                 variable_definition = Some(variable_def.location);
-                                oref_class = Some(*oref_cls);
+                                oref_class = Some(oref_cls.clone());
                             }
                         } else {
                             variable_definition = Some(variable_def.location);
-                            oref_class = Some(*oref_cls);
+                            oref_class = Some(oref_cls.clone());
                         }
                     }
                 }
@@ -167,12 +166,12 @@ impl GlobalSemanticModel {
                     .get(&method_ref)
                     .and_then(|scopes| scopes.get(&scope_id))
             {
+                let mut potential_variable_indices = HashSet::new();
                 for (i, variable) in variables.iter().enumerate() {
-                    if variable.is_oref
-                        && &variable.name == variable_name
-                        && let Some(oref_cls) = &variable.cls
+                    if &variable.name == variable_name
+                        && let VariableDefType::OrefDef(oref_cls) = &variable.variable_type
                     {
-                        potential_variable_indices.insert((i, oref_cls));
+                        potential_variable_indices.insert((i, oref_cls.clone()));
                     }
                 }
                 for (i, oref_cls) in potential_variable_indices {
@@ -689,113 +688,6 @@ impl GlobalSemanticModel {
                 location: range,
                 var_dependencies,
             });
-    }
-
-    /// Computes effective class keyword values (procedure block + default language) from inheritance.
-    ///
-    /// Fills only missing (`None`) values using the primary parent (leftmost) transitively, with
-    /// cycle protection via DFS state/memoization.
-    pub fn class_keyword_inheritance(&mut self, name_to_id: &HashMap<String, ClassId>) {
-        #[derive(Clone)]
-        struct Snap {
-            declared_pb: Option<bool>,
-            declared_lang: Option<Language>,
-            declared_is_final: Option<bool>,
-            primary_parent: Option<ClassId>,
-        }
-
-        let class_ids: Vec<ClassId> = self.classes.keys().copied().collect();
-
-        let id_to_idx: HashMap<ClassId, usize> = class_ids
-            .iter()
-            .enumerate()
-            .map(|(i, &id)| (id, i))
-            .collect();
-
-        let snaps: Vec<Snap> = class_ids
-            .iter()
-            .map(|id| {
-                let c = &self.classes[id];
-                Snap {
-                    declared_pb: c.is_procedure_block,
-                    declared_lang: c.default_language.clone(),
-                    declared_is_final: c.is_final.clone(),
-                    primary_parent: c
-                        .inherited_classes
-                        .get(0)
-                        .and_then(|(name, _)| name_to_id.get(name))
-                        .copied(),
-                }
-            })
-            .collect();
-
-        let n = snaps.len();
-        let mut memo: Vec<Option<(Option<bool>, Option<Language>, Option<bool>)>> = vec![None; n];
-        let mut state: Vec<DfsState> = vec![DfsState::Unvisited; n];
-
-        fn dfs(
-            idx: usize,
-            snaps: &Vec<Snap>,
-            id_to_idx: &HashMap<ClassId, usize>,
-            memo: &mut Vec<Option<(Option<bool>, Option<Language>, Option<bool>)>>,
-            state: &mut Vec<DfsState>,
-        ) -> (Option<bool>, Option<Language>, Option<bool>) {
-            if let Some(v) = memo[idx].clone() {
-                return v;
-            }
-
-            if state[idx] == DfsState::Visiting {
-                let s = &snaps[idx];
-                return (s.declared_pb, s.declared_lang.clone(), s.declared_is_final);
-            }
-
-            state[idx] = DfsState::Visiting;
-
-            let s = &snaps[idx];
-
-            // start with declared values
-            let mut pb = s.declared_pb;
-            let mut lang = s.declared_lang.clone();
-            let mut is_final = s.declared_is_final;
-
-            // fill missing from primary parent transitively
-            if pb.is_none() || lang.is_none() {
-                if let Some(parent_id) = s.primary_parent {
-                    if let Some(&parent_idx) = id_to_idx.get(&parent_id) {
-                        let (ppb, plang, pfinal) = dfs(parent_idx, snaps, id_to_idx, memo, state);
-                        if pb.is_none() {
-                            pb = ppb;
-                        }
-                        if lang.is_none() {
-                            lang = plang;
-                        }
-                        if is_final.is_none() {
-                            is_final = pfinal;
-                        }
-                    }
-                }
-            }
-
-            state[idx] = DfsState::Done;
-            memo[idx] = Some((pb, lang.clone(), is_final));
-            (pb, lang, is_final)
-        }
-
-        // ---- Phase B: apply (only fill None) ----
-        for i in 0..n {
-            let (eff_pb, eff_lang, _eff_final) = dfs(i, &snaps, &id_to_idx, &mut memo, &mut state);
-            let class_id = class_ids[i];
-            let Some(cls) = self.classes.get_mut(&class_id) else {
-                continue;
-            };
-
-            if cls.is_procedure_block.is_none() {
-                cls.is_procedure_block = eff_pb;
-            }
-            if cls.default_language.is_none() {
-                cls.default_language = eff_lang;
-            }
-        }
     }
 
     /// Build a reverse inheritance index for each class.

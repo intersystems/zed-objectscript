@@ -100,6 +100,28 @@ mod tests {
         (backend, uri)
     }
 
+    #[tokio::test]
+    async fn test_append_customer_root_preserves_sys_class_boundary() {
+        let test_root = env::current_dir().unwrap().join("objectscript-tests");
+        let sys_root = test_root.join("diagnostics");
+        let customer_root = test_root.join("gotodef").join("relative-method-call");
+        let (backend, project_uri) = setup_backend_and_workspace(sys_root).await;
+        let project = backend
+            .get_project(&project_uri)
+            .expect("missing project state");
+
+        project.data.write().mark_current_classes_as_sys();
+        backend
+            .index_workspace_root(&project_uri, customer_root)
+            .await;
+
+        let data = project.data.read();
+        assert!(data.sys_classes.contains("clean"));
+        assert!(!data.sys_classes.contains("hk"));
+        assert!(data.classes.contains_key("hk"));
+        assert!(data.classes.contains_key("hksubclass"));
+    }
+
     fn point_for_substring_n(content: &str, needle: &str, occurrence: usize) -> Point {
         assert!(occurrence > 0, "occurrence must be >= 1");
         let mut start = 0usize;
@@ -318,8 +340,8 @@ mod tests {
             }
         }
         assert_eq!(superclass_count, 2);
-        assert_eq!(subclassone_count, 1);
-        assert_eq!(subclasstwo_count, 1);
+        assert_eq!(subclassone_count, 0);
+        assert_eq!(subclasstwo_count, 0);
         let before_y = before_public_variables
             .get("y")
             .expect("missing public variable y");
@@ -395,8 +417,8 @@ mod tests {
             }
         }
         assert_eq!(superclass_count, 2);
-        assert_eq!(subclassone_count, 1);
-        assert_eq!(subclasstwo_count, 1);
+        assert_eq!(subclassone_count, 0);
+        assert_eq!(subclasstwo_count, 0);
         let after_y = after_public_variables
             .get("y")
             .expect("missing public variable y after update");
@@ -434,7 +456,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_class_keyword_inheritance() {
+    async fn test_class_keywords() {
         // KEYWORDS: language = objectscript, inheritance = right, Not ProcedureBlock
         let project_root = env::current_dir()
             .unwrap()
@@ -567,11 +589,13 @@ mod tests {
         assert!(dependent_names.contains("SubClassOne"));
         assert!(dependent_names.contains("SubClassTwo"));
 
-        // In multiplePubVarDefs, x is not in current scope, so workspace-wide public definitions are returned.
+        // In multiplePubVarDefs, x is not in current scope, so public definitions
+        // on reachable methods are returned. ProcedureBlock is not inherited, so
+        // the subclass definitions remain private.
         let x_use_point = point_for_substring_n(content, "w x", 2);
         let x_locations =
             project_data.get_variable_definition(&document_url, x_use_point, "x".to_string());
-        assert_eq!(x_locations.len(), 2);
+        assert_eq!(x_locations.len(), 1);
         let paths: HashSet<String> = x_locations
             .into_iter()
             .map(|(url, _)| url.path().to_string())
@@ -581,7 +605,7 @@ mod tests {
                 .iter()
                 .any(|p| p.ends_with("testing-variable-building.cls"))
         );
-        assert!(paths.iter().any(|p| p.ends_with("subclass.cls")));
+        assert!(!paths.iter().any(|p| p.ends_with("subclass.cls")));
     }
 
     #[tokio::test]
@@ -590,8 +614,16 @@ mod tests {
             .unwrap()
             .join("objectscript-tests")
             .join("nested_dots");
-        let actual_result_path = test_route.join("test-nested-refactor-actual.mac");
-        let expected_result_path = test_route.join("test-nested-refactor-expected.mac");
+        let actual = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("refactor-actual");
+        let expected = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("refactor-expected");
+        let actual_result_path = actual.join("test-nested-refactor-actual.mac");
+        let expected_result_path = expected.join("test-nested-refactor-expected.mac");
         let test_mac_path = test_route.join("test-nested-refactor.mac");
         let test_mac_url = Url::from_file_path(&test_mac_path).unwrap();
         let (backend, uri) = setup_backend_and_workspace(test_route).await;
@@ -613,8 +645,16 @@ mod tests {
             .unwrap()
             .join("objectscript-tests")
             .join("dotted-block");
-        let actual_result_path = test_route.join("test-dotted-block-actual.mac");
-        let expected_result_path = test_route.join("test-dotted-block-expected.mac");
+        let actual = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("refactor-actual");
+        let expected = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("refactor-expected");
+        let actual_result_path = actual.join("test-dotted-block-actual.mac");
+        let expected_result_path = expected.join("test-dotted-block-expected.mac");
         let _ = std::fs::remove_file(&actual_result_path);
         let test_mac_path = test_route.join("test-dotted-block.mac");
         let test_mac_url = Url::from_file_path(&test_mac_path).unwrap();
@@ -637,8 +677,16 @@ mod tests {
             .unwrap()
             .join("objectscript-tests")
             .join("local");
-        let actual_result_path = routines_root.join("test-large-dotted-statements-actual.mac");
-        let expected_result_path = routines_root.join("test-large-dotted-statements-expected.mac");
+        let actual = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("refactor-actual");
+        let expected = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("refactor-expected");
+        let actual_result_path = actual.join("test-large-dotted-statements-actual.mac");
+        let expected_result_path = expected.join("test-large-dotted-statements-expected.mac");
         let _ = std::fs::remove_file(&actual_result_path);
         let test_mac_path = routines_root.join("test-large-dotted-statements.mac");
         let test_mac_url = Url::from_file_path(&test_mac_path).unwrap();
@@ -661,7 +709,16 @@ mod tests {
             .unwrap()
             .join("objectscript-tests")
             .join("routines");
-        let actual_result_path = routines_root.join("test-refactor-do-actual.mac");
+        let actual = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("refactor-actual");
+        let expected = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("refactor-expected");
+        let actual_result_path = actual.join("test-refactor-do-actual.mac");
+        let expected_result_path = expected.join("test-refactor-do-expected.mac");
         let _ = std::fs::remove_file(&actual_result_path);
 
         let test_mac_path = routines_root.join("test-refactor-do.mac");
@@ -676,9 +733,7 @@ mod tests {
             .expect("missing planned refactor for test-refactor-do.mac");
         let tree = parse_routine(refactored.as_str());
         std::fs::write(&actual_result_path, &refactored).unwrap();
-        let contents =
-            std::fs::read_to_string("objectscript-tests/routines/test-refactor-do-expected.mac")
-                .unwrap();
+        let contents = std::fs::read_to_string(expected_result_path).unwrap();
         let expected_tree = parse_routine(contents.as_str());
         assert_eq!(
             tree.root_node().to_sexp(),
@@ -2046,7 +2101,11 @@ dottedComment
 
     #[tokio::test]
     async fn test_routine_variable_definition_keeps_distinct_call_paths() {
-        let project_root = env::current_dir().unwrap().join("routines");
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("gotodef")
+            .join("routines");
         let (backend, uri) = setup_backend_and_workspace(project_root.clone()).await;
         let project_state = backend.get_project(&uri).expect("missing project state");
         let project_data = project_state.data.read();
@@ -2087,9 +2146,10 @@ dottedComment
             "x in tagcalls.helper should resolve to the nearest definition on each call path"
         );
         assert!(resolved_lines.contains(&("tag-calls.mac".to_string(), "set x = 1".to_string())));
-        assert!(
-            resolved_lines.contains(&("offset-goto.mac".to_string(), "set x = 72".to_string()))
-        );
+        assert!(resolved_lines.contains(&(
+            "cross-routine-ref.mac".to_string(),
+            "set x  = 1".to_string()
+        )));
     }
 
     // =========================================================================

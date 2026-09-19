@@ -3,7 +3,10 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::hash::Hasher;
 use tower_lsp::lsp_types::Range as LspRange;
-use tree_sitter::Range;
+use tree_sitter::{Parser, Range};
+use tree_sitter_objectscript::LANGUAGE_OBJECTSCRIPT_UDL;
+use tree_sitter_objectscript_routine::LANGUAGE_OBJECTSCRIPT_ROUTINE;
+use tree_sitter_xml::LANGUAGE_XML;
 /// Stores the Index into `GlobalSemanticModel::classes`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ClassId(pub usize);
@@ -60,6 +63,31 @@ pub enum MemberType {
     Keyword,
     Procedure,
     DottedStatementTag,
+}
+
+pub struct IndexParsers {
+    pub cls: Parser,
+    pub routine: Parser,
+    pub xml: Parser,
+}
+
+impl IndexParsers {
+    pub fn new() -> Self {
+        let mut cls = Parser::new();
+        cls.set_language(&LANGUAGE_OBJECTSCRIPT_UDL.into())
+            .expect("failed to load ObjectScript UDL grammar");
+
+        let mut routine = Parser::new();
+        routine
+            .set_language(&LANGUAGE_OBJECTSCRIPT_ROUTINE.into())
+            .expect("failed to load ObjectScript routine grammar");
+
+        let mut xml = Parser::new();
+        xml.set_language(&LANGUAGE_XML.into())
+            .expect("failed to load XML grammar");
+
+        Self { cls, routine, xml }
+    }
 }
 
 /// DFS visitation state.
@@ -271,10 +299,23 @@ pub struct Variable {
     pub arg_type: Option<TypeName>,
     /// Whether variable is public or not.
     pub is_public: bool,
-    /// True if variable is an instance of a class, false otherwise.
-    pub is_oref: bool,
-    /// None if not an oref. If an oref, String representing class it points to.
-    pub cls: Option<String>,
+    /// The Type of Variable Definition.
+    pub variable_type: VariableDefType,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OrefChainExpr {
+    pub class_ref: String,
+    pub property_ref: Option<String>,
+    pub parameter_ref: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VariableDefType {
+    OrefDef(String),
+    OrefChainExpr(OrefChainExpr),
+    VariableDef,
+    PropertyDef((String, String)),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

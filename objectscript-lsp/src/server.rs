@@ -1,18 +1,17 @@
-use objectscript_core::common::{get_member_name_and_range_from_root, ts_range_to_lsp_range};
-use objectscript_core::parse_structures::FileType;
-use objectscript_core::workspace::ProjectState;
+use crate::common::{IndexingIssue, PreparedFile, get_paths, prepare_document};
+use objectscript_core::common::ts_range_to_lsp_range;
+use objectscript_core::parse_structures::{FileType, IndexParsers};
+use objectscript_core::workspace::{BulkIndexDocument, ProjectState};
 use parking_lot::RwLock;
+use rayon::iter::Either;
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tower_lsp::Client;
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, MessageType, Url};
-use tree_sitter::Parser;
-use tree_sitter_objectscript::LANGUAGE_OBJECTSCRIPT_UDL;
-use tree_sitter_objectscript_routine::LANGUAGE_OBJECTSCRIPT_ROUTINE;
-use tree_sitter_xml::LANGUAGE_XML;
-use walkdir::WalkDir;
+use tree_sitter::Range;
 
 /// Arc-wrapped backend providing the LSP language server implementation.
 pub struct BackendWrapper(pub(crate) Arc<Backend>);
@@ -22,6 +21,7 @@ impl BackendWrapper {
         Self(Arc::new(Backend::new(client)))
     }
 }
+
 pub(crate) struct Backend {
     /// LSP Client.
     pub(crate) client: Client,
@@ -121,11 +121,14 @@ impl Backend {
     /// parsed with the appropriate Tree-sitter grammar, and inserted into the project's document
     /// store if absent. After the scan, inheritance and variable information is built once.
     pub(crate) async fn index_workspace(&self, uri: &Url) {
-        let Some(project) = self.get_project_from_document_url(&uri) else {
+        let Some(project_uri) = self.find_parent_workspace(uri.clone()) else {
             eprintln!(
                 "Failed to get project from document with url: {:?}",
                 uri.path()
             );
+            return;
+        };
+        let Some(project) = self.get_project(&project_uri) else {
             return;
         };
         let Some(root) = project.root_path() else {
@@ -135,128 +138,56 @@ impl Backend {
             return;
         };
         let root = root.to_path_buf();
+        self.index_workspace_root(&project_uri, root).await;
+    }
+
+    /// Append all supported files under `root` to an existing project's index.
+    pub(crate) async fn index_workspace_root(&self, project_uri: &Url, root: PathBuf) {
+        let Some(project) = self.get_project(project_uri) else {
+            return;
+        };
+        self.index_root_into_project(project, root).await;
+    }
+
+    async fn index_root_into_project(&self, project: Arc<ProjectState>, root: PathBuf) {
+        let paths = get_paths(&root);
         // Run indexing on Tokio's blocking thread pool
         let handle = tokio::task::spawn_blocking(move || {
-            let mut cls_parser = Parser::new();
-            if cls_parser
-                .set_language(&LANGUAGE_OBJECTSCRIPT_UDL.into())
-                .is_err()
+            let index_started = std::time::Instant::now();
+            eprintln!("[index] scanning {}", root.display());
+            let (prepared, issues): (Vec<(BulkIndexDocument, Range)>, Vec<IndexingIssue>) = paths
+                .into_par_iter()
+                .map_init(IndexParsers::new, |parsers, (path, file_type)| {
+                    prepare_document(path, file_type, parsers)
+                })
+                .partition_map(|outcome| match outcome {
+                    PreparedFile::Ready(document, class_name_range) => {
+                        Either::Left((document, class_name_range))
+                    }
+                    PreparedFile::Failed(issue) => Either::Right(issue),
+                });
+            for issue in issues {
+                eprintln!("[index] skipped file: {issue}");
+            }
+            let lock_started = std::time::Instant::now();
+            eprintln!("[index] waiting for project write lock");
+            let mut data = project.data.write();
+            eprintln!(
+                "[index] acquired project write lock in {:.3?}",
+                lock_started.elapsed()
+            );
+            let mut duplicate_class_diagnostics = Vec::new();
             {
-                eprintln!("Error: Failed to load ObjectScript UDL grammar");
-                return;
-            }
-
-            let mut routine_parser = Parser::new();
-            if routine_parser
-                .set_language(&LANGUAGE_OBJECTSCRIPT_ROUTINE.into())
-                .is_err()
-            {
-                eprintln!("Error: Failed to load ObjectScript routine grammar");
-                return;
-            }
-
-            let mut xml_parser = Parser::new();
-            if xml_parser.set_language(&LANGUAGE_XML.into()).is_err() {
-                eprintln!("Error: Failed to load XML grammar");
-                return;
-            }
-
-            let mut documents_already_existing = Vec::new();
-            for entry in WalkDir::new(&root).into_iter().filter_map(|e| e.ok()) {
-                let path = entry.path();
-
-                let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
-                    continue;
-                };
-
-                let (filetype, is_rtn) = match ext {
-                    "cls" => (FileType::Cls, false),
-                    "inc" => (FileType::Routine, true),
-                    "rtn" => (FileType::Routine, true),
-                    "mac" => (FileType::Routine, true),
-                    "int" => (FileType::Routine, true),
-                    "xml" => (FileType::Xml, false),
-                    _ => continue,
-                };
-
-                let content = match std::fs::read_to_string(path) {
-                    Ok(s) => s,
-                    Err(_) => {
-                        eprintln!("Error: Failed to read file contents: {}", path.display());
-                        continue;
-                    }
-                };
-
-                let url = match Url::from_file_path(path) {
-                    Ok(u) => u,
-                    Err(_) => {
-                        eprintln!("Error: Failed to convert path to Url: {}", path.display());
-                        continue;
-                    }
-                };
-
-                let tree = match filetype {
-                    FileType::Routine => match routine_parser.parse(&content, None) {
-                        Some(t) => t,
-                        None => {
-                            eprintln!("Failed to parse file for: {:?}", path.display());
-                            continue;
-                        }
-                    },
-                    FileType::Cls => match cls_parser.parse(&content, None) {
-                        Some(t) => t,
-                        None => {
-                            eprintln!("Failed to parse file for: {:?}", path.display());
-                            continue;
-                        }
-                    },
-                    FileType::Xml => match xml_parser.parse(&content, None) {
-                        Some(t) => t,
-                        None => {
-                            eprintln!("Failed to parse file for: {:?}", path.display());
-                            continue;
-                        }
-                    },
-                };
-
-                let (class_range, class_name, class_name_def_range) = if filetype == FileType::Xml {
-                    (
-                        tree.root_node().range(),
-                        "XML".to_string(),
-                        tree.root_node().range(),
-                    )
-                } else {
-                    if let Some((class_range, class_name, class_name_def_range)) =
-                        get_member_name_and_range_from_root(&content, tree.root_node(), is_rtn)
-                    {
-                        (class_range, class_name, class_name_def_range)
-                    } else {
-                        eprintln!(
-                            "Error: Failed to get name from root node for file url: {:?}",
-                            url.path()
-                        );
-                        continue;
-                    }
-                };
-
-                // Commit inside the ProjectData lock
-                {
-                    let mut data = project.data.write();
-                    let workspace_contains_class_name = data.classes.contains_key(&class_name);
-                    let already_exists = data.add_document_if_absent(
-                        url.clone(),
-                        content.clone(),
-                        &tree,
-                        filetype,
-                        class_name.clone(),
-                        class_range,
-                        None,
+                let mut bulk = data.begin_bulk_index();
+                for (document, class_name_def_range) in prepared {
+                    let url = document.url.clone();
+                    let class_name = document.document.class_name.clone();
+                    let lsp_range = ts_range_to_lsp_range(
+                        document.document.content.as_str(),
+                        class_name_def_range,
                     );
-                    if already_exists {
-                        documents_already_existing.push(url);
-                    } else if !already_exists && workspace_contains_class_name {
-                        let lsp_range =
-                            ts_range_to_lsp_range(content.as_str(), class_name_def_range);
+                    let registration = bulk.register(document);
+                    if !registration.duplicate_document && registration.duplicate_class {
                         let diagnostic = Diagnostic {
                             range: lsp_range,
                             severity: Some(DiagnosticSeverity::ERROR),
@@ -271,14 +202,22 @@ impl Backend {
                             tags: None,
                             data: None,
                         };
-                        data.other_class_diagnostics
-                            .entry(url.clone())
-                            .or_insert(Vec::new())
-                            .push(diagnostic);
+                        duplicate_class_diagnostics.push((url, diagnostic));
                     }
                 }
+                bulk.finalize();
             }
-            eprintln!("INFO: Finished indexing workspace");
+            for (url, diagnostic) in duplicate_class_diagnostics {
+                data.other_class_diagnostics
+                    .entry(url)
+                    .or_insert_with(Vec::new)
+                    .push(diagnostic);
+            }
+            eprintln!(
+                "[index] finished {} in {:.3?}",
+                root.display(),
+                index_started.elapsed()
+            );
         });
         // Wait for completion (and handle join errors)
         if let Err(join_err) = handle.await {

@@ -1,10 +1,10 @@
 [package]
 name = "objectscript-core"
-version = "0.1.1"
+version = "0.1.8"
 edition = "2024"
 authors = ["Hannah Kimura <hannah.kimura@intersystems.com>"]
 license = "MIT"
-description = "Language Server for ObjectScript"
+description = "Internal Representation of an ObjectScript Workspace"
 
 [features]
 update-bench = []
@@ -18,9 +18,9 @@ required-features = ["update-bench"]
 tower-lsp = "0.20.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "fs"] }
 tree-sitter = "0.26.6"
-tree-sitter-objectscript = "1.9.16"
-tree-sitter-objectscript-routine = "1.9.16"
-tree-sitter-objectscript-playground = "1.9.16"
+tree-sitter-objectscript = "1.9.20"
+tree-sitter-objectscript-routine = "1.9.20"
+tree-sitter-objectscript-playground = "1.9.20"
 tree-sitter-xml = "0.7.0"
 serde = "1.0.228"
 serde_json = "1.0.145"
@@ -29,6 +29,7 @@ walkdir = "2.5.0"
 regex = "1.12.3"
 petgraph = "0.8.3"
 evalexpr = "13.1.0"
+rayon = "1.12.0"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

@@ -10,7 +10,11 @@ Cargo.lock
 .tabnine/
 vscode/
 objectscript-lsp/objectscript-tests/local/
+objectscript-lsp/objectscript-tests/failing/
 objectscript-lsp/documentation/code-changes-AI
 objectscript-lsp/documentation/local
 objectscript-lsp/claude-code-objectscript-lsp/
 objectscript-lsp/.claude-plugin/
+.zed/
+objectscript-lsp/objectscript-tests/refactor-expected/test-large-dotted-statements-expected.mac
+objectscript-lsp/objectscript-tests/refactor-actual/test-large-dotted-statements-actual.mac

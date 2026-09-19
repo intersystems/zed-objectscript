@@ -8,7 +8,7 @@ use objectscript_core::parse_structures::{ClassId, FileType};
 use objectscript_core::workspace::{
     ProjectData, full_update_document_call_count, reset_full_update_document_call_count,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::hint::black_box;
@@ -204,6 +204,8 @@ fn build_project_data(prepared: &PreparedEdit) -> ProjectData {
         inheritance_diagonstics: HashMap::new(),
         method_reference_diagnostics: HashMap::new(),
         other_class_diagnostics: HashMap::new(),
+        sys_classes: HashSet::new(),
+        sys_classes_overwritten: HashSet::new(),
     };
 
     let (class_range, class_name, _class_name_def) = get_member_name_and_range_from_root(

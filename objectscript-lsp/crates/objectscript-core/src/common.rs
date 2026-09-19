@@ -1,4 +1,4 @@
-use crate::parse_structures::{ClassId, MemberType, MethodType, ReturnType};
+use crate::parse_structures::{MemberType, MethodType, ReturnType};
 use crate::refactor::count_leading_dots_in_line;
 use crate::scope_structures::ScopeId;
 use crate::scope_tree::ScopeTree;
@@ -589,7 +589,8 @@ pub fn get_keyword_and_value(keyword: &str) -> (bool, String, Vec<&str>) {
     let mut keyword_name = "".to_string();
     let mut keyword_value: Vec<&str> = Vec::new();
     // splits string by spaces or equal sign
-    let regex = Regex::new(r"[^\s=,()]+").unwrap();
+    static KEYWORD_PART: OnceLock<Regex> = OnceLock::new();
+    let regex = KEYWORD_PART.get_or_init(|| Regex::new(r"[^\s=,()]+").unwrap());
     let mut count = 0;
     let values: Vec<&str> = regex.find_iter(keyword).map(|m| m.as_str()).collect();
     for value in values {
@@ -610,13 +611,8 @@ pub fn get_keyword_and_value(keyword: &str) -> (bool, String, Vec<&str>) {
 ///
 /// Creates a new `ScopeTree` rooted at `class_symbol_id`, then walks the syntax tree and adds
 /// scopes for nodes considered "scope nodes" (see `cls_is_scope_node`).
-pub fn initial_build_scope_tree(
-    tree: &Tree,
-    class_symbol_id: ClassId,
-    content: &str,
-    is_rtn: bool,
-) -> ScopeTree {
-    let mut scope_tree = ScopeTree::new(Some(class_symbol_id));
+pub fn initial_build_scope_tree(tree: &Tree, content: &str, is_rtn: bool) -> ScopeTree {
+    let mut scope_tree = ScopeTree::new();
     let mut scope_stack = vec![scope_tree.root];
 
     let root = tree.root_node();
@@ -938,9 +934,7 @@ pub fn get_subroutine_info(
         statement_type.named_child((statement_type.named_child_count() - 1) as u32)
     {
         match tag_keyword.kind() {
-            "keyword_methodimpl" => {
-                eprintln!("TODO: Verify if there is anything to be done for methodimpl keyword");
-            }
+            "keyword_methodimpl" => {}
             "keyword_private" => {
                 is_public = false;
             }
@@ -996,10 +990,6 @@ pub fn rtn_is_scope_node(node: Node, content: &str) -> (bool, Option<String>, bo
                 let mut sib = node.parent().and_then(|p| p.prev_named_sibling());
                 while let Some(sibling) = sib {
                     let Some(command) = sibling.named_child(0) else {
-                        eprintln!(
-                            "Sibling node {:?} for tag statement {:?} did not have a child at index 0, skipping (rtn_is_scope_node)",
-                            sibling, node
-                        );
                         sib = sibling.prev_named_sibling();
                         continue;
                     };
@@ -1012,10 +1002,6 @@ pub fn rtn_is_scope_node(node: Node, content: &str) -> (bool, Option<String>, bo
                                 return (true, None, true);
                             }
                             let Some(command) = last_sib.named_child(0) else {
-                                eprintln!(
-                                    "Sibling node {:?} for tag statement {:?} did not have a child at index 0, skipping (rtn_is_scope_node)",
-                                    last_sib, node
-                                );
                                 sib = last_sib.prev_named_sibling();
                                 continue;
                             };
@@ -1087,10 +1073,6 @@ pub fn rtn_is_scope_node(node: Node, content: &str) -> (bool, Option<String>, bo
                             let mut curr_sib = parent.prev_named_sibling();
                             while let Some(sibling) = curr_sib {
                                 let Some(command) = sibling.named_child(0) else {
-                                    eprintln!(
-                                        "Sibling node {:?} did not have a child at index 0, skipping (rtn_is_scope_node)",
-                                        sibling.kind()
-                                    );
                                     curr_sib = sibling.prev_named_sibling();
                                     continue;
                                 };
@@ -1164,6 +1146,9 @@ pub fn get_routine_scope_node_range(node: Node, content: &str) -> (Point, Point)
                     }
                     dotted_statement_scope_end_point = sib.end_position();
                     next_sibling = sib.next_named_sibling();
+                } else {
+                    // non-dotted sibling, so scope ends here.
+                    break;
                 }
             }
             return (

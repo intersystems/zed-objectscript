@@ -4,6 +4,7 @@ use crate::common::{
 };
 use crate::parse_structures::{
     CodeMode, Language, Method, MethodType, TypeName, UnresolvedMethodRef, Variable,
+    VariableDefType,
 };
 
 use crate::scope_structures::ScopeId;
@@ -188,10 +189,12 @@ impl Method {
         scope_tree: &ScopeTree,
         variables_in_method: &mut Vec<(Variable, Range, Vec<String>, ScopeId)>,
         method_range: Range,
+        class_name: &str,
     ) {
         {
             let query = routine_set_variables_query();
             let mut cursor = QueryCursor::new();
+            cursor.set_byte_range(method_range.start_byte..method_range.end_byte);
             let mut iter = cursor.matches(query, node, content.as_bytes());
             while let Some(query_match) = iter.next() {
                 let set_target_node = query_match.captures[0].node;
@@ -200,6 +203,7 @@ impl Method {
                 }
                 let mut var_defs = Vec::new();
                 let mut var_deps = Vec::new();
+                let mut var_type = VariableDefType::VariableDef;
                 let var_value = query_match.captures[1].node;
                 let children;
                 if set_target_node.kind() == "set_target_list" {
@@ -242,24 +246,37 @@ impl Method {
                                 var_defs.push((lvn_id, var_range));
                             }
                         }
+                        "instance_variable" => {
+                            if let Some(instance_var) =
+                                get_string_at_byte_range(content, set_target_child.byte_range())
+                                && let Some(property_name_outer) = set_target_child.named_child(0)
+                                && let Some(property_name_node) = property_name_outer.named_child(0)
+                                && let Some(property_name) = get_string_at_byte_range(
+                                    content,
+                                    property_name_node.byte_range(),
+                                )
+                            {
+                                var_type = VariableDefType::PropertyDef((
+                                    class_name.to_string(),
+                                    property_name,
+                                ));
+                                var_defs.push((instance_var, var_range));
+                            }
+                        }
                         _ => {
-                            eprintln!(
-                                "Warning: set target case: {:?} not yet implemented, skipping.",
-                                set_target_child.kind()
-                            );
+                            // Other set targets do not define variables tracked here.
                         }
                     }
                 }
-                let (is_oref, curr_class) =
-                    find_var_dependencies(var_value, content, &mut var_deps);
+                if matches!(var_type, VariableDefType::VariableDef) {
+                    let (is_oref, curr_class) =
+                        find_var_dependencies(var_value, content, &mut var_deps);
+                    if is_oref && let Some(curr_class) = curr_class {
+                        var_type = VariableDefType::OrefDef(curr_class);
+                    }
+                }
                 for (variable_name, var_range) in &var_defs {
-                    let var = Variable::new(
-                        variable_name.clone(),
-                        None,
-                        true,
-                        is_oref,
-                        curr_class.clone(),
-                    );
+                    let var = Variable::new(variable_name.clone(), None, true, var_type.clone());
                     if let Some(scope_id) = scope_tree
                         .find_current_scope_for_range(var_range.start_point, var_range.end_point)
                     {
@@ -278,6 +295,8 @@ impl Method {
         variables_in_method: &mut Vec<(Variable, Range, Vec<String>, ScopeId)>,
         class_is_procedure_block: Option<bool>,
         is_class_method: bool,
+        method_range: Range,
+        class_name: &str,
     ) {
         {
             let query = if is_class_method {
@@ -286,11 +305,19 @@ impl Method {
                 routine_set_variables_query()
             };
             let mut cursor = QueryCursor::new();
+            if !is_class_method {
+                cursor.set_byte_range(method_range.start_byte..method_range.end_byte);
+            }
             let mut iter = cursor.matches(query, node, content.as_bytes());
             while let Some(query_match) = iter.next() {
                 let mut var_defs = Vec::new();
                 let mut var_deps = Vec::new();
+                let mut var_type = VariableDefType::VariableDef;
                 let set_target_node = query_match.captures[0].node;
+                if !is_class_method && !range_within_range(&set_target_node.range(), &method_range)
+                {
+                    continue;
+                }
                 let var_value = query_match.captures[1].node;
                 let children;
                 if set_target_node.kind() == "set_target_list" {
@@ -333,16 +360,35 @@ impl Method {
                                 var_defs.push((lvn_id, var_range));
                             }
                         }
+                        "instance_variable" => {
+                            if let Some(instance_var) =
+                                get_string_at_byte_range(content, set_target_child.byte_range())
+                                && let Some(property_name_outer) = set_target_child.named_child(0)
+                                && let Some(property_name_node) = property_name_outer.named_child(0)
+                                && let Some(property_name) = get_string_at_byte_range(
+                                    content,
+                                    property_name_node.byte_range(),
+                                )
+                            {
+                                var_type = VariableDefType::PropertyDef((
+                                    class_name.to_string(),
+                                    property_name,
+                                ));
+                                var_defs.push((instance_var, var_range));
+                            }
+                        }
                         _ => {
-                            eprintln!(
-                                "Warning: set target case: {:?} not yet implemented, skipping.",
-                                set_target_child.kind()
-                            );
+                            continue;
                         }
                     }
                 }
-                let (is_oref, curr_class) =
-                    find_var_dependencies(var_value, content, &mut var_deps);
+                if matches!(var_type, VariableDefType::VariableDef) {
+                    let (is_oref, curr_class) =
+                        find_var_dependencies(var_value, content, &mut var_deps);
+                    if is_oref && let Some(curr_class) = curr_class {
+                        var_type = VariableDefType::OrefDef(curr_class);
+                    }
+                }
                 for (variable_name, var_range) in &var_defs {
                     let variable_is_public = if !is_class_method {
                         if self.public_variables_declared.contains(variable_name) {
@@ -360,8 +406,7 @@ impl Method {
                         variable_name.clone(),
                         None,
                         variable_is_public,
-                        is_oref,
-                        curr_class.clone(),
+                        var_type.clone(),
                     );
                     if let Some(scope_id) = scope_tree
                         .find_current_scope_for_range(var_range.start_point, var_range.end_point)
@@ -381,13 +426,18 @@ impl Method {
         scope_tree: &ScopeTree,
         variables_in_method: &mut Vec<(Variable, Range, Vec<String>, ScopeId)>,
         is_procedure: bool, // false if subroutine
+        method_range: Range,
     ) {
         {
             let query = routine_argument_query();
             let mut cursor = QueryCursor::new();
+            cursor.set_byte_range(method_range.start_byte..method_range.end_byte);
             let mut iter = cursor.matches(query, tag_node, content.as_bytes());
             while let Some(query_match) = iter.next() {
                 let method_arg = query_match.captures[0].node;
+                if !range_within_range(&method_arg.range(), &method_range) {
+                    continue;
+                }
                 if let Some(method_arg_type) = method_arg.named_child(0) {
                     let Some(variable_name_node) = method_arg_type.named_child(0) else {
                         eprintln!(
@@ -407,7 +457,12 @@ impl Method {
                         } else {
                             false
                         };
-                        let var = Variable::new(var_name, None, variable_is_public, false, None);
+                        let var = Variable::new(
+                            var_name,
+                            None,
+                            variable_is_public,
+                            VariableDefType::VariableDef,
+                        );
                         if let Some(scope_id) = scope_tree.find_current_scope_for_range(
                             var_range.start_point,
                             var_range.end_point,
@@ -510,8 +565,12 @@ impl Method {
                         .unwrap_or(class_is_procedure_block.unwrap_or(true))
                         == false
                         || self.public_variables_declared.contains(var_name);
-                    let var =
-                        Variable::new(var_name.clone(), arg_type, variable_is_public, false, None);
+                    let var = Variable::new(
+                        var_name.clone(),
+                        arg_type,
+                        variable_is_public,
+                        VariableDefType::VariableDef,
+                    );
                     if let Some(scope_id) = scope_tree
                         .find_current_scope_for_range(var_range.start_point, var_range.end_point)
                     {
@@ -542,6 +601,9 @@ impl Method {
                 routine_method_dependency_query()
             };
             let mut cursor = QueryCursor::new();
+            if !is_class_method {
+                cursor.set_byte_range(method_range.start_byte..method_range.end_byte);
+            }
             let mut iter = cursor.matches(query, node, content.as_bytes());
             let classmethod_idx = query.capture_index_for_name("classmethodcall");
             let systemfunc_idx = query.capture_index_for_name("systemfunc");
@@ -632,12 +694,14 @@ impl Method {
                                             method_name_node.byte_range(),
                                         )
                                     {
-                                        unresolved_method_refs.insert(UnresolvedMethodRef {
-                                            class: class_name.to_string(),
-                                            method: method_name,
-                                            offset: None,
-                                            method_call_range: matched_node.range(),
-                                        });
+                                        if method_name_node.kind() == "string_literal" {
+                                            unresolved_method_refs.insert(UnresolvedMethodRef {
+                                                class: class_name.to_string(),
+                                                method: method_name,
+                                                offset: None,
+                                                method_call_range: matched_node.range(),
+                                            });
+                                        }
                                     }
                                 } else {
                                     if let Some(classname_method_arg) = matched_node.named_child(0)
@@ -660,12 +724,14 @@ impl Method {
                                             method_name_node.byte_range(),
                                         )
                                     {
-                                        unresolved_method_refs.insert(UnresolvedMethodRef {
-                                            class: classname_var,
-                                            method: method_name,
-                                            offset: None,
-                                            method_call_range: matched_node.range(),
-                                        });
+                                        if method_name_node.kind() == "string_literal" {
+                                            unresolved_method_refs.insert(UnresolvedMethodRef {
+                                                class: classname_var,
+                                                method: method_name,
+                                                offset: None,
+                                                method_call_range: matched_node.range(),
+                                            });
+                                        }
                                     }
                                 }
                             } else if func_name.eq_ignore_ascii_case("$system") {
@@ -778,6 +844,7 @@ impl Method {
                     scope_tree,
                     &mut variables_in_method,
                     false,
+                    method_range,
                 );
                 self.build_subroutine_set_variables(
                     node,
@@ -785,6 +852,7 @@ impl Method {
                     scope_tree,
                     &mut variables_in_method,
                     method_range,
+                    class_name,
                 );
                 let (unresolved_method_refs, unresolved_oref_method_refs) =
                     self.get_method_dependencies(node, content, false, class_name, method_range);
@@ -804,6 +872,7 @@ impl Method {
                     scope_tree,
                     &mut variables_in_method,
                     false,
+                    method_range,
                 );
                 self.build_subroutine_set_variables(
                     node,
@@ -811,6 +880,7 @@ impl Method {
                     scope_tree,
                     &mut variables_in_method,
                     method_range,
+                    class_name,
                 );
                 let (unresolved_method_refs, unresolved_oref_method_refs) =
                     self.get_method_dependencies(node, content, false, class_name, method_range);
@@ -832,6 +902,8 @@ impl Method {
                     &mut variables_in_method,
                     class_is_procedure_block,
                     false,
+                    method_range,
+                    class_name,
                 );
                 self.build_routine_method_arguments(
                     node,
@@ -839,6 +911,7 @@ impl Method {
                     scope_tree,
                     &mut variables_in_method,
                     true,
+                    method_range,
                 );
                 let (unresolved_method_refs, unresolved_oref_method_refs) =
                     self.get_method_dependencies(node, content, false, class_name, method_range);
@@ -867,6 +940,8 @@ impl Method {
                     &mut variables_in_method,
                     class_is_procedure_block,
                     true,
+                    method_range,
+                    class_name,
                 );
                 let (unresolved_method_refs, unresolved_oref_method_refs) =
                     self.get_method_dependencies(node, content, true, class_name, method_range);

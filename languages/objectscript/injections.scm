@@ -27,8 +27,11 @@
 ; Keywords, one of type language = "python", none of type codemode
 ; External method body injection based on [ Language = ... ]
 (method_definition
-    (python_method_body_content) @injection.content
+  (method_keyword_external_language
+    (typename) @_lang)
+  (external_method_body_content) @injection.content
   (#set! injection.include-children "true")
+  (#any-of? @_lang "python" "Python" "PYTHON")
   (#set! injection.language "python"))
 
 (method_definition
@@ -48,8 +51,11 @@
   (#set! injection.language "ispl"))
 
 (trigger
-  (python_method_body_content) @injection.content
+  (method_keyword_external_language
+    (typename) @_lang)
+  (external_method_body_content) @injection.content
   (#set! injection.include-children "true")
+  (#any-of? @_lang "python" "Python" "PYTHON")
   (#set! injection.language "python"))
 
 (trigger
@@ -92,6 +98,14 @@
     (typename) @_mt)
   (external_method_body_content) @injection.content
   (#set! injection.include-children "true")
+  (#any-of? @_mt "text/x-python" "\"text/x-python\"" "application/python" "\"application/python\"")
+  (#set! injection.language "python"))
+
+(xdata
+  (xdata_keyword_mimetype
+    (typename) @_mt)
+  (external_method_body_content) @injection.content
+  (#set! injection.include-children "true")
   (#any-of? @_mt "text/xml" "\"text/xml\"" "application/xml" "\"application/xml\"")
   (#set! injection.language "xml"))
 
@@ -127,11 +141,12 @@
   (#any-of? @_mt "text/css" "\"text/css\"")
   (#set! injection.language "css"))
 
-; -----------------------------------------
-; XDATA default (no MimeType): XML fallback
-; -----------------------------------------
-(xdata
-  (external_method_body_content) @injection.content
+; --------------------------------------------
+; XDATA default (no MimeType header): XML fallback
+; --------------------------------------------
+((xdata
+  (external_method_body_content) @injection.content) @_xdata
+  (#not-match? @_xdata "^[^{}]*[Mm][Ii][Mm][Ee][Tt][Yy][Pp][Ee][ \t\r\n]*=")
   (#set! injection.include-children "true")
   (#set! injection.language "xml"))
 
@@ -141,7 +156,7 @@
   (#set! injection.language "xml")
   (#set! injection.include-children "true"))
 
-  ([
+([
   (line_comment_1)
   (line_comment_2)
   (line_comment_3)
@@ -150,7 +165,7 @@
   (inline_comment)
   (argumentless_inline_comment)
   (documatic_line)
-  ] @injection.content
-    (#set! injection.language "comment"))
+] @injection.content
+  (#set! injection.language "comment"))
 
 ; === END LOCAL ===
