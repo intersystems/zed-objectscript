@@ -15,3 +15,4 @@ pub mod scope_structures;
 pub mod scope_tree;
 pub mod variable;
 pub mod workspace;
+pub mod workspace_diff;

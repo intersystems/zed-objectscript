@@ -36,6 +36,8 @@ We built this language server to provide editor-independent ObjectScript semanti
   documented in [documentation/bulk-workspace-indexing.md](documentation/bulk-workspace-indexing.md).
 - Remaining measured bottlenecks and optimization priorities are documented in
   [documentation/indexing-optimization-roadmap.md](documentation/indexing-optimization-roadmap.md).
+- Granular, ID-independent class and member comparison is documented in
+  [documentation/class-comparison.md](documentation/class-comparison.md).
 
 ## Workspace Layout
 
