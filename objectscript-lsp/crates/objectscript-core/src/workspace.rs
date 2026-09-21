@@ -182,7 +182,6 @@ struct PendingBulkClass {
     class_range: Range,
     document: Document,
     class: Class,
-    inherited_classes: Vec<(String, LspRange)>,
     properties: HashMap<String, (Property, Range, PropertyRef)>,
     parameters: HashMap<String, (Parameter, Range, ParameterRef)>,
     methods: HashMap<String, PreparedMethod>,
@@ -253,15 +252,14 @@ impl<'a> BulkWorkspaceIndex<'a> {
                         .expect("registered class document must contain a class definition")
                 };
                 let mut class = Class::new(class_name.clone(), is_rtn);
-                let (_, _, methods, properties, parameters, inherited_classes, _, diagnostics) =
-                    class.build_class(
-                        starting_node,
-                        &document.content,
-                        is_rtn,
-                        &class_id,
-                        class_range,
-                        &class_name,
-                    );
+                let (_, _, methods, properties, parameters, _, _, diagnostics) = class.build_class(
+                    starting_node,
+                    &document.content,
+                    is_rtn,
+                    &class_id,
+                    class_range,
+                    &class_name,
+                );
                 class.build_imports(&document.tree, &document.content);
                 let class_is_final = class.is_final;
                 let class_is_procedure_block = class.is_procedure_block;
@@ -315,7 +313,6 @@ impl<'a> BulkWorkspaceIndex<'a> {
                     class_range,
                     document,
                     class,
-                    inherited_classes,
                     properties,
                     parameters,
                     methods,
@@ -334,7 +331,6 @@ impl<'a> BulkWorkspaceIndex<'a> {
             data.documents.insert(input.url, input.document);
         }
         let mut pending_calls = Vec::with_capacity(pending.len());
-        let mut pending_inheritance = Vec::with_capacity(pending.len());
         for mut prepared in pending {
             let class_name = prepared.class_name.clone();
             let url = prepared.url.clone();
@@ -463,10 +459,6 @@ impl<'a> BulkWorkspaceIndex<'a> {
             }
             data.documents.insert(url.clone(), prepared.document);
             pending_calls.push((url.clone(), class_id, calls, oref_calls));
-            prepared.inherited_classes.shrink_to_fit();
-            // Retain only inheritance inputs needed by the serial graph phase.
-            // This avoids keeping trees/content alive twice.
-            pending_inheritance.push((url, class_id, class_name, prepared.inherited_classes));
         }
         eprintln!(
             "[index] committed prepared results in {:.3?}",
@@ -476,35 +468,51 @@ impl<'a> BulkWorkspaceIndex<'a> {
         // Establish the complete inheritance graph. No override/member
         // table is built until the graph is complete.
         let inheritance_started = std::time::Instant::now();
+        let inheritance_inputs: Vec<(Url, ClassId, Vec<(String, LspRange)>)> = data
+            .classes
+            .values()
+            .filter_map(|class_id| {
+                let class = data.global_semantic_model.get_class(class_id)?;
+                let symbol = data.global_semantic_model.get_class_symbol(class_id)?;
+                Some((
+                    symbol.url.clone(),
+                    *class_id,
+                    class.inherited_classes.clone(),
+                ))
+            })
+            .collect();
         eprintln!(
             "[index] building inheritance for {} classes/routines",
-            pending_inheritance.len()
+            inheritance_inputs.len()
         );
         let affected: HashSet<ClassId> = data.classes.values().copied().collect();
-        for (url, class_id, class_name, inherited_classes) in &pending_inheritance {
-            // Any previously unresolved references to this newly registered class
-            // are resolved by the complete graph build below.
-            data.unresolved_inheritance_references.remove(class_name);
-            data.inheritance_diagonstics.remove(class_name);
-
-            // Preserve diagnostics for parents that are still genuinely absent.
-            let missing_parents: Vec<(String, LspRange)> = inherited_classes
+        data.unresolved_inheritance_references.clear();
+        data.inheritance_diagonstics.clear();
+        for (url, class_id, inherited_classes) in &inheritance_inputs {
+            let invalid_parents: Vec<(String, LspRange)> = inherited_classes
                 .iter()
-                .filter(|(name, _)| !data.classes.contains_key(name))
+                .filter(|(name, _)| {
+                    let Some(parent_id) = data.classes.get(name) else {
+                        return true;
+                    };
+                    data.global_semantic_model
+                        .get_class(parent_id)
+                        .is_some_and(|parent| parent.is_final == Some(true))
+                })
                 .cloned()
                 .collect();
             let mut unused_affected = HashSet::new();
             data.add_dependent_class_to_inherited_class(
                 *class_id,
                 url.clone(),
-                &missing_parents,
+                &invalid_parents,
                 &mut unused_affected,
             );
         }
         data.dependent_class_index = data.global_semantic_model.build_dependents(&data.classes);
         eprintln!(
             "[index] built inheritance for {} classes/routines in {:.3?}",
-            pending_inheritance.len(),
+            inheritance_inputs.len(),
             inheritance_started.elapsed()
         );
 
@@ -726,6 +734,133 @@ impl ProjectData {
         }
 
         (routine_members, current_class_methods)
+    }
+
+    /// Return direct and transitive SYS dependencies of all customer classes.
+    ///
+    /// Direct dependencies are SYS classes directly inherited by a customer
+    /// class or directly called by one of its methods. Transitive dependencies
+    /// are additional SYS classes reached through outgoing method calls or SYS
+    /// superclass chains. The returned sets are disjoint and use class names
+    /// because workspace-local ids cannot be compared across IRIS versions.
+    pub fn get_sys_dependencies(&self) -> (HashSet<String>, HashSet<String>) {
+        let customer_classes: Vec<ClassId> = self
+            .classes
+            .iter()
+            .filter_map(|(class_name, class_id)| {
+                (!self.sys_classes.contains(class_name)
+                    || self.sys_classes_overwritten.contains(class_name))
+                .then_some(*class_id)
+            })
+            .collect();
+
+        let mut direct_ids = HashSet::new();
+        let mut reachable_sys_ids = HashSet::new();
+        let mut start_nodes = Vec::new();
+
+        for class_id in customer_classes {
+            let Some(customer_class) = self.global_semantic_model.get_class(&class_id) else {
+                continue;
+            };
+
+            for (parent_name, _) in &customer_class.inherited_classes {
+                if self.sys_classes.contains(parent_name)
+                    && !self.sys_classes_overwritten.contains(parent_name)
+                    && let Some(parent_id) = self.classes.get(parent_name)
+                {
+                    direct_ids.insert(*parent_id);
+                    reachable_sys_ids.insert(*parent_id);
+                }
+            }
+
+            for node in self.dependency_graph.get_class_nodes(&class_id) {
+                start_nodes.push(node);
+                for edge in self
+                    .dependency_graph
+                    .graph
+                    .edges_directed(node, petgraph::Direction::Outgoing)
+                {
+                    let target = self.dependency_graph.graph[edge.target()];
+                    let Some(target_class) = self.global_semantic_model.get_class(&target.class)
+                    else {
+                        continue;
+                    };
+                    if self.sys_classes.contains(&target_class.name)
+                        && !self.sys_classes_overwritten.contains(&target_class.name)
+                    {
+                        direct_ids.insert(target.class);
+                        reachable_sys_ids.insert(target.class);
+                    }
+                }
+            }
+        }
+
+        let mut visited_nodes = HashSet::new();
+        let mut method_queue = std::collections::VecDeque::new();
+        for node in start_nodes {
+            if visited_nodes.insert(node) {
+                method_queue.push_back(node);
+            }
+        }
+        while let Some(node) = method_queue.pop_front() {
+            for edge in self
+                .dependency_graph
+                .graph
+                .edges_directed(node, petgraph::Direction::Outgoing)
+            {
+                let target_node = edge.target();
+                let target = self.dependency_graph.graph[target_node];
+                if let Some(target_class) = self.global_semantic_model.get_class(&target.class)
+                    && self.sys_classes.contains(&target_class.name)
+                    && !self.sys_classes_overwritten.contains(&target_class.name)
+                {
+                    reachable_sys_ids.insert(target.class);
+                }
+                if visited_nodes.insert(target_node) {
+                    method_queue.push_back(target_node);
+                }
+            }
+        }
+
+        let mut class_queue: std::collections::VecDeque<ClassId> =
+            reachable_sys_ids.iter().copied().collect();
+        while let Some(class_id) = class_queue.pop_front() {
+            let Some(class) = self.global_semantic_model.get_class(&class_id) else {
+                continue;
+            };
+            for (parent_name, _) in &class.inherited_classes {
+                if !self.sys_classes.contains(parent_name)
+                    || self.sys_classes_overwritten.contains(parent_name)
+                {
+                    continue;
+                }
+                let Some(parent_id) = self.classes.get(parent_name).copied() else {
+                    continue;
+                };
+                if reachable_sys_ids.insert(parent_id) {
+                    class_queue.push_back(parent_id);
+                }
+            }
+        }
+
+        let direct_sys_dependencies = direct_ids
+            .iter()
+            .filter_map(|class_id| {
+                self.global_semantic_model
+                    .get_class(class_id)
+                    .map(|class| class.name.clone())
+            })
+            .collect();
+        let transitive_sys_dependencies = reachable_sys_ids
+            .difference(&direct_ids)
+            .filter_map(|class_id| {
+                self.global_semantic_model
+                    .get_class(class_id)
+                    .map(|class| class.name.clone())
+            })
+            .collect();
+
+        (direct_sys_dependencies, transitive_sys_dependencies)
     }
 
     fn refactor_document_with_parser(
@@ -1478,6 +1613,31 @@ impl ProjectData {
     ) {
         for (inherited_cls_name, inherited_class_ref_range) in inherited_classes {
             if let Some(inherited_class_id) = self.classes.get(inherited_cls_name).copied() {
+                if let Some(cls) = self.global_semantic_model.get_class(&inherited_class_id) {
+                    if cls.is_final == Some(true) {
+                        let diagnostic = Diagnostic {
+                            range: inherited_class_ref_range.clone(),
+                            severity: Some(DiagnosticSeverity::WARNING),
+                            code: None,
+                            code_description: None,
+                            source: Some("ObjectScript".to_string()),
+                            message: "Attempted to inherit Class that is marked as final."
+                                .to_string(),
+                            related_information: None,
+                            tags: None,
+                            data: None,
+                        };
+                        self.unresolved_inheritance_references
+                            .entry(inherited_cls_name.clone())
+                            .or_insert(Vec::new())
+                            .push((dependent_class_id, inherited_class_ref_range.clone()));
+                        self.inheritance_diagonstics
+                            .entry(inherited_cls_name.clone())
+                            .or_insert(HashMap::new())
+                            .insert(dependent_document_url.clone(), diagnostic);
+                        continue;
+                    }
+                }
                 self.dependent_class_index
                     .direct_subclasses
                     .entry(inherited_class_id)
@@ -3417,7 +3577,16 @@ impl ProjectData {
                     .map(|c| {
                         c.inherited_classes
                             .iter()
-                            .filter(|(parent_name, _)| cls_name_to_id.contains_key(parent_name))
+                            .filter(|(parent_name, _)| {
+                                let Some(parent_id) = self.classes.get(parent_name) else {
+                                    return false;
+                                };
+                                cls_name_to_id.contains_key(parent_name)
+                                    && self
+                                        .global_semantic_model
+                                        .get_class(parent_id)
+                                        .is_some_and(|parent| parent.is_final != Some(true))
+                            })
                             .count()
                     })
                     .unwrap_or(0);
@@ -3480,13 +3649,28 @@ impl ProjectData {
             let mut property_table: HashMap<String, (PropertyRef, bool)> = HashMap::new();
             let mut parameter_table: HashMap<String, (ParameterRef, bool)> = HashMap::new();
 
+            let valid_parent = |name: &String| {
+                self.classes
+                    .get(name)
+                    .and_then(|parent_id| self.global_semantic_model.get_class(parent_id))
+                    .is_some_and(|parent| parent.is_final != Some(true))
+            };
             let parent_names: Vec<String> = if let Some(inheritance_direction) =
                 inheritance_direction
                 && inheritance_direction == "right"
             {
-                parents.iter().rev().map(|(name, _)| name.clone()).collect()
+                parents
+                    .iter()
+                    .rev()
+                    .filter(|(name, _)| valid_parent(name))
+                    .map(|(name, _)| name.clone())
+                    .collect()
             } else {
-                parents.iter().map(|(name, _)| name.clone()).collect()
+                parents
+                    .iter()
+                    .filter(|(name, _)| valid_parent(name))
+                    .map(|(name, _)| name.clone())
+                    .collect()
             };
 
             for parent_name in &parent_names {

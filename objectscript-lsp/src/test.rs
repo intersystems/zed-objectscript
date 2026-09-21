@@ -101,6 +101,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_is_final_creates_unresolved_inheritance() {
+        let test_root = env::current_dir().unwrap().join("objectscript-tests");
+        let workspace_root = test_root.join("new_scope_res_final");
+        let (backend, uri) = setup_backend_and_workspace(workspace_root.clone()).await;
+
+        let workspace = backend
+            .get_project(&uri)
+            .expect("missing project for new test version");
+
+        let project_data = workspace.data.read();
+        assert!(
+            project_data
+                .unresolved_inheritance_references
+                .contains_key("ScopeResolution")
+        )
+    }
+
+    #[tokio::test]
     async fn test_append_customer_root_preserves_sys_class_boundary() {
         let test_root = env::current_dir().unwrap().join("objectscript-tests");
         let sys_root = test_root.join("diagnostics");
@@ -120,6 +138,56 @@ mod tests {
         assert!(!data.sys_classes.contains("hk"));
         assert!(data.classes.contains_key("hk"));
         assert!(data.classes.contains_key("hksubclass"));
+    }
+
+    #[test]
+    fn test_sys_dependencies_include_calls_and_superclasses() {
+        let project = ProjectState::new();
+        project
+            .project_root_path
+            .set(Some(env::current_dir().unwrap()))
+            .expect("project root should be unset");
+
+        let sys_sources = [
+            (
+                "sys-base.cls",
+                "Class Sys.Base { ClassMethod Base() { Quit } }",
+            ),
+            (
+                "sys-leaf.cls",
+                "Class Sys.Leaf { ClassMethod Leaf() { Quit } }",
+            ),
+            (
+                "sys-middle.cls",
+                "Class Sys.Middle Extends Sys.Base { ClassMethod Mid() { Do ##class(Sys.Leaf).Leaf() } }",
+            ),
+        ];
+        for (version, (file_name, content)) in sys_sources.into_iter().enumerate() {
+            project.handle_document_opened(
+                Url::from_file_path(env::current_dir().unwrap().join(file_name))
+                    .expect("valid SYS file URL"),
+                content.to_string(),
+                FileType::Cls,
+                version as i32,
+            );
+        }
+        project.data.write().mark_current_classes_as_sys();
+
+        project.handle_document_opened(
+            Url::from_file_path(env::current_dir().unwrap().join("customer-app.cls"))
+                .expect("valid customer file URL"),
+            "Class Customer.App Extends Sys.Middle { ClassMethod Run() { Do ##class(Sys.Middle).Mid() } }"
+                .to_string(),
+            FileType::Cls,
+            4,
+        );
+
+        let (direct, transitive) = project.data.read().get_sys_dependencies();
+        assert_eq!(direct, HashSet::from(["Sys.Middle".to_string()]));
+        assert_eq!(
+            transitive,
+            HashSet::from(["Sys.Base".to_string(), "Sys.Leaf".to_string()])
+        );
     }
 
     fn point_for_substring_n(content: &str, needle: &str, occurrence: usize) -> Point {

@@ -4,7 +4,7 @@ use crate::parse_structures::{
 };
 use crate::workspace::ProjectData;
 use rayon::prelude::*;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValueChange<T> {
@@ -78,6 +78,7 @@ pub struct ClassSnapshot {
     pub imports: Vec<String>,
     /// Parent order is significant for ObjectScript multiple inheritance.
     pub inherited_classes: Vec<String>,
+    pub unresolved_inherited_classes: BTreeSet<String>,
     pub inheritance_direction: Option<String>,
     pub procedure_block: Option<bool>,
     pub language: Option<Language>,
@@ -122,6 +123,7 @@ pub struct ClassDiff {
     pub class_name: String,
     pub imports: Option<ValueChange<Vec<String>>>,
     pub inherited_classes: Option<ValueChange<Vec<String>>>,
+    pub unresolved_inherited_classes: Option<ValueChange<BTreeSet<String>>>,
     pub inheritance_direction: Option<ValueChange<Option<String>>>,
     pub procedure_block: Option<ValueChange<Option<bool>>>,
     pub language: Option<ValueChange<Option<Language>>>,
@@ -152,6 +154,18 @@ pub enum ClassComparison {
     Changed(ClassDiff),
 }
 
+impl ClassComparison {
+    pub fn class_name(&self) -> &str {
+        match self {
+            Self::Unchanged { class_name }
+            | Self::Added { class_name }
+            | Self::Removed { class_name }
+            | Self::SnapshotUnavailable { class_name, .. } => class_name,
+            Self::Changed(diff) => &diff.class_name,
+        }
+    }
+}
+
 pub fn compare_classes_parallel(
     class_names: &[String],
     baseline: &ProjectData,
@@ -161,6 +175,26 @@ pub fn compare_classes_parallel(
         .par_iter()
         .map(|class_name| compare_class(baseline, target, class_name))
         .collect()
+}
+
+/// Compare every class name present in either workspace.
+///
+/// The union ensures classes that exist in only one workspace are reported as
+/// added or removed. Result order is unspecified; callers that need a stable
+/// report should sort by class name at the presentation boundary.
+pub fn compare_workspaces_parallel(
+    baseline: &ProjectData,
+    target: &ProjectData,
+) -> Vec<ClassComparison> {
+    let class_names: Vec<String> = baseline
+        .classes
+        .keys()
+        .chain(target.classes.keys())
+        .cloned()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    compare_classes_parallel(&class_names, baseline, target)
 }
 
 pub fn compare_class(
@@ -181,25 +215,54 @@ pub fn compare_class(
             class_name: class_name.to_string(),
         },
         (Some(before), Some(after)) if before.content == after.content => {
-            ClassComparison::Unchanged {
-                class_name: class_name.to_string(),
+            let unresolved_before = unresolved_inherited_classes(baseline, class_name);
+            let unresolved_after = unresolved_inherited_classes(target, class_name);
+            if matches!(
+                (&unresolved_before, &unresolved_after),
+                (Some(before), Some(after)) if before == after
+            ) {
+                ClassComparison::Unchanged {
+                    class_name: class_name.to_string(),
+                }
+            } else {
+                compare_snapshots(baseline, target, class_name)
             }
         }
-        (Some(_), Some(_)) => {
-            let before = snapshot_class(baseline, class_name);
-            let after = snapshot_class(target, class_name);
-            let baseline_available = before.is_some();
-            let target_available = after.is_some();
-            let (Some(before), Some(after)) = (before, after) else {
-                return ClassComparison::SnapshotUnavailable {
-                    class_name: class_name.to_string(),
-                    baseline_available,
-                    target_available,
-                };
-            };
-            ClassComparison::Changed(diff_class(before, after))
-        }
+        (Some(_), Some(_)) => compare_snapshots(baseline, target, class_name),
     }
+}
+
+fn compare_snapshots(
+    baseline: &ProjectData,
+    target: &ProjectData,
+    class_name: &str,
+) -> ClassComparison {
+    let before = snapshot_class(baseline, class_name);
+    let after = snapshot_class(target, class_name);
+    let baseline_available = before.is_some();
+    let target_available = after.is_some();
+    let (Some(before), Some(after)) = (before, after) else {
+        return ClassComparison::SnapshotUnavailable {
+            class_name: class_name.to_string(),
+            baseline_available,
+            target_available,
+        };
+    };
+    ClassComparison::Changed(diff_class(before, after))
+}
+
+fn unresolved_inherited_classes(data: &ProjectData, class_name: &str) -> Option<BTreeSet<String>> {
+    let class_id = data.classes.get(class_name)?;
+    let class = data.global_semantic_model.get_class(class_id)?;
+    Some(
+        class
+            .inherited_classes
+            .iter()
+            .filter_map(|(parent_name, _)| {
+                (!data.classes.contains_key(parent_name)).then_some(parent_name.clone())
+            })
+            .collect(),
+    )
 }
 
 pub fn snapshot_class(data: &ProjectData, class_name: &str) -> Option<ClassSnapshot> {
@@ -214,6 +277,7 @@ pub fn snapshot_class(data: &ProjectData, class_name: &str) -> Option<ClassSnaps
         .iter()
         .map(|(name, _)| name.clone())
         .collect();
+    let unresolved_inherited_classes = unresolved_inherited_classes(data, class_name)?;
 
     let methods = class
         .methods
@@ -262,6 +326,7 @@ pub fn snapshot_class(data: &ProjectData, class_name: &str) -> Option<ClassSnaps
         name: class.name.clone(),
         imports,
         inherited_classes,
+        unresolved_inherited_classes,
         inheritance_direction: class.inheritance_direction.clone(),
         procedure_block: class.is_procedure_block,
         language: class.default_language.clone(),
@@ -350,6 +415,10 @@ fn diff_class(before: ClassSnapshot, after: ClassSnapshot) -> ClassDiff {
         class_name: before.name.clone(),
         imports: value_change(&before.imports, &after.imports),
         inherited_classes: value_change(&before.inherited_classes, &after.inherited_classes),
+        unresolved_inherited_classes: value_change(
+            &before.unresolved_inherited_classes,
+            &after.unresolved_inherited_classes,
+        ),
         inheritance_direction: value_change(
             &before.inheritance_direction,
             &after.inheritance_direction,
@@ -370,6 +439,7 @@ impl ClassDiff {
     pub fn has_semantic_changes(&self) -> bool {
         self.imports.is_some()
             || self.inherited_classes.is_some()
+            || self.unresolved_inherited_classes.is_some()
             || self.inheritance_direction.is_some()
             || self.procedure_block.is_some()
             || self.language.is_some()
@@ -593,6 +663,109 @@ ClassMethod Calculate() As %String
                 .added
                 .iter()
                 .any(|variable| variable.name == "newVar")
+        );
+        assert!(!diff.unmodeled_source_change);
+    }
+
+    #[test]
+    fn compares_union_of_both_workspaces() {
+        fn add_class(project: &ProjectState, class_name: &str, content: &str) {
+            project.handle_document_opened(
+                Url::parse(&format!("file:///workspace/{class_name}.cls")).unwrap(),
+                content.to_string(),
+                FileType::Cls,
+                1,
+            );
+        }
+
+        let baseline = ProjectState::new();
+        add_class(&baseline, "Demo.Compare", BEFORE);
+        add_class(
+            &baseline,
+            "Demo.Unchanged",
+            "Class Demo.Unchanged { Property Value As %String; }",
+        );
+        add_class(
+            &baseline,
+            "Demo.Removed",
+            "Class Demo.Removed { Property Value As %String; }",
+        );
+
+        let target = ProjectState::new();
+        add_class(&target, "Demo.Compare", AFTER);
+        add_class(
+            &target,
+            "Demo.Unchanged",
+            "Class Demo.Unchanged { Property Value As %String; }",
+        );
+        add_class(
+            &target,
+            "Demo.Added",
+            "Class Demo.Added { Property Value As %String; }",
+        );
+
+        let baseline = baseline.data.read();
+        let target = target.data.read();
+        let comparisons = compare_workspaces_parallel(&baseline, &target);
+
+        assert!(comparisons.iter().any(|comparison| matches!(
+            comparison,
+            ClassComparison::Changed(diff) if diff.class_name == "Demo.Compare"
+        )));
+        assert!(comparisons.iter().any(|comparison| matches!(
+            comparison,
+            ClassComparison::Unchanged { class_name }
+                if class_name == "Demo.Unchanged"
+        )));
+        assert!(comparisons.iter().any(|comparison| matches!(
+            comparison,
+            ClassComparison::Added { class_name } if class_name == "Demo.Added"
+        )));
+        assert!(comparisons.iter().any(|comparison| matches!(
+            comparison,
+            ClassComparison::Removed { class_name } if class_name == "Demo.Removed"
+        )));
+        assert_eq!(comparisons.len(), 4);
+    }
+
+    #[test]
+    fn reports_inheritance_resolution_change_with_identical_source() {
+        const CHILD: &str = "Class Demo.Child Extends Demo.Parent { }";
+
+        let baseline = ProjectState::new();
+        baseline.handle_document_opened(
+            Url::parse("file:///workspace/Demo.Child.cls").unwrap(),
+            CHILD.to_string(),
+            FileType::Cls,
+            1,
+        );
+
+        let target = ProjectState::new();
+        target.handle_document_opened(
+            Url::parse("file:///workspace/Demo.Child.cls").unwrap(),
+            CHILD.to_string(),
+            FileType::Cls,
+            1,
+        );
+        target.handle_document_opened(
+            Url::parse("file:///workspace/Demo.Parent.cls").unwrap(),
+            "Class Demo.Parent { }".to_string(),
+            FileType::Cls,
+            1,
+        );
+
+        let baseline = baseline.data.read();
+        let target = target.data.read();
+        let ClassComparison::Changed(diff) = compare_class(&baseline, &target, "Demo.Child") else {
+            panic!("inheritance resolution change should be reported");
+        };
+
+        assert_eq!(
+            diff.unresolved_inherited_classes,
+            Some(ValueChange {
+                before: BTreeSet::from(["Demo.Parent".to_string()]),
+                after: BTreeSet::new(),
+            })
         );
         assert!(!diff.unmodeled_source_change);
     }

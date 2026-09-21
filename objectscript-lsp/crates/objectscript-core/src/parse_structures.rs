@@ -31,6 +31,38 @@ pub struct PropertyId(pub usize);
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ParameterId(pub usize);
 
+/// Stores the Relationship Index, which is assigned by `class.get_next_relationship_id()`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct RelationshipId(pub usize);
+
+/// Stores the ForeignKey Index, which is assigned by `class.get_next_foreign_key_id()`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct ForeignKeyId(pub usize);
+
+/// Stores the Query Index, which is assigned by `class.get_next_query_key_id()`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct QueryId(pub usize);
+
+/// Stores the Index Index, which is assigned by `class.get_next_index_key_id()`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct IndexId(pub usize);
+
+/// Stores the ForeignKey Index, which is assigned by `class.get_next_trigger_key_id()`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct TriggerId(pub usize);
+
+/// Stores the Xdata Index, which is assigned by `class.get_next_xdata_key_id()`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct XdataId(pub usize);
+
+/// Stores the Projection Index, which is assigned by `class.get_next_projection_id()`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct ProjectionId(pub usize);
+
+/// Stores the storage Index, which is assigned by `class.get_next_storage_id()`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct StorageId(pub usize);
+
 /// Differentiates the kind of class member an identifier node represents.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MemberType {
@@ -129,6 +161,62 @@ pub struct PropertyRef {
     pub id: PropertyId,
 }
 
+/// Reference to a relationship in a class.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RelationshipRef {
+    pub class: ClassId,
+    pub id: RelationshipId,
+}
+
+/// Reference to a ForeignKey in a class.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ForeignKeyRef {
+    pub class: ClassId,
+    pub id: ForeignKeyId,
+}
+
+/// Reference to a Index in a class.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct IndexRef {
+    pub class: ClassId,
+    pub id: IndexId,
+}
+
+/// Reference to a trigger in a class.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TriggerRef {
+    pub class: ClassId,
+    pub id: TriggerId,
+}
+
+/// Reference to a xdata in a class.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct XdataRef {
+    pub class: ClassId,
+    pub id: XdataId,
+}
+
+/// Reference to a query in a class.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct QueryRef {
+    pub class: ClassId,
+    pub id: QueryId,
+}
+
+/// Reference to a projection in a class.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ProjectionRef {
+    pub class: ClassId,
+    pub id: ProjectionId,
+}
+
+/// Reference to a storage in a class.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct StorageRef {
+    pub class: ClassId,
+    pub id: StorageId,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Parameter {
     /// If true, the Parameter cannot be overwritten by subclasses.
@@ -207,6 +295,14 @@ pub struct Class {
     pub(crate) next_method_id: usize,
     pub(crate) next_parameter_id: usize,
     pub(crate) next_property_id: usize,
+    pub(crate) next_relationship_id: usize,
+    pub(crate) next_index_id: usize,
+    pub(crate) next_foreign_key_id: usize,
+    pub(crate) next_query_id: usize,
+    pub(crate) next_trigger_id: usize,
+    pub(crate) next_xdata_id: usize,
+    pub(crate) next_projection_id: usize,
+    pub(crate) next_storage_id: usize,
     /// If true, this class and all of its members cannot be overwritten by subclasses.
     pub is_final: Option<bool>,
 }

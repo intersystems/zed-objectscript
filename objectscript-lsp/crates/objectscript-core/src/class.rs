@@ -104,6 +104,14 @@ impl Class {
             next_method_id: 0,
             next_parameter_id: 0,
             next_property_id: 0,
+            next_foreign_key_id: 0,
+            next_index_id: 0,
+            next_projection_id: 0,
+            next_query_id: 0,
+            next_relationship_id: 0,
+            next_storage_id: 0,
+            next_trigger_id: 0,
+            next_xdata_id: 0,
             is_final: None,
         }
     }
@@ -149,6 +157,62 @@ impl Class {
     pub fn get_next_parameter_id(&mut self) -> usize {
         let id = self.next_parameter_id;
         self.next_parameter_id += 1;
+        id
+    }
+
+    /// Allocates and returns the next sequential relationship ID for this class.
+    pub fn get_next_relationship_id(&mut self) -> usize {
+        let id = self.next_relationship_id;
+        self.next_relationship_id += 1;
+        id
+    }
+
+    /// Allocates and returns the next sequential foreignkey ID for this class.
+    pub fn get_next_foreignkey_id(&mut self) -> usize {
+        let id = self.next_foreign_key_id;
+        self.next_foreign_key_id += 1;
+        id
+    }
+
+    /// Allocates and returns the next sequential query ID for this class.
+    pub fn get_next_query_id(&mut self) -> usize {
+        let id = self.next_query_id;
+        self.next_query_id += 1;
+        id
+    }
+
+    /// Allocates and returns the next sequential index ID for this class.
+    pub fn get_next_index_id(&mut self) -> usize {
+        let id = self.next_index_id;
+        self.next_index_id += 1;
+        id
+    }
+
+    /// Allocates and returns the next sequential trigger ID for this class.
+    pub fn get_next_trigger_id(&mut self) -> usize {
+        let id = self.next_trigger_id;
+        self.next_trigger_id += 1;
+        id
+    }
+
+    /// Allocates and returns the next sequential xdata ID for this class.
+    pub fn get_next_xdata_id(&mut self) -> usize {
+        let id = self.next_xdata_id;
+        self.next_xdata_id += 1;
+        id
+    }
+
+    /// Allocates and returns the next sequential projection ID for this class.
+    pub fn get_next_projection_id(&mut self) -> usize {
+        let id = self.next_projection_id;
+        self.next_projection_id += 1;
+        id
+    }
+
+    /// Allocates and returns the next sequential storage ID for this class.
+    pub fn get_next_storage_id(&mut self) -> usize {
+        let id = self.next_storage_id;
+        self.next_storage_id += 1;
         id
     }
 
