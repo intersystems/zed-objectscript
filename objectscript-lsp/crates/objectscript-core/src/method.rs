@@ -293,7 +293,7 @@ impl Method {
         content: &str,
         scope_tree: &ScopeTree,
         variables_in_method: &mut Vec<(Variable, Range, Vec<String>, ScopeId)>,
-        class_is_procedure_block: Option<bool>,
+        class_is_procedure_block: bool,
         is_class_method: bool,
         method_range: Range,
         class_name: &str,
@@ -397,9 +397,7 @@ impl Method {
                             false
                         }
                     } else {
-                        self.is_procedure_block
-                            .unwrap_or(class_is_procedure_block.unwrap_or(true))
-                            == false
+                        self.is_procedure_block.unwrap_or(class_is_procedure_block) == false
                             || self.public_variables_declared.contains(variable_name)
                     };
                     let var = Variable::new(
@@ -487,7 +485,7 @@ impl Method {
         content: &str,
         scope_tree: &ScopeTree,
         variables_in_method: &mut Vec<(Variable, Range, Vec<String>, ScopeId)>,
-        class_is_procedure_block: Option<bool>,
+        class_is_procedure_block: bool,
     ) {
         {
             let query = class_method_argument_query();
@@ -560,11 +558,9 @@ impl Method {
                 if let Some(var_name) = &var_name
                     && let Some(var_range) = var_range
                 {
-                    let variable_is_public = self
-                        .is_procedure_block
-                        .unwrap_or(class_is_procedure_block.unwrap_or(true))
-                        == false
-                        || self.public_variables_declared.contains(var_name);
+                    let variable_is_public =
+                        self.is_procedure_block.unwrap_or(class_is_procedure_block) == false
+                            || self.public_variables_declared.contains(var_name);
                     let var = Variable::new(
                         var_name.clone(),
                         arg_type,
@@ -823,9 +819,9 @@ impl Method {
         method_type: MethodType,
         method_range: Range,
         public_variables_declared: HashSet<String>, // only procedure passes this
-        class_is_final: Option<bool>,
-        old_class_is_final: Option<bool>,
-        class_is_procedure_block: Option<bool>,
+        class_is_final: bool,
+        old_class_is_final: bool,
+        class_is_procedure_block: bool,
         class_name: &str,
     ) -> (
         bool,
@@ -993,8 +989,8 @@ impl Method {
         &mut self,
         node: Node,
         content: &str,
-        class_is_final: Option<bool>,
-        old_class_is_final: Option<bool>,
+        class_is_final: bool,
+        old_class_is_final: bool,
     ) -> (bool, bool) {
         // reset keywords to default based on method type
         let mut is_final_changed = false;
@@ -1020,7 +1016,7 @@ impl Method {
                         {
                             let (not, keyword_name, values) =
                                 get_keyword_and_value(keyword_str.as_str());
-                            if keyword_name == "final" && !class_is_final.unwrap_or(false) {
+                            if keyword_name == "final" && !class_is_final {
                                 if not {
                                     self.is_final = Some(false);
                                 } else {
@@ -1104,8 +1100,8 @@ impl Method {
                 };
                 self.return_type = Some(typename);
             }
-            let old_final_keyword_res = old_is_final.unwrap_or(old_class_is_final.unwrap_or(false));
-            let new_final_keyword = self.is_final.unwrap_or(class_is_final.unwrap_or(false));
+            let old_final_keyword_res = old_is_final.unwrap_or(old_class_is_final);
+            let new_final_keyword = self.is_final.unwrap_or(class_is_final);
             if old_final_keyword_res != new_final_keyword {
                 is_final_changed = true;
             }

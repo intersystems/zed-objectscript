@@ -1,6 +1,7 @@
 use crate::document::Document;
 use crate::parse_structures::{
-    CodeMode, Language, Method, MethodType, Parameter, Property, TypeName, VariableDefType,
+    CodeMode, InheritanceDirection, Language, Method, MethodType, Parameter, Property, TypeName,
+    VariableDefType,
 };
 use crate::workspace::ProjectData;
 use rayon::prelude::*;
@@ -79,10 +80,10 @@ pub struct ClassSnapshot {
     /// Parent order is significant for ObjectScript multiple inheritance.
     pub inherited_classes: Vec<String>,
     pub unresolved_inherited_classes: BTreeSet<String>,
-    pub inheritance_direction: Option<String>,
-    pub procedure_block: Option<bool>,
-    pub language: Option<Language>,
-    pub final_keyword: Option<bool>,
+    pub inheritance_direction: InheritanceDirection,
+    pub procedure_block: bool,
+    pub language: Language,
+    pub final_keyword: bool,
     pub methods: BTreeMap<String, MethodSnapshot>,
     pub properties: BTreeMap<String, PropertySnapshot>,
     pub parameters: BTreeMap<String, ParameterSnapshot>,
@@ -124,10 +125,10 @@ pub struct ClassDiff {
     pub imports: Option<ValueChange<Vec<String>>>,
     pub inherited_classes: Option<ValueChange<Vec<String>>>,
     pub unresolved_inherited_classes: Option<ValueChange<BTreeSet<String>>>,
-    pub inheritance_direction: Option<ValueChange<Option<String>>>,
-    pub procedure_block: Option<ValueChange<Option<bool>>>,
-    pub language: Option<ValueChange<Option<Language>>>,
-    pub final_keyword: Option<ValueChange<Option<bool>>>,
+    pub inheritance_direction: Option<ValueChange<InheritanceDirection>>,
+    pub procedure_block: Option<ValueChange<bool>>,
+    pub language: Option<ValueChange<Language>>,
+    pub final_keyword: Option<ValueChange<bool>>,
     pub methods: MemberChanges<MethodDiff>,
     pub properties: MemberChanges<PropertyDiff>,
     pub parameters: MemberChanges<ParameterDiff>,
@@ -631,8 +632,8 @@ ClassMethod Calculate() As %String
         assert_eq!(
             diff.final_keyword,
             Some(ValueChange {
-                before: None,
-                after: Some(true),
+                before: false,
+                after: true,
             })
         );
         assert_eq!(diff.properties.added, vec!["Added"]);

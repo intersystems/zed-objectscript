@@ -716,9 +716,7 @@ impl GlobalSemanticModel {
             for (parent_name, parent_range) in &cls.inherited_classes {
                 if let Some(&parent_id) = name_to_id.get(parent_name) {
                     if let Some(&parent_idx) = id_to_idx.get(&parent_id) {
-                        if entries[parent_idx].1.active
-                            && entries[parent_idx].1.is_final != Some(true)
-                        {
+                        if entries[parent_idx].1.active && entries[parent_idx].1.is_final != true {
                             children[parent_idx].push((*child_id, parent_range.clone()));
                         }
                     }

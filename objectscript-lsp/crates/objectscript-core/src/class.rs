@@ -5,8 +5,8 @@ use crate::common::{
 };
 
 use crate::parse_structures::{
-    Class, ClassId, Language, MemberType, Method, MethodId, MethodRef, MethodType, Parameter,
-    ParameterId, ParameterRef, Property, PropertyId, PropertyRef,
+    Class, ClassId, InheritanceDirection, Language, MemberType, Method, MethodId, MethodRef,
+    MethodType, Parameter, ParameterId, ParameterRef, Property, PropertyId, PropertyRef,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
@@ -17,13 +17,9 @@ use tree_sitter::{
 use tree_sitter_objectscript::LANGUAGE_OBJECTSCRIPT_UDL;
 use tree_sitter_objectscript_routine::LANGUAGE_OBJECTSCRIPT_ROUTINE;
 
-const UDL_CLASS_HEADER_QUERY: &str = r#"
-[
-  (class_definition (class_extends (class_name (identifier) @inherits)))
-  (class_definition (class_keyword) @classkeyword)
-]"#;
-
 const UDL_CLASS_MEMBER_QUERY: &str = r#"(class_definition
+            (class_extends (class_name (identifier) @inherits)) ?
+            (class_keyword) @classkeyword
             (class_body
             (class_statement
             [
@@ -31,6 +27,14 @@ const UDL_CLASS_MEMBER_QUERY: &str = r#"(class_definition
             (classmethod (method_definition) @classmethod)
             (parameter) @parameter
             (property) @property
+            (relationship) @relationship
+            (foreignkey) @foreignkey
+            (query) @query
+            (index) @index
+            (trigger) @trigger
+            (xdata) @xdata
+            (projection) @projection
+            (storage) @storage
             ])
             )
             )"#;
@@ -54,17 +58,17 @@ fn cached_query(
     })
 }
 
-fn udl_class_header_query() -> &'static Query {
-    static QUERY: OnceLock<Query> = OnceLock::new();
-    cached_query(
-        &QUERY,
-        LANGUAGE_OBJECTSCRIPT_UDL.into(),
-        UDL_CLASS_HEADER_QUERY,
-        "UDL class header",
-    )
-}
+// fn udl_class_header_query() -> &'static Query {
+//     static QUERY: OnceLock<Query> = OnceLock::new();
+//     cached_query(
+//         &QUERY,
+//         LANGUAGE_OBJECTSCRIPT_UDL.into(),
+//         UDL_CLASS_HEADER_QUERY,
+//         "UDL class header",
+//     )
+// }
 
-fn udl_class_member_query() -> &'static Query {
+fn udl_class_query() -> &'static Query {
     static QUERY: OnceLock<Query> = OnceLock::new();
     cached_query(
         &QUERY,
@@ -93,12 +97,20 @@ impl Class {
             name,
             imports: Vec::new(),
             inherited_classes: Vec::new(),
-            inheritance_direction: None,
-            is_procedure_block: None,
-            default_language: None,
+            inheritance_direction: InheritanceDirection::Left,
+            is_procedure_block: true,
+            default_language: Language::Objectscript,
             methods: HashMap::new(),
             properties: HashMap::new(),
             parameters: HashMap::new(),
+            relationships: HashMap::new(),
+            foreignkeys: HashMap::new(),
+            queries: HashMap::new(),
+            triggers: HashMap::new(),
+            indices: HashMap::new(),
+            projections: HashMap::new(),
+            xdata: HashMap::new(),
+            storage: HashMap::new(),
             active: true,
             is_rtn,
             next_method_id: 0,
@@ -112,17 +124,17 @@ impl Class {
             next_storage_id: 0,
             next_trigger_id: 0,
             next_xdata_id: 0,
-            is_final: None,
+            is_final: false,
         }
     }
 
     pub fn reset_keywords(&mut self) {
         self.active = true;
-        self.is_final = None;
+        self.is_final = false;
         self.inherited_classes = Vec::new();
-        self.inheritance_direction = None;
-        self.is_procedure_block = None;
-        self.default_language = None;
+        self.inheritance_direction = InheritanceDirection::Left;
+        self.is_procedure_block = true;
+        self.default_language = Language::Objectscript;
     }
 
     /// Resets this `Class` to a clean state and sets its `name` and `active` flag.
@@ -133,9 +145,9 @@ impl Class {
         self.name = class_name;
         self.imports = Vec::new();
         self.inherited_classes = Vec::new();
-        self.inheritance_direction = None;
-        self.is_procedure_block = None;
-        self.default_language = None;
+        self.inheritance_direction = InheritanceDirection::Left;
+        self.is_procedure_block = true;
+        self.default_language = Language::Objectscript;
         self.methods = HashMap::new();
         self.properties = HashMap::new();
         self.parameters = HashMap::new();
@@ -143,7 +155,7 @@ impl Class {
         self.next_method_id = 0;
         self.next_parameter_id = 0;
         self.next_property_id = 0;
-        self.is_final = None;
+        self.is_final = false;
     }
 
     /// Allocates and returns the next sequential method ID for this class.
@@ -285,89 +297,40 @@ impl Class {
         // NOTE: right now, properties and parameters are not incremental.. they are so small in terms of what it takes to rebuild that it doesn't make sense to incrementally build them atm
         self.properties.clear();
         self.parameters.clear();
+        self.properties.clear();
+        self.relationships.clear();
+        self.foreignkeys.clear();
+        self.queries.clear();
+        self.indices.clear();
+        self.triggers.clear();
+        self.projections.clear();
+        self.xdata.clear();
+        self.storage.clear();
         self.next_property_id = 0;
         self.next_parameter_id = 0;
-        if !is_rtn {
-            let query = udl_class_header_query();
-            let inherits_idx = query.capture_index_for_name("inherits");
-            let keyword_idx = query.capture_index_for_name("classkeyword");
-            let mut cursor = QueryCursor::new();
-            let mut iter = cursor.matches(query, root_node, content.as_bytes());
-
-            while let Some(query_match) = iter.next() {
-                let mut i = 0;
-                while i < query_match.captures.len() {
-                    let capture = &query_match.captures[i];
-                    if inherits_idx == Some(capture.index) {
-                        if let Some(inherited_cls_name) =
-                            get_string_at_byte_range(content, capture.node.byte_range())
-                        {
-                            let lsp_range = ts_range_to_lsp_range(content, capture.node.range());
-                            inherited_classes.push((inherited_cls_name.clone(), lsp_range));
-                            // inherited_class_ranges.insert(inherited_cls_name.clone(), lsp_range);
-                            if let Some((old_inherited_class, _)) =
-                                self.inherited_classes.get(inherited_count)
-                            {
-                                if &inherited_cls_name != old_inherited_class {
-                                    inheritance_changed = true;
-                                }
-                            } else {
-                                inheritance_changed = true;
-                            }
-                        }
-                        inherited_count += 1;
-                    } else if keyword_idx == Some(capture.index)
-                        && let Some(keyword_str) =
-                            get_string_at_byte_range(content, capture.node.byte_range())
-                    {
-                        let (not, keyword_name, values) =
-                            get_keyword_and_value(keyword_str.as_str());
-                        if keyword_name == "procedureblock" {
-                            if not {
-                                self.is_procedure_block = Some(false);
-                            } else {
-                                self.is_procedure_block = Some(true);
-                            }
-                        } else if keyword_name == "language" {
-                            if let Some(value) = values.get(0).copied() {
-                                if value == "objectscript" {
-                                    self.default_language = Some(Language::Objectscript);
-                                } else if value == "tsql" {
-                                    self.default_language = Some(Language::TSql);
-                                }
-                            }
-                        } else if keyword_name == "inheritance" {
-                            if let Some(value) = values.get(0).copied() {
-                                if value == "right" {
-                                    self.inheritance_direction = Some("right".to_string());
-                                } else {
-                                    self.inheritance_direction = Some("left".to_string());
-                                }
-                                if self.inheritance_direction != old_inheritance_direction {
-                                    inheritance_changed = true;
-                                }
-                            }
-                        } else if keyword_name == "final" {
-                            if not {
-                                self.is_final = Some(false);
-                            } else {
-                                self.is_final = Some(true);
-                            }
-                        }
-                    }
-                    i += 1;
-                }
-            }
-        }
+        self.next_relationship_id = 0;
+        self.next_foreign_key_id = 0;
+        self.next_query_id = 0;
+        self.next_index_id = 0;
+        self.next_trigger_id = 0;
+        self.next_xdata_id = 0;
+        self.next_projection_id = 0;
+        self.next_storage_id = 0;
         let query = if is_rtn {
             routine_member_query()
         } else {
-            udl_class_member_query()
+            udl_class_query()
         };
         {
             let mut capture_indices = HashMap::new();
             if let Some(method_idx) = query.capture_index_for_name("classmethod") {
                 capture_indices.insert(method_idx, MemberType::ClassMethodCall);
+            }
+            if let Some(inherits_idx) = query.capture_index_for_name("inherits") {
+                capture_indices.insert(inherits_idx, MemberType::InheritedClass);
+            }
+            if let Some(keyword_idx) = query.capture_index_for_name("classkeyword") {
+                capture_indices.insert(keyword_idx, MemberType::ClassKeyword);
             }
             if let Some(routine_idx) = query.capture_index_for_name("routinedef") {
                 capture_indices.insert(routine_idx, MemberType::Routine);
@@ -399,6 +362,65 @@ impl Class {
                     let capture = &query_match.captures[i];
                     if let Some(cap_type) = capture_indices.get(&capture.index) {
                         match cap_type {
+                            MemberType::ClassKeyword => {
+                                if let Some(keyword_str) =
+                                    get_string_at_byte_range(content, capture.node.byte_range())
+                                {
+                                    let (not, keyword_name, values) =
+                                        get_keyword_and_value(keyword_str.as_str());
+                                    if keyword_name == "procedureblock" {
+                                        if not {
+                                            self.is_procedure_block = false;
+                                        }
+                                    } else if keyword_name == "language" {
+                                        if let Some(value) = values.get(0).copied() {
+                                            if value == "tsql" {
+                                                self.default_language = Language::TSql;
+                                            }
+                                        }
+                                    } else if keyword_name == "inheritance" {
+                                        if let Some(value) = values.get(0).copied() {
+                                            if value == "right" {
+                                                self.inheritance_direction =
+                                                    InheritanceDirection::Right;
+                                            }
+                                            if self.inheritance_direction
+                                                != old_inheritance_direction
+                                            {
+                                                inheritance_changed = true;
+                                            }
+                                        }
+                                    } else if keyword_name == "final" {
+                                        if !not {
+                                            self.is_final = true;
+                                        }
+                                    }
+                                }
+                                i += 1;
+                                continue;
+                            }
+                            MemberType::InheritedClass => {
+                                if let Some(inherited_cls_name) =
+                                    get_string_at_byte_range(content, capture.node.byte_range())
+                                {
+                                    let lsp_range =
+                                        ts_range_to_lsp_range(content, capture.node.range());
+                                    inherited_classes.push((inherited_cls_name.clone(), lsp_range));
+                                    // inherited_class_ranges.insert(inherited_cls_name.clone(), lsp_range);
+                                    if let Some((old_inherited_class, _)) =
+                                        self.inherited_classes.get(inherited_count)
+                                    {
+                                        if &inherited_cls_name != old_inherited_class {
+                                            inheritance_changed = true;
+                                        }
+                                    } else {
+                                        inheritance_changed = true;
+                                    }
+                                }
+                                inherited_count += 1;
+                                i += 1;
+                                continue;
+                            }
                             MemberType::Procedure => {
                                 let procedure_statement_node = capture.node;
                                 if let Some((

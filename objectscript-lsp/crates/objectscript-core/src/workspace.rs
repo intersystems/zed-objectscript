@@ -9,8 +9,9 @@ use crate::global_semantic::GlobalSemanticModel;
 use crate::local_semantic::LocalSemanticModel;
 use crate::override_index::OverrideIndex;
 use crate::parse_structures::{
-    Class, ClassId, FileType, Method, MethodRef, MethodType, Parameter, ParameterRef, Property,
-    PropertyRef, RefactorLevel, UnresolvedMethodRef, Variable, VariableDefType, VariableRef,
+    Class, ClassId, FileType, InheritanceDirection, Method, MethodRef, MethodType, Parameter,
+    ParameterRef, Property, PropertyRef, RefactorLevel, UnresolvedMethodRef, Variable,
+    VariableDefType, VariableRef,
 };
 use crate::refactor::{
     refactor_conditionals_in_document, refactor_for_statements, refactor_legacy_do_statements,
@@ -288,7 +289,7 @@ impl<'a> BulkWorkspaceIndex<'a> {
                                     range,
                                     public_variables,
                                     class_is_final,
-                                    None,
+                                    false,
                                     class_is_procedure_block,
                                     &class_name,
                                 );
@@ -497,7 +498,7 @@ impl<'a> BulkWorkspaceIndex<'a> {
                     };
                     data.global_semantic_model
                         .get_class(parent_id)
-                        .is_some_and(|parent| parent.is_final == Some(true))
+                        .is_some_and(|parent| parent.is_final == true)
                 })
                 .cloned()
                 .collect();
@@ -1286,7 +1287,7 @@ impl ProjectData {
                 &class_name,
                 class_id,
                 &inherited_classes,
-                class_is_final.unwrap_or(false),
+                class_is_final,
                 &mut classes_to_recompute_inheritance,
                 &url,
             );
@@ -1327,7 +1328,7 @@ impl ProjectData {
                                 method_range,
                                 public_variables_declared,
                                 class_is_final,
-                                None,
+                                false,
                                 class_is_procedure_block,
                                 &class_name,
                             );
@@ -1354,7 +1355,7 @@ impl ProjectData {
                                 method_range,
                                 public_variables_declared,
                                 class_is_final,
-                                None,
+                                false,
                                 class_is_procedure_block,
                                 &class_name,
                             );
@@ -1377,7 +1378,7 @@ impl ProjectData {
                             method_range,
                             public_variables_declared,
                             class_is_final,
-                            None,
+                            false,
                             class_is_procedure_block,
                             &class_name,
                         );
@@ -1464,7 +1465,7 @@ impl ProjectData {
                     method_name,
                     method_ref,
                     true,
-                    class_is_final.unwrap_or(false),
+                    class_is_final,
                 );
             }
 
@@ -1549,7 +1550,7 @@ impl ProjectData {
                     property_name,
                     property_ref,
                     true,
-                    class_is_final.unwrap_or(false),
+                    class_is_final,
                 );
             }
             for (parameter_name, (parameter, parameter_range, parameter_ref)) in parameters {
@@ -1572,7 +1573,7 @@ impl ProjectData {
                     parameter_name,
                     parameter_ref,
                     true,
-                    class_is_final.unwrap_or(false),
+                    class_is_final,
                 );
             }
             self.documents.insert(url.clone(), document);
@@ -1614,7 +1615,7 @@ impl ProjectData {
         for (inherited_cls_name, inherited_class_ref_range) in inherited_classes {
             if let Some(inherited_class_id) = self.classes.get(inherited_cls_name).copied() {
                 if let Some(cls) = self.global_semantic_model.get_class(&inherited_class_id) {
-                    if cls.is_final == Some(true) {
+                    if cls.is_final {
                         let diagnostic = Diagnostic {
                             range: inherited_class_ref_range.clone(),
                             severity: Some(DiagnosticSeverity::WARNING),
@@ -1969,7 +1970,6 @@ impl ProjectData {
                         self.global_semantic_model.get_method(stale_method_ref)
                 {
                     let old_method_name = old_method.name.clone();
-                    let old_method_is_final = old_method.is_final;
                     for (method_ref, method_call_range) in &method_caller_refs {
                         let lsp_range = ts_range_to_lsp_range(content, *method_call_range);
                         let Some(cls_sym) = self
@@ -2002,10 +2002,8 @@ impl ProjectData {
                         .extend(method_caller_refs);
                     if let Some(new_class) = self.global_semantic_model.get_class(&class_id)
                         && let Some(new_method_ref) = new_class.get_method_ref(&old_method_name)
-                        && new_class
-                            .is_final
-                            .unwrap_or(old_method_is_final.unwrap_or(false))
                     {
+                        // TODO: not sure if this should be resolved here..
                         self.resolve_unresolved_method(
                             &(new_class_name.to_string(), old_method_name),
                             *new_method_ref,
@@ -2543,8 +2541,8 @@ impl ProjectData {
                 &old_inherited_classes,
                 &new_inherited_classes,
                 inheritance_changed,
-                old_is_final.unwrap_or(false),
-                new_class_is_final.unwrap_or(false),
+                old_is_final,
+                new_class_is_final,
                 &mut classes_to_fully_recompute_inheritance,
                 &url,
                 content,
@@ -2565,8 +2563,8 @@ impl ProjectData {
                 &old_class_name,
                 &classes_to_fully_recompute_inheritance,
                 &subclasses_to_recompute_inheritance,
-                new_class_is_final.unwrap_or(false),
-                old_is_final.unwrap_or(false),
+                new_class_is_final,
+                old_is_final,
                 &mut methods_already_rebuilt,
                 &mut scope_tree,
                 content,
@@ -2744,7 +2742,7 @@ impl ProjectData {
                     method_name,
                     method_ref,
                     true,
-                    new_class_is_final.unwrap_or(false),
+                    new_class_is_final,
                 );
             }
             for (method_ref, unresolved_oref_methods) in unresolved_orefs {
@@ -2832,7 +2830,7 @@ impl ProjectData {
                     property_name,
                     property_ref,
                     true,
-                    new_class_is_final.unwrap_or(false),
+                    new_class_is_final,
                 );
             }
 
@@ -2858,14 +2856,14 @@ impl ProjectData {
                     parameter_name,
                     parameter_ref,
                     true,
-                    new_class_is_final.unwrap_or(false),
+                    new_class_is_final,
                 );
             }
 
             let scope_tree_snapshot = scope_tree.clone();
             let mut curr_class_hash = HashSet::new();
             curr_class_hash.insert(old_class_id);
-            if !new_class_is_final.unwrap_or(false) {
+            if !new_class_is_final {
                 if let Some(dependents) = self
                     .dependent_class_index
                     .direct_subclasses
@@ -2995,7 +2993,7 @@ impl ProjectData {
                                 method_name.clone(),
                                 method_ref,
                                 true,
-                                new_class_is_final.unwrap_or(false),
+                                new_class_is_final,
                             );
                         }
                         if method_is_public_changed {
@@ -3061,7 +3059,7 @@ impl ProjectData {
                             method_name.clone(),
                             method_ref,
                             false,
-                            new_class_is_final.unwrap_or(false),
+                            new_class_is_final,
                         );
                         unresolved_orefs.insert(method_ref, unresolved_oref_method_refs);
                         for (variable, variable_range, variable_dependencies, variable_scope_id) in
@@ -3585,7 +3583,7 @@ impl ProjectData {
                                     && self
                                         .global_semantic_model
                                         .get_class(parent_id)
-                                        .is_some_and(|parent| parent.is_final != Some(true))
+                                        .is_some_and(|parent| !parent.is_final)
                             })
                             .count()
                     })
@@ -3653,11 +3651,9 @@ impl ProjectData {
                 self.classes
                     .get(name)
                     .and_then(|parent_id| self.global_semantic_model.get_class(parent_id))
-                    .is_some_and(|parent| parent.is_final != Some(true))
+                    .is_some_and(|parent| !parent.is_final)
             };
-            let parent_names: Vec<String> = if let Some(inheritance_direction) =
-                inheritance_direction
-                && inheritance_direction == "right"
+            let parent_names: Vec<String> = if inheritance_direction == InheritanceDirection::Right
             {
                 parents
                     .iter()
@@ -3968,9 +3964,7 @@ impl ProjectData {
             // Find inherited entry for this method name from parents
             let mut inherited_entry: Option<(PropertyRef, bool)> = None;
 
-            let parent_names: Vec<String> = if let Some(inheritance_direction) =
-                inheritance_direction
-                && inheritance_direction == "right"
+            let parent_names: Vec<String> = if inheritance_direction == InheritanceDirection::Right
             {
                 parents.iter().rev().map(|(name, _)| name.clone()).collect()
             } else {
@@ -4176,9 +4170,7 @@ impl ProjectData {
             // Find inherited entry for this method name from parents
             let mut inherited_entry: Option<(ParameterRef, bool)> = None;
 
-            let parent_names: Vec<String> = if let Some(inheritance_direction) =
-                inheritance_direction
-                && inheritance_direction == "right"
+            let parent_names: Vec<String> = if inheritance_direction == InheritanceDirection::Right
             {
                 parents.iter().rev().map(|(name, _)| name.clone()).collect()
             } else {
@@ -4381,9 +4373,7 @@ impl ProjectData {
             // Find inherited entry for this method name from parents
             let mut inherited_entry: Option<(MethodRef, bool)> = None;
 
-            let parent_names: Vec<String> = if let Some(inheritance_direction) =
-                inheritance_direction
-                && inheritance_direction == "right"
+            let parent_names: Vec<String> = if inheritance_direction == InheritanceDirection::Right
             {
                 parents.iter().rev().map(|(name, _)| name.clone()).collect()
             } else {
@@ -4873,7 +4863,7 @@ impl ProjectData {
 
         let cls_is_procedure_block =
             if let Some(c) = self.global_semantic_model.get_class(&method_ref.class) {
-                c.is_procedure_block.unwrap_or(true)
+                c.is_procedure_block
             } else {
                 return false;
             };

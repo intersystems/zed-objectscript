@@ -95,6 +95,8 @@ pub enum MemberType {
     Keyword,
     Procedure,
     DottedStatementTag,
+    InheritedClass,
+    ClassKeyword,
 }
 
 pub struct IndexParsers {
@@ -120,6 +122,12 @@ impl IndexParsers {
 
         Self { cls, routine, xml }
     }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum InheritanceDirection {
+    Left,
+    Right,
 }
 
 /// DFS visitation state.
@@ -277,17 +285,33 @@ pub struct Class {
     /// Direct parent classes in the `Extends` list.
     pub inherited_classes: Vec<(String, LspRange)>,
     /// Inheritance conflict resolution direction (`left`, or `right`, default is `left`).
-    pub inheritance_direction: Option<String>,
+    pub inheritance_direction: InheritanceDirection,
     /// Optional ProcedureBlock default for this class; If defined, methods will inherit this keyword if they don't specify it themselves.
-    pub is_procedure_block: Option<bool>,
+    pub is_procedure_block: bool,
     /// Optional default Language keyword for this class.
-    pub default_language: Option<Language>,
+    pub default_language: Language,
     /// Stores method name -> MethodRef for each method in this class.
     pub methods: HashMap<String, MethodRef>,
     /// Stores property name -> id for each property in this class.
     pub properties: HashMap<String, PropertyRef>,
     /// Stores parameter name -> id for each parameter in this class.
     pub parameters: HashMap<String, ParameterRef>,
+    /// Stores relationship name -> id for each relationship in this class.
+    pub relationships: HashMap<String, RelationshipRef>,
+    /// Stores ForeignKey name -> id for each ForeignKey in this class.
+    pub foreignkeys: HashMap<String, ForeignKeyRef>,
+    /// Stores query name -> id for each query in this class.
+    pub queries: HashMap<String, QueryRef>,
+    /// Stores Index name -> id for each Index in this class.
+    pub indices: HashMap<String, IndexRef>,
+    /// Stores trigger name -> id for each trigger in this class.
+    pub triggers: HashMap<String, TriggerRef>,
+    /// Stores projection name -> id for each Projection in this class.
+    pub projections: HashMap<String, ProjectionRef>,
+    /// Stores Xdata name -> XdataRef for each Xdata member in this class.
+    pub xdata: HashMap<String, XdataRef>,
+    /// Stores storage name -> StorageRef for each storage member in this class.
+    pub storage: HashMap<String, StorageRef>,
     /// Whether this class entry is considered live/usable (e.g., false after removal).
     pub active: bool,
     /// Whether this representation is of a routine.
@@ -304,7 +328,7 @@ pub struct Class {
     pub(crate) next_projection_id: usize,
     pub(crate) next_storage_id: usize,
     /// If true, this class and all of its members cannot be overwritten by subclasses.
-    pub is_final: Option<bool>,
+    pub is_final: bool,
 }
 
 /// Language keyword values supported for classes/methods.

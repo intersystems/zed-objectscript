@@ -5,7 +5,7 @@ mod tests {
         advance_point, get_keyword_and_value, parse_line_ref, point_to_byte, position_to_point,
     };
     use objectscript_core::parse_structures::{
-        FileType, Language, MethodRef, RefactorLevel, VariableRef,
+        FileType, InheritanceDirection, Language, MethodRef, RefactorLevel, VariableRef,
     };
     use objectscript_core::refactor::refactor_conditionals_in_document;
     use objectscript_core::workspace::{ProjectData, ProjectState};
@@ -542,9 +542,9 @@ mod tests {
             };
             // eprintln!("CLASS: {:#?}", class);
 
-            assert_eq!(class.is_procedure_block, Some(false));
-            assert_eq!(class.default_language, Some(Language::Objectscript));
-            assert_eq!(class.inheritance_direction, Some("right".to_string()));
+            assert_eq!(class.is_procedure_block, false);
+            assert_eq!(class.default_language, Language::Objectscript);
+            assert_eq!(class.inheritance_direction, InheritanceDirection::Right);
             // get methods
             for (_, method_ref) in class.methods.clone() {
                 let method = gsm.methods.get(&method_ref).unwrap();
@@ -1476,7 +1476,7 @@ Method Test()
             .global_semantic_model
             .get_class(child_right_id)
             .expect("class should exist");
-        assert_eq!(class.inheritance_direction, Some("right".to_string()));
+        assert_eq!(class.inheritance_direction, InheritanceDirection::Right);
         assert!(
             !class.inherited_classes.is_empty(),
             "should have inherited classes"
