@@ -123,6 +123,14 @@
       (typename) @_mt))
   (external_method_body_content) @injection.content
   (#set! injection.include-children "true")
+  (#any-of? @_mt "text/x-python" "\"text/x-python\"" "application/python" "\"application/python\"")
+  (#set! injection.language "python"))
+
+(xdata
+  (xdata_keyword_mimetype
+    (typename) @_mt)
+  (external_method_body_content) @injection.content
+  (#set! injection.include-children "true")
   (#any-of? @_mt "text/xml" "\"text/xml\"" "application/xml" "\"application/xml\"")
   (#set! injection.language "xml"))
 
