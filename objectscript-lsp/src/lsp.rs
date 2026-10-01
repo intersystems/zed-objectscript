@@ -14,7 +14,6 @@ use objectscript_core::workspace::{ProjectData, ProjectState};
 use serde_json;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tower_lsp::LanguageServer;
 use tower_lsp::jsonrpc::Result;
@@ -561,10 +560,7 @@ impl LanguageServer for BackendWrapper {
 
         if let Ok(Some(folders)) = self.0.client.workspace_folders().await {
             for workspace in folders {
-                let backend = Arc::clone(&self.0);
-                tokio::spawn(async move {
-                    let _ = backend.index_workspace(&workspace.uri).await;
-                });
+                self.0.index_workspace(&workspace.uri).await;
             }
         }
 

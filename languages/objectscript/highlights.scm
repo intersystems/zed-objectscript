@@ -230,9 +230,9 @@
   (keyword_xecute)
   (keyword_view)
   (keyword_zremove)
+  (keyword_zsave)
   (command_keyword)
   (keyword_zload)
-  (keyword_zsave)
   (keyword_for)
   (keyword_while)
   (keyword_continue)
@@ -337,7 +337,7 @@
   (class_keyword)
   (query_keyword)
   (trigger_keyword)
-  (method_keyword_external_language)
+  (keyword_external_language)
   (relationship_keyword)
   (foreignkey_keyword)
   (parameter_keyword)
@@ -359,7 +359,6 @@
   (xdata_name)
   (storage_name)
   (xml_identifier)
-  (column_name)
 ] @variant
 
 [

@@ -1,16 +1,16 @@
-use objectscript_core::common::{get_member_name_and_range_from_root, ts_range_to_lsp_range};
-use objectscript_core::parse_structures::FileType;
-use objectscript_core::workspace::ProjectState;
+use crate::common::{IndexingIssue, PreparedFile, get_paths, prepare_document};
+use objectscript_core::common::ts_range_to_lsp_range;
+
+use objectscript_core::parse_structures::IndexParsers;
+use objectscript_core::workspace::{BulkIndexDocument, ProjectState};
 use parking_lot::RwLock;
+use rayon::iter::Either;
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Url};
-use tree_sitter::Parser;
-use tree_sitter_objectscript::LANGUAGE_OBJECTSCRIPT_UDL;
-use tree_sitter_objectscript_routine::LANGUAGE_OBJECTSCRIPT_ROUTINE;
-use walkdir::WalkDir;
-
+use tree_sitter::Range;
 /// Test harness that mirrors the real Backend for integration testing without a live LSP client.
 #[derive(Debug)]
 pub(crate) struct BackendTester {
@@ -35,6 +35,7 @@ impl BackendTester {
         self.projects.read().get(uri).cloned()
     }
 
+    #[cfg(test)]
     fn find_parent_workspace(&self, uri: Url) -> Option<Url> {
         let doc_path: PathBuf = uri.to_file_path().ok()?;
 
@@ -56,12 +57,14 @@ impl BackendTester {
     }
 
     /// Resolve the project that contains the given document URI.
+    #[cfg(test)]
     pub(crate) fn get_project_from_document_url(&self, uri: &Url) -> Option<Arc<ProjectState>> {
         let project_url = self.find_parent_workspace(uri.clone())?;
         self.get_project(&project_url)
     }
 
     /// Parse and index all ObjectScript files under the workspace containing `uri`.
+    #[cfg(test)]
     pub(crate) async fn index_workspace(&self, uri: &Url) {
         let Some(project) = self.get_project_from_document_url(&uri) else {
             return;
@@ -71,93 +74,55 @@ impl BackendTester {
             return;
         };
         let root = root.to_path_buf();
+        self.index_root_into_project(project, root).await;
+    }
+
+    /// Append all supported files under `root` to an existing project's index.
+    pub(crate) async fn index_workspace_root(&self, project_uri: &Url, root: PathBuf) {
+        let Some(project) = self.get_project(project_uri) else {
+            return;
+        };
+        self.index_root_into_project(project, root).await;
+    }
+
+    async fn index_root_into_project(&self, project: Arc<ProjectState>, root: PathBuf) {
+        let paths = get_paths(&root);
         // Run indexing on Tokio's blocking thread pool
         let handle = tokio::task::spawn_blocking(move || {
-            let mut cls_parser = Parser::new();
-            if cls_parser
-                .set_language(&LANGUAGE_OBJECTSCRIPT_UDL.into())
-                .is_err()
-            {
-                eprintln!("Failed to load ObjectScript UDL grammar");
-                return;
-            }
-
-            let mut routine_parser = Parser::new();
-            if routine_parser
-                .set_language(&LANGUAGE_OBJECTSCRIPT_ROUTINE.into())
-                .is_err()
-            {
-                eprintln!("Failed to load ObjectScript routine grammar");
-                return;
-            }
-            let mut documents_already_existing = Vec::new();
-            for entry in WalkDir::new(&root).into_iter().filter_map(|e| e.ok()) {
-                let path = entry.path();
-
-                let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
-                    continue;
-                };
-
-                let (filetype, use_routine) = match ext {
-                    "cls" => (FileType::Cls, false),
-                    "inc" => (FileType::Routine, true),
-                    "rtn" => (FileType::Routine, true),
-                    "mac" => (FileType::Routine, true),
-                    "int" => (FileType::Routine, true),
-                    _ => continue,
-                };
-
-                let code = match std::fs::read_to_string(path) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
-
-                let url = match Url::from_file_path(path) {
-                    Ok(u) => u,
-                    Err(_) => continue,
-                };
-
-                let tree = if use_routine {
-                    match routine_parser.parse(&code, None) {
-                        Some(t) => t,
-                        None => {
-                            eprintln!("Failed to parse file: {:?}", path);
-                            continue;
-                        }
+            eprintln!("[index] scanning {}", root.display());
+            let (prepared, issues): (Vec<(BulkIndexDocument, Range)>, Vec<IndexingIssue>) = paths
+                .into_par_iter()
+                .map_init(IndexParsers::new, |parsers, (path, file_type)| {
+                    prepare_document(path, file_type, parsers)
+                })
+                .partition_map(|outcome| match outcome {
+                    PreparedFile::Ready(document, class_name_range) => {
+                        Either::Left((document, class_name_range))
                     }
-                } else {
-                    match cls_parser.parse(&code, None) {
-                        Some(t) => t,
-                        None => {
-                            eprintln!("Failed to parse file: {:?}", path);
-                            continue;
-                        }
-                    }
-                };
-                let is_rtn = if filetype == FileType::Routine {
-                    true
-                } else {
-                    false
-                };
-
-                if let Some((member_range, member_name, class_name_def_range)) =
-                    get_member_name_and_range_from_root(code.as_str(), tree.root_node(), is_rtn)
-                {
-                    let mut data = project.data.write();
-                    let workspace_contains_class_name = data.classes.contains_key(&member_name);
-                    let already_exists = data.add_document_if_absent(
-                        url.clone(),
-                        code.clone(),
-                        &tree,
-                        filetype,
-                        member_name.clone(),
-                        member_range,
-                        None,
+                    PreparedFile::Failed(issue) => Either::Right(issue),
+                });
+            for issue in issues {
+                eprintln!("[index] skipped file: {issue}");
+            }
+            let mut duplicate_class_diagnostics = Vec::new();
+            let lock_started = std::time::Instant::now();
+            eprintln!("[index] waiting for project write lock");
+            let mut data = project.data.write();
+            eprintln!(
+                "[index] acquired project write lock in {:.3?}",
+                lock_started.elapsed()
+            );
+            {
+                let mut bulk = data.begin_bulk_index();
+                for (document, class_name_def_range) in prepared {
+                    let url = document.url.clone();
+                    let class_name = document.document.class_name.clone();
+                    let lsp_range = ts_range_to_lsp_range(
+                        document.document.content.as_str(),
+                        class_name_def_range,
                     );
-                    if already_exists {
-                        documents_already_existing.push(url);
-                    } else if !already_exists && workspace_contains_class_name {
-                        let lsp_range = ts_range_to_lsp_range(code.as_str(), class_name_def_range);
+                    let registration = bulk.register(document);
+                    if !registration.duplicate_document && registration.duplicate_class {
                         let diagnostic = Diagnostic {
                             range: lsp_range,
                             severity: Some(DiagnosticSeverity::ERROR),
@@ -166,20 +131,25 @@ impl BackendTester {
                             source: Some("ObjectScript".to_string()),
                             message: format!(
                                 "A Class named {:?} already exists in this workspace.",
-                                &member_name
+                                &class_name
                             ),
                             related_information: None,
                             tags: None,
                             data: None,
                         };
-                        data.other_class_diagnostics
-                            .entry(url.clone())
-                            .or_insert(Vec::new())
-                            .push(diagnostic);
+                        duplicate_class_diagnostics.push((url, diagnostic));
                     }
                 }
+                bulk.finalize();
+            }
+            for (url, diagnostic) in duplicate_class_diagnostics {
+                data.other_class_diagnostics
+                    .entry(url)
+                    .or_insert_with(Vec::new)
+                    .push(diagnostic);
             }
         });
+
         // Wait for completion (and handle join errors)
         if let Err(join_err) = handle.await {
             eprintln!("index_workspace_scope spawn_blocking failed: {join_err:?}");

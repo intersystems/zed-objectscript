@@ -5,7 +5,7 @@ mod tests {
         advance_point, get_keyword_and_value, parse_line_ref, point_to_byte, position_to_point,
     };
     use objectscript_core::parse_structures::{
-        FileType, Language, MethodRef, RefactorLevel, VariableRef,
+        FileType, InheritanceDirection, Language, MethodRef, RefactorLevel, VariableRef,
     };
     use objectscript_core::refactor::refactor_conditionals_in_document;
     use objectscript_core::workspace::{ProjectData, ProjectState};
@@ -100,6 +100,148 @@ mod tests {
         (backend, uri)
     }
 
+    #[tokio::test]
+    async fn test_is_final_creates_unresolved_inheritance() {
+        let test_root = env::current_dir().unwrap().join("objectscript-tests");
+        let workspace_root = test_root.join("new_scope_res_final");
+        let (backend, uri) = setup_backend_and_workspace(workspace_root.clone()).await;
+
+        let workspace = backend
+            .get_project(&uri)
+            .expect("missing project for new test version");
+
+        let project_data = workspace.data.read();
+        assert!(
+            project_data
+                .unresolved_inheritance_references
+                .contains_key("ScopeResolution")
+        )
+    }
+
+    #[tokio::test]
+    async fn test_append_customer_root_preserves_sys_class_boundary() {
+        let test_root = env::current_dir().unwrap().join("objectscript-tests");
+        let sys_root = test_root.join("diagnostics");
+        let customer_root = test_root.join("gotodef").join("relative-method-call");
+        let (backend, project_uri) = setup_backend_and_workspace(sys_root).await;
+        let project = backend
+            .get_project(&project_uri)
+            .expect("missing project state");
+
+        project.data.write().mark_current_classes_as_sys();
+        backend
+            .index_workspace_root(&project_uri, customer_root)
+            .await;
+
+        let data = project.data.read();
+        assert!(data.sys_classes.contains("clean"));
+        assert!(!data.sys_classes.contains("hk"));
+        assert!(data.classes.contains_key("hk"));
+        assert!(data.classes.contains_key("hksubclass"));
+    }
+
+    #[tokio::test]
+    async fn test_relationship_and_query_members_are_stored_semantically() {
+        let test_root = env::current_dir().unwrap().join("objectscript-tests");
+
+        let relationship_root = test_root.join("gotodef").join("relative-method-call");
+        let (relationship_backend, relationship_uri) =
+            setup_backend_and_workspace(relationship_root).await;
+        let relationship_project = relationship_backend
+            .get_project(&relationship_uri)
+            .expect("missing relationship project");
+        let relationship_data = relationship_project.data.read();
+        let hk_id = relationship_data.classes["hk"];
+        let hk = relationship_data
+            .global_semantic_model
+            .get_class(&hk_id)
+            .expect("hk should be indexed");
+        let relationship_ref = hk.relationships["manyProp"];
+        let relationship = relationship_data
+            .global_semantic_model
+            .get_relationship(&relationship_ref)
+            .expect("manyProp relationship should be stored");
+        assert_eq!(relationship.name, "manyProp");
+        assert_eq!(
+            relationship_data.relationship_defs["hk"]["manyProp"],
+            relationship_ref
+        );
+        drop(relationship_data);
+
+        let query_root = test_root.join("dependencies");
+        let (query_backend, query_uri) = setup_backend_and_workspace(query_root).await;
+        let query_project = query_backend
+            .get_project(&query_uri)
+            .expect("missing query project");
+        let query_data = query_project.data.read();
+        let class_id = query_data.classes["Demo.QueryExamples"];
+        let class = query_data
+            .global_semantic_model
+            .get_class(&class_id)
+            .expect("Demo.QueryExamples should be indexed");
+        let query_ref = class.queries["EmployeesByCity"];
+        let query = query_data
+            .global_semantic_model
+            .get_query(&query_ref)
+            .expect("EmployeesByCity query should be stored");
+        assert_eq!(query.name, "EmployeesByCity");
+        assert!(query.arguments.contains_key("pCity"));
+        assert_eq!(
+            query_data.query_defs["Demo.QueryExamples"]["EmployeesByCity"],
+            query_ref
+        );
+    }
+
+    #[test]
+    fn test_sys_dependencies_include_calls_and_superclasses() {
+        let project = ProjectState::new();
+        project
+            .project_root_path
+            .set(Some(env::current_dir().unwrap()))
+            .expect("project root should be unset");
+
+        let sys_sources = [
+            (
+                "sys-base.cls",
+                "Class Sys.Base { ClassMethod Base() { Quit } }",
+            ),
+            (
+                "sys-leaf.cls",
+                "Class Sys.Leaf { ClassMethod Leaf() { Quit } }",
+            ),
+            (
+                "sys-middle.cls",
+                "Class Sys.Middle Extends Sys.Base { ClassMethod Mid() { Do ##class(Sys.Leaf).Leaf() } }",
+            ),
+        ];
+        for (version, (file_name, content)) in sys_sources.into_iter().enumerate() {
+            project.handle_document_opened(
+                Url::from_file_path(env::current_dir().unwrap().join(file_name))
+                    .expect("valid SYS file URL"),
+                content.to_string(),
+                FileType::Cls,
+                version as i32,
+            );
+        }
+        project.data.write().mark_current_classes_as_sys();
+
+        project.handle_document_opened(
+            Url::from_file_path(env::current_dir().unwrap().join("customer-app.cls"))
+                .expect("valid customer file URL"),
+            "Class Customer.App Extends Sys.Middle { ClassMethod Run() { Do ##class(Sys.Middle).Mid() } }"
+                .to_string(),
+            FileType::Cls,
+            4,
+        );
+
+        let (direct, transitive) = project.data.read().get_sys_dependencies();
+        assert_eq!(direct, HashSet::from(["Sys.Middle".to_string()]));
+        assert_eq!(
+            transitive,
+            HashSet::from(["Sys.Base".to_string(), "Sys.Leaf".to_string()])
+        );
+    }
+
     fn point_for_substring_n(content: &str, needle: &str, occurrence: usize) -> Point {
         assert!(occurrence > 0, "occurrence must be >= 1");
         let mut start = 0usize;
@@ -173,17 +315,17 @@ mod tests {
     #[test]
     fn test_get_keyword_and_value() {
         let (not, keyword, values) = get_keyword_and_value("ClientDataType = longvarchar");
-        let value = values.get(0).copied();
+        let value = values.first().map(String::as_str);
         assert!(!not);
         assert_eq!(keyword, "clientdatatype");
         assert_eq!(value, Some("longvarchar"));
         let (not, keyword, values) = get_keyword_and_value("ClientDataType=longvarchar");
-        let value = values.get(0).copied();
+        let value = values.first().map(String::as_str);
         assert!(!not);
         assert_eq!(keyword, "clientdatatype");
         assert_eq!(value, Some("longvarchar"));
         let (not, keyword, values) = get_keyword_and_value("ProcedureBlock = 1");
-        let value = values.get(0).copied();
+        let value = values.first().map(String::as_str);
         assert!(!not);
         assert_eq!(keyword, "procedureblock");
         assert_eq!(value, Some("1"));
@@ -232,13 +374,19 @@ mod tests {
         let (backend, uri) = setup_backend_and_workspace(project_root).await;
         let project_state = backend.get_project(&uri).unwrap();
         let project_data = project_state.data.read();
-
+        // println!("PROJECT DATA {:#?}", project_data);
         let superclass_id = project_data.classes.get("hk").unwrap();
         let superclass = project_data
             .global_semantic_model
             .get_class(superclass_id)
             .unwrap();
         let superclass_method_ref = superclass.get_method_ref("print2").unwrap();
+        // println!("OVERRIDE: {:#?}", project_data.override_index);
+        let id = project_data.classes.get("hksubclass").unwrap();
+        println!(
+            "HKSUBCLASS {:#?}",
+            project_data.global_semantic_model.get_class(id)
+        );
         let methods = project_data
             .override_index
             .effective_methods
@@ -318,8 +466,8 @@ mod tests {
             }
         }
         assert_eq!(superclass_count, 2);
-        assert_eq!(subclassone_count, 1);
-        assert_eq!(subclasstwo_count, 1);
+        assert_eq!(subclassone_count, 0);
+        assert_eq!(subclasstwo_count, 0);
         let before_y = before_public_variables
             .get("y")
             .expect("missing public variable y");
@@ -395,8 +543,8 @@ mod tests {
             }
         }
         assert_eq!(superclass_count, 2);
-        assert_eq!(subclassone_count, 1);
-        assert_eq!(subclasstwo_count, 1);
+        assert_eq!(subclassone_count, 0);
+        assert_eq!(subclasstwo_count, 0);
         let after_y = after_public_variables
             .get("y")
             .expect("missing public variable y after update");
@@ -434,7 +582,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_class_keyword_inheritance() {
+    async fn test_class_keywords() {
         // KEYWORDS: language = objectscript, inheritance = right, Not ProcedureBlock
         let project_root = env::current_dir()
             .unwrap()
@@ -452,9 +600,9 @@ mod tests {
             };
             // eprintln!("CLASS: {:#?}", class);
 
-            assert_eq!(class.is_procedure_block, Some(false));
-            assert_eq!(class.default_language, Some(Language::Objectscript));
-            assert_eq!(class.inheritance_direction, Some("right".to_string()));
+            assert_eq!(class.is_procedure_block, false);
+            assert_eq!(class.default_language, Language::Objectscript);
+            assert_eq!(class.inheritance_direction, InheritanceDirection::Right);
             // get methods
             for (_, method_ref) in class.methods.clone() {
                 let method = gsm.methods.get(&method_ref).unwrap();
@@ -483,6 +631,114 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_udl_query_captures_each_inherited_class_once() {
+        let project = ProjectState::new();
+        project.handle_document_opened(
+            Url::parse("file:///workspace/Demo.Child.cls").unwrap(),
+            r#"
+Class Demo.Child Extends Demo.Parent
+{
+    Parameter Value = 1;
+    Property Name As %String;
+    ClassMethod Run() { Quit }
+}
+"#
+            .to_string(),
+            FileType::Cls,
+            1,
+        );
+
+        let data = project.data.read();
+        let class_id = data.classes["Demo.Child"];
+        let class = data
+            .global_semantic_model
+            .get_class(&class_id)
+            .expect("Demo.Child should be indexed");
+        assert_eq!(
+            class
+                .inherited_classes
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Demo.Parent"]
+        );
+    }
+
+    #[test]
+    fn test_combined_udl_method_query_collects_all_facts() {
+        let project = ProjectState::new();
+        project.handle_document_opened(
+            Url::parse("file:///workspace/Demo.Combined.cls").unwrap(),
+            r#"
+Class Demo.Combined
+{
+    ClassMethod Target() { Quit }
+
+    ClassMethod Analyze(untyped, typed As %String) As %Integer
+        [ Private, ProcedureBlock = 1, PublicList = (shared) ]
+    {
+        Set local = 1, shared = 2
+        Do ..Target()
+        Quit local
+    }
+}
+"#
+            .to_string(),
+            FileType::Cls,
+            1,
+        );
+
+        let data = project.data.read();
+        let snapshot = objectscript_core::workspace_diff::snapshot_class(&data, "Demo.Combined")
+            .expect("Demo.Combined should have a semantic snapshot");
+        let analyze = snapshot
+            .methods
+            .get("Analyze")
+            .expect("Analyze should be indexed");
+        assert!(!analyze.is_public);
+        assert_eq!(analyze.procedure_block, Some(true));
+        assert!(analyze.return_type.is_some());
+        assert!(
+            analyze
+                .public_variables_declared
+                .contains(&"shared".to_string())
+        );
+        assert!(
+            analyze
+                .arguments
+                .get("untyped")
+                .is_some_and(|argument| argument.return_type.is_none())
+        );
+        assert!(
+            analyze
+                .arguments
+                .get("typed")
+                .is_some_and(|argument| argument.return_type.is_some())
+        );
+        assert!(
+            analyze
+                .variables
+                .iter()
+                .any(|variable| variable.name == "local" && !variable.is_public)
+        );
+        assert!(
+            analyze
+                .variables
+                .iter()
+                .any(|variable| variable.name == "shared" && variable.is_public)
+        );
+
+        let class_id = data.classes["Demo.Combined"];
+        let class = data
+            .global_semantic_model
+            .get_class(&class_id)
+            .expect("Demo.Combined class should exist");
+        let analyze_ref = class.methods["Analyze"];
+        let target_ref = class.methods["Target"];
+        assert!(data.dependency_graph.is_ancestor(analyze_ref, target_ref));
     }
 
     #[tokio::test]
@@ -567,11 +823,13 @@ mod tests {
         assert!(dependent_names.contains("SubClassOne"));
         assert!(dependent_names.contains("SubClassTwo"));
 
-        // In multiplePubVarDefs, x is not in current scope, so workspace-wide public definitions are returned.
+        // In multiplePubVarDefs, x is not in current scope, so public definitions
+        // on reachable methods are returned. ProcedureBlock is not inherited, so
+        // the subclass definitions remain private.
         let x_use_point = point_for_substring_n(content, "w x", 2);
         let x_locations =
             project_data.get_variable_definition(&document_url, x_use_point, "x".to_string());
-        assert_eq!(x_locations.len(), 2);
+        assert_eq!(x_locations.len(), 1);
         let paths: HashSet<String> = x_locations
             .into_iter()
             .map(|(url, _)| url.path().to_string())
@@ -581,7 +839,7 @@ mod tests {
                 .iter()
                 .any(|p| p.ends_with("testing-variable-building.cls"))
         );
-        assert!(paths.iter().any(|p| p.ends_with("subclass.cls")));
+        assert!(!paths.iter().any(|p| p.ends_with("subclass.cls")));
     }
 
     #[tokio::test]
@@ -590,8 +848,16 @@ mod tests {
             .unwrap()
             .join("objectscript-tests")
             .join("nested_dots");
-        let actual_result_path = test_route.join("test-nested-refactor-actual.mac");
-        let expected_result_path = test_route.join("test-nested-refactor-expected.mac");
+        let actual = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("refactor-actual");
+        let expected = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("refactor-expected");
+        let actual_result_path = actual.join("test-nested-refactor-actual.mac");
+        let expected_result_path = expected.join("test-nested-refactor-expected.mac");
         let test_mac_path = test_route.join("test-nested-refactor.mac");
         let test_mac_url = Url::from_file_path(&test_mac_path).unwrap();
         let (backend, uri) = setup_backend_and_workspace(test_route).await;
@@ -613,8 +879,16 @@ mod tests {
             .unwrap()
             .join("objectscript-tests")
             .join("dotted-block");
-        let actual_result_path = test_route.join("test-dotted-block-actual.mac");
-        let expected_result_path = test_route.join("test-dotted-block-expected.mac");
+        let actual = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("refactor-actual");
+        let expected = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("refactor-expected");
+        let actual_result_path = actual.join("test-dotted-block-actual.mac");
+        let expected_result_path = expected.join("test-dotted-block-expected.mac");
         let _ = std::fs::remove_file(&actual_result_path);
         let test_mac_path = test_route.join("test-dotted-block.mac");
         let test_mac_url = Url::from_file_path(&test_mac_path).unwrap();
@@ -637,8 +911,16 @@ mod tests {
             .unwrap()
             .join("objectscript-tests")
             .join("local");
-        let actual_result_path = routines_root.join("test-large-dotted-statements-actual.mac");
-        let expected_result_path = routines_root.join("test-large-dotted-statements-expected.mac");
+        let actual = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("refactor-actual");
+        let expected = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("refactor-expected");
+        let actual_result_path = actual.join("test-large-dotted-statements-actual.mac");
+        let expected_result_path = expected.join("test-large-dotted-statements-expected.mac");
         let _ = std::fs::remove_file(&actual_result_path);
         let test_mac_path = routines_root.join("test-large-dotted-statements.mac");
         let test_mac_url = Url::from_file_path(&test_mac_path).unwrap();
@@ -661,7 +943,16 @@ mod tests {
             .unwrap()
             .join("objectscript-tests")
             .join("routines");
-        let actual_result_path = routines_root.join("test-refactor-do-actual.mac");
+        let actual = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("refactor-actual");
+        let expected = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("refactor-expected");
+        let actual_result_path = actual.join("test-refactor-do-actual.mac");
+        let expected_result_path = expected.join("test-refactor-do-expected.mac");
         let _ = std::fs::remove_file(&actual_result_path);
 
         let test_mac_path = routines_root.join("test-refactor-do.mac");
@@ -676,9 +967,7 @@ mod tests {
             .expect("missing planned refactor for test-refactor-do.mac");
         let tree = parse_routine(refactored.as_str());
         std::fs::write(&actual_result_path, &refactored).unwrap();
-        let contents =
-            std::fs::read_to_string("objectscript-tests/routines/test-refactor-do-expected.mac")
-                .unwrap();
+        let contents = std::fs::read_to_string(expected_result_path).unwrap();
         let expected_tree = parse_routine(contents.as_str());
         assert_eq!(
             tree.root_node().to_sexp(),
@@ -1119,7 +1408,6 @@ Method Test()
         let (backend, uri) = setup_backend_and_workspace(project_root.clone()).await;
         let project_state = backend.get_project(&uri).expect("missing project state");
         let project_data = project_state.data.read();
-
         let method_ref = project_data
             .method_defs
             .get("Demo.Utility")
@@ -1353,7 +1641,7 @@ Method Test()
             .global_semantic_model
             .get_class(child_right_id)
             .expect("class should exist");
-        assert_eq!(class.inheritance_direction, Some("right".to_string()));
+        assert_eq!(class.inheritance_direction, InheritanceDirection::Right);
         assert!(
             !class.inherited_classes.is_empty(),
             "should have inherited classes"
@@ -2046,7 +2334,11 @@ dottedComment
 
     #[tokio::test]
     async fn test_routine_variable_definition_keeps_distinct_call_paths() {
-        let project_root = env::current_dir().unwrap().join("routines");
+        let project_root = env::current_dir()
+            .unwrap()
+            .join("objectscript-tests")
+            .join("gotodef")
+            .join("routines");
         let (backend, uri) = setup_backend_and_workspace(project_root.clone()).await;
         let project_state = backend.get_project(&uri).expect("missing project state");
         let project_data = project_state.data.read();
@@ -2087,9 +2379,10 @@ dottedComment
             "x in tagcalls.helper should resolve to the nearest definition on each call path"
         );
         assert!(resolved_lines.contains(&("tag-calls.mac".to_string(), "set x = 1".to_string())));
-        assert!(
-            resolved_lines.contains(&("offset-goto.mac".to_string(), "set x = 72".to_string()))
-        );
+        assert!(resolved_lines.contains(&(
+            "cross-routine-ref.mac".to_string(),
+            "set x  = 1".to_string()
+        )));
     }
 
     // =========================================================================

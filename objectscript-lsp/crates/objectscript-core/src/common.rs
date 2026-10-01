@@ -1,4 +1,7 @@
-use crate::parse_structures::{ClassId, MemberType, MethodType, ReturnType};
+use crate::parse_structures::{
+    Argument, Cardinality, CodeMode, ForeignKeyAction, IndexType, Language, MemberType, MethodType,
+    ReturnType, TrackedKeywords, TriggerFire, TriggerForEach, TypeName,
+};
 use crate::refactor::count_leading_dots_in_line;
 use crate::scope_structures::ScopeId;
 use crate::scope_tree::ScopeTree;
@@ -68,6 +71,336 @@ fn xml_objectscript_injections_query() -> &'static Query {
         XML_OBJECTSCRIPT_INJECTIONS_QUERY,
         "XML ObjectScript injections",
     )
+}
+
+pub fn get_tracked_keywords(keywords_node: Node, content: &str) -> TrackedKeywords {
+    let mut is_final = None;
+    let mut is_public = true;
+    let mut is_required = false;
+    let mut multidimensional = false;
+    let mut on_update = ForeignKeyAction::NoAction;
+    let mut on_delete = ForeignKeyAction::NoAction;
+    let mut inverse = None;
+    let mut cardinality = None;
+    let mut requires = Vec::new();
+    let mut index_type = IndexType::Index;
+    let mut trigger_insert = false;
+    let mut trigger_update = false;
+    let mut trigger_delete = false;
+    let mut trigger_time = TriggerFire::BEFORE;
+    let mut trigger_for_each = TriggerForEach::Row;
+    let mut language = None;
+    let mut code_mode = CodeMode::Code;
+    let mut procedure_block = None;
+    let mut public_variables_declared = HashSet::new();
+    fn collect_keyword_leaves<'tree>(node: Node<'tree>, leaves: &mut Vec<Node<'tree>>) {
+        let keyword_children: Vec<_> = get_node_children(node)
+            .into_iter()
+            .filter(|child| child.kind().contains("keyword"))
+            .collect();
+        if keyword_children.is_empty() {
+            leaves.push(node);
+        } else {
+            for child in keyword_children {
+                collect_keyword_leaves(child, leaves);
+            }
+        }
+    }
+
+    let mut keyword_children = Vec::new();
+    for child in get_node_children(keywords_node) {
+        if child.kind().contains("keyword") {
+            collect_keyword_leaves(child, &mut keyword_children);
+        }
+    }
+    for keyword in keyword_children {
+        if let Some(keyword_str) = get_string_at_byte_range(content, keyword.byte_range()) {
+            let (not, keyword_name, keyword_value) = get_keyword_and_value(keyword_str.as_str());
+            if keyword_name == "final" {
+                if not {
+                    is_final = Some(false);
+                } else {
+                    is_final = Some(true);
+                }
+            }
+            if keyword_name == "notinheritable" {
+                is_final = Some(true);
+            } else if keyword_name == "inverse" {
+                let Some(inverse_value) = keyword_value.first().map(String::as_str) else {
+                    eprintln!("Error: inverse keyword should have a value");
+                    continue;
+                };
+                inverse = Some(inverse_value.to_string());
+            } else if keyword_name == "cardinality" {
+                let Some(cardinality_value) = keyword_value.first().map(String::as_str) else {
+                    eprintln!("Error: cardinality keyword should have a value");
+                    continue;
+                };
+                cardinality = match cardinality_value {
+                    "one" => Some(Cardinality::One),
+                    "many" => Some(Cardinality::Many),
+                    "children" => Some(Cardinality::Children),
+                    "parent" => Some(Cardinality::Parent),
+                    _ => None,
+                };
+            } else if keyword_name == "private" {
+                if not {
+                    is_public = true;
+                } else {
+                    is_public = false;
+                }
+            } else if keyword_name == "required" {
+                if not {
+                    is_required = true;
+                } else {
+                    is_required = false;
+                }
+            } else if keyword_name == "multidimensional" {
+                if not {
+                    multidimensional = true;
+                } else {
+                    multidimensional = false;
+                }
+            } else if keyword_name == "ondelete" {
+                let Some(foreignkeyaction) = keyword_value.first().map(String::as_str) else {
+                    eprintln!("Error: cardinality keyword should have a value");
+                    continue;
+                };
+                on_delete = match foreignkeyaction {
+                    "setdefault" => ForeignKeyAction::SetDefault,
+                    "noaction" => ForeignKeyAction::NoAction,
+                    "setnull" => ForeignKeyAction::SetNull,
+                    "cascade" => ForeignKeyAction::Cascade,
+                    _ => continue,
+                };
+            } else if keyword_name == "onupdate" {
+                let Some(foreignkeyaction) = keyword_value.first().map(String::as_str) else {
+                    eprintln!("Error: cardinality keyword should have a value");
+                    continue;
+                };
+                on_update = match foreignkeyaction.to_lowercase().as_str() {
+                    "setdefault" => ForeignKeyAction::SetDefault,
+                    "noaction" => ForeignKeyAction::NoAction,
+                    "setnull" => ForeignKeyAction::SetNull,
+                    "cascade" => ForeignKeyAction::Cascade,
+                    _ => continue,
+                };
+            } else if keyword_name == "requires" {
+                for val in keyword_value {
+                    requires.push(val.to_string());
+                }
+            } else if keyword_name == "type" {
+                let Some(index_type_str) = keyword_value.first().map(String::as_str) else {
+                    eprintln!("Error: index type keyword should have a value");
+                    continue;
+                };
+                index_type = match index_type_str {
+                    "bitmap" => IndexType::Bitmap,
+                    "bitslice" => IndexType::Bitslice,
+                    "collatedkey" => IndexType::CollatedKey,
+                    "columnar" => IndexType::Columnar,
+                    "key" => IndexType::Key,
+                    _ => continue,
+                };
+            } else if keyword_name == "language" {
+                let Some(language_type_str) = keyword_value.first().map(String::as_str) else {
+                    eprintln!("Error: language type keyword should have a value");
+                    continue;
+                };
+                language = match language_type_str.to_lowercase().as_str() {
+                    "basic" => Some(Language::Basic),
+                    "javascript" => Some(Language::JavaScript),
+                    "ispl" => Some(Language::ISpl),
+                    "tsql" => Some(Language::TSql),
+                    "python" => Some(Language::Python),
+                    "objectscript" => Some(Language::Objectscript),
+                    _ => continue,
+                };
+            } else if keyword_name == "codemode" {
+                let Some(codemode_type_str) = keyword_value.first().map(String::as_str) else {
+                    eprintln!("Error: language type keyword should have a value");
+                    continue;
+                };
+                code_mode = match codemode_type_str {
+                    "call" => CodeMode::Call,
+                    "expression" => CodeMode::Expression,
+                    "objectgenerator" | "generator" => CodeMode::ObjectGenerator,
+                    _ => continue,
+                };
+            } else if keyword_name == "procedureblock" {
+                if let Some(value) = keyword_value.first().map(String::as_str) {
+                    if value == "1" {
+                        procedure_block = Some(true);
+                    } else if value == "0" {
+                        procedure_block = Some(false);
+                    }
+                } else {
+                    procedure_block = Some(true);
+                }
+            } else if keyword_name == "publiclist" {
+                for variable in keyword_value {
+                    public_variables_declared.insert(variable.to_string());
+                }
+            } else if keyword_name == "event" {
+                let Some(event_str) = keyword_value.first().map(String::as_str) else {
+                    eprintln!("Error: index event keyword should have a value");
+                    continue;
+                };
+                (trigger_insert, trigger_update, trigger_delete) = match event_str {
+                    "delete" => (false, false, true),
+                    "insert" => (true, false, false),
+                    "update" => (false, true, false),
+                    "insert/update" => (true, true, false),
+                    "insert/delete" => (true, false, true),
+                    "insert/update/delete" => (true, true, true),
+                    _ => {
+                        eprintln!(
+                            "Error: failed to parse trigger event keyword {:?}",
+                            event_str
+                        );
+                        continue;
+                    }
+                };
+            } else if keyword_name == "time" {
+                let Some(time_str) = keyword_value.first().map(String::as_str) else {
+                    eprintln!("Error: index time keyword should have a value");
+                    continue;
+                };
+                trigger_time = match time_str {
+                    "after" => TriggerFire::AFTER,
+                    _ => {
+                        continue;
+                    }
+                };
+            } else if keyword_name == "foreach" {
+                let Some(foreach_str) = keyword_value.first().map(String::as_str) else {
+                    eprintln!("Error: index foreach keyword should have a value");
+                    continue;
+                };
+                trigger_for_each = match foreach_str {
+                    "row/object" => TriggerForEach::RowObject,
+                    "statement" => TriggerForEach::Statement,
+                    _ => {
+                        continue;
+                    }
+                };
+            } else if keyword_name == "mimetype" {
+                let Some(mimetype_str) = keyword_value.first().map(String::as_str) else {
+                    eprintln!("Error: mimetype keyword should have a value");
+                    continue;
+                };
+                language = match mimetype_str {
+                    "text/x-python"
+                    | "\"text/x-python\""
+                    | "application/python"
+                    | "\"application/python\"" => Some(Language::Python),
+                    "text/html" | "\"text/html\"" => Some(Language::Html),
+                    "text/markdown" | "\"text/markdown\"" => Some(Language::Markdown),
+                    "text/css" | "\"text/css\"" => Some(Language::Css),
+                    "application/sql" => Some(Language::Sql),
+                    "text/yaml" | "\"text/yaml\"" | "application/yaml" | "\"application/yaml\"" => {
+                        Some(Language::Yaml)
+                    }
+                    "application/json" | "\"application/json\"" => Some(Language::Json),
+                    _ => {
+                        continue;
+                    }
+                };
+            }
+        }
+    }
+    TrackedKeywords {
+        is_final,
+        is_public,
+        is_required,
+        multidimensional,
+        inverse,
+        cardinality,
+        on_delete,
+        on_update,
+        requires,
+        index_type,
+        trigger_insert,
+        trigger_delete,
+        trigger_update,
+        trigger_time,
+        trigger_for_each,
+        language,
+        code_mode,
+        procedure_block,
+        public_variables_declared,
+    }
+}
+
+pub fn build_argument(argument_node: Node, content: &str) -> Option<(Argument, Range)> {
+    let mut argument = Argument::default();
+    let mut argument_range = argument_node.range();
+    let argument_children = get_node_children(argument_node);
+    for argument_child in argument_children {
+        match argument_child.kind() {
+            "keyword_byref" => {
+                argument.byref = true;
+            }
+            "keyword_output" => {
+                argument.output = true;
+            }
+            "method_arg" => {
+                if let Some(method_arg_type) = argument_child.named_child(0) {
+                    if let Some(variable_name_node) = method_arg_type.named_child(0)
+                        && let Some(var_name) =
+                            get_string_at_byte_range(content, variable_name_node.byte_range())
+                    {
+                        argument.name = var_name;
+                        argument_range = variable_name_node.range();
+                    };
+                } else {
+                    eprintln!(
+                        "Error: Method arg node should have named children. This node didn't {:?}",
+                        argument_child.kind()
+                    );
+                    return None;
+                }
+            }
+            "return_type" => {
+                argument.return_type = parse_return_type(argument_child, content);
+            }
+            "default_argument_value" => {
+                if let Some(value) = argument_child.named_child(0) {
+                    argument.default_value = get_string_at_byte_range(content, value.byte_range());
+                }
+            }
+            _ => {
+                eprintln!(
+                    "Error: Unexpected child node of type {:?} in argument node",
+                    argument_child.kind(),
+                );
+                continue;
+            }
+        }
+    }
+    Some((argument, argument_range))
+}
+
+pub fn parse_return_type(return_type: Node, content: &str) -> Option<TypeName> {
+    fn collect_identifiers(node: Node, content: &str, identifiers: &mut Vec<String>) {
+        if node.kind() == "identifier" {
+            if let Some(identifier) = get_string_at_byte_range(content, node.byte_range()) {
+                identifiers.push(identifier);
+            }
+            return;
+        }
+        for child in get_node_children(node) {
+            collect_identifiers(child, content, identifiers);
+        }
+    }
+
+    let mut identifiers = Vec::new();
+    collect_identifiers(return_type, content, &mut identifiers);
+    let return_type_name = identifiers.first()?.clone();
+    Some(TypeName {
+        ret_type: find_return_type(return_type_name),
+        parameters: identifiers.into_iter().skip(1).collect(),
+    })
 }
 
 /// Logs override resolution results for a method/superclass pair for debugging.
@@ -582,14 +915,15 @@ pub fn find_var_dependencies(
 
 /// Given a *_keyword string, returns:
 /// bool: true if not is before the keyword
-/// String: the keyword name
-/// Option<String>: the value of the keyword (if one exists)
-pub fn get_keyword_and_value(keyword: &str) -> (bool, String, Vec<&str>) {
+/// String: the lowercased keyword name
+/// Vec<String>: the lowercased values of the keyword (empty if none)
+pub fn get_keyword_and_value(keyword: &str) -> (bool, String, Vec<String>) {
     let mut not = false;
     let mut keyword_name = "".to_string();
-    let mut keyword_value: Vec<&str> = Vec::new();
+    let mut keyword_value: Vec<String> = Vec::new();
     // splits string by spaces or equal sign
-    let regex = Regex::new(r"[^\s=,()]+").unwrap();
+    static KEYWORD_PART: OnceLock<Regex> = OnceLock::new();
+    let regex = KEYWORD_PART.get_or_init(|| Regex::new(r"[^\s=,()]+").unwrap());
     let mut count = 0;
     let values: Vec<&str> = regex.find_iter(keyword).map(|m| m.as_str()).collect();
     for value in values {
@@ -598,9 +932,9 @@ pub fn get_keyword_and_value(keyword: &str) -> (bool, String, Vec<&str>) {
         if normalized_str == "not" {
             not = true;
         } else if count > 1 && !not {
-            keyword_value.push(value);
+            keyword_value.push(normalized_str);
         } else {
-            keyword_name = normalized_str.to_string();
+            keyword_name = normalized_str;
         }
     }
     (not, keyword_name, keyword_value)
@@ -610,13 +944,8 @@ pub fn get_keyword_and_value(keyword: &str) -> (bool, String, Vec<&str>) {
 ///
 /// Creates a new `ScopeTree` rooted at `class_symbol_id`, then walks the syntax tree and adds
 /// scopes for nodes considered "scope nodes" (see `cls_is_scope_node`).
-pub fn initial_build_scope_tree(
-    tree: &Tree,
-    class_symbol_id: ClassId,
-    content: &str,
-    is_rtn: bool,
-) -> ScopeTree {
-    let mut scope_tree = ScopeTree::new(Some(class_symbol_id));
+pub fn initial_build_scope_tree(tree: &Tree, content: &str, is_rtn: bool) -> ScopeTree {
+    let mut scope_tree = ScopeTree::new();
     let mut scope_stack = vec![scope_tree.root];
 
     let root = tree.root_node();
@@ -852,23 +1181,6 @@ pub fn get_routine_method_range(node: &Node, end_point: Point, end_byte: usize) 
     return Some(routine_range);
 }
 
-/// Given a property node, get the name
-pub fn get_property_name(node: &Node, content: &str) -> Option<String> {
-    let Some(property_name_node_outer) = node.named_child(1) else {
-        eprintln!(
-            "Error: expected property node {:?} to have child at node 1",
-            node.kind()
-        );
-        return None;
-    };
-    let Some(property_name_node) = property_name_node_outer.named_child(0) else {
-        eprintln!("Error: expected property name node to have child at node 0");
-        return None;
-    };
-
-    get_string_at_byte_range(content, property_name_node.byte_range())
-}
-
 /// Given a parameter node, get the name
 pub fn get_parameter_name(node: &Node, content: &str) -> Option<String> {
     let Some(parameter_name_node_outer) = node.named_child(1) else {
@@ -938,9 +1250,7 @@ pub fn get_subroutine_info(
         statement_type.named_child((statement_type.named_child_count() - 1) as u32)
     {
         match tag_keyword.kind() {
-            "keyword_methodimpl" => {
-                eprintln!("TODO: Verify if there is anything to be done for methodimpl keyword");
-            }
+            "keyword_methodimpl" => {}
             "keyword_private" => {
                 is_public = false;
             }
@@ -996,10 +1306,6 @@ pub fn rtn_is_scope_node(node: Node, content: &str) -> (bool, Option<String>, bo
                 let mut sib = node.parent().and_then(|p| p.prev_named_sibling());
                 while let Some(sibling) = sib {
                     let Some(command) = sibling.named_child(0) else {
-                        eprintln!(
-                            "Sibling node {:?} for tag statement {:?} did not have a child at index 0, skipping (rtn_is_scope_node)",
-                            sibling, node
-                        );
                         sib = sibling.prev_named_sibling();
                         continue;
                     };
@@ -1012,10 +1318,6 @@ pub fn rtn_is_scope_node(node: Node, content: &str) -> (bool, Option<String>, bo
                                 return (true, None, true);
                             }
                             let Some(command) = last_sib.named_child(0) else {
-                                eprintln!(
-                                    "Sibling node {:?} for tag statement {:?} did not have a child at index 0, skipping (rtn_is_scope_node)",
-                                    last_sib, node
-                                );
                                 sib = last_sib.prev_named_sibling();
                                 continue;
                             };
@@ -1087,10 +1389,6 @@ pub fn rtn_is_scope_node(node: Node, content: &str) -> (bool, Option<String>, bo
                             let mut curr_sib = parent.prev_named_sibling();
                             while let Some(sibling) = curr_sib {
                                 let Some(command) = sibling.named_child(0) else {
-                                    eprintln!(
-                                        "Sibling node {:?} did not have a child at index 0, skipping (rtn_is_scope_node)",
-                                        sibling.kind()
-                                    );
                                     curr_sib = sibling.prev_named_sibling();
                                     continue;
                                 };
@@ -1164,6 +1462,9 @@ pub fn get_routine_scope_node_range(node: Node, content: &str) -> (Point, Point)
                     }
                     dotted_statement_scope_end_point = sib.end_position();
                     next_sibling = sib.next_named_sibling();
+                } else {
+                    // non-dotted sibling, so scope ends here.
+                    break;
                 }
             }
             return (

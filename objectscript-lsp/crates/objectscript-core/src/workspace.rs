@@ -9,8 +9,11 @@ use crate::global_semantic::GlobalSemanticModel;
 use crate::local_semantic::LocalSemanticModel;
 use crate::override_index::OverrideIndex;
 use crate::parse_structures::{
-    Class, ClassId, FileType, MethodRef, MethodType, ParameterRef, PropertyRef, RefactorLevel,
-    UnresolvedMethodRef, VariableRef,
+    Class, ClassId, FileType, ForeignKey, ForeignKeyRef, Index, IndexRef, InheritanceDirection,
+    Method, MethodRef, MethodType, Parameter, ParameterRef, Projection, ProjectionRef, Property,
+    PropertyRef, Query, QueryRef, RefactorLevel, Relationship, RelationshipRef, Storage,
+    StorageRef, Trigger, TriggerRef, UnresolvedMethodRef, Variable, VariableDefType, VariableRef,
+    XData, XdataRef,
 };
 use crate::refactor::{
     refactor_conditionals_in_document, refactor_for_statements, refactor_legacy_do_statements,
@@ -19,6 +22,7 @@ use crate::scope_structures::ScopeId;
 use crate::scope_tree::ScopeTree;
 use parking_lot::{Mutex, RwLock};
 use petgraph::visit::EdgeRef;
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::path::PathBuf;
@@ -122,6 +126,14 @@ pub struct ProjectData {
     pub property_defs: HashMap<String, HashMap<String, PropertyRef>>,
     /// Maps Class Name -> another hashmap which maps Parameter Name -> ParameterRef for all Parameters Accessible from the class.
     pub parameter_defs: HashMap<String, HashMap<String, ParameterRef>>,
+    pub relationship_defs: HashMap<String, HashMap<String, RelationshipRef>>,
+    pub foreignkey_defs: HashMap<String, HashMap<String, ForeignKeyRef>>,
+    pub query_defs: HashMap<String, HashMap<String, QueryRef>>,
+    pub index_defs: HashMap<String, HashMap<String, IndexRef>>,
+    pub trigger_defs: HashMap<String, HashMap<String, TriggerRef>>,
+    pub xdata_defs: HashMap<String, HashMap<String, XdataRef>>,
+    pub projection_defs: HashMap<String, HashMap<String, ProjectionRef>>,
+    pub storage_defs: HashMap<String, HashMap<String, StorageRef>>,
     /// Maps Var Name -> another hashmap which maps MethodRef -> HashMap of ScopeId -> Vec<VariableRef> for that variable.
     pub pub_var_defs: HashMap<String, HashMap<MethodRef, HashMap<ScopeId, Vec<VariableRef>>>>,
     /// Holds the OverrideIndex for the workspace.
@@ -137,6 +149,573 @@ pub struct ProjectData {
     pub inheritance_diagonstics: HashMap<String, HashMap<Url, Diagnostic>>,
     pub method_reference_diagnostics: HashMap<(String, String), HashMap<Url, Diagnostic>>,
     pub other_class_diagnostics: HashMap<Url, Vec<Diagnostic>>,
+    /// Names of classes loaded from the system-class workspace.
+    pub sys_classes: HashSet<String>,
+    /// System classes replaced by a class from the user workspace.
+    pub sys_classes_overwritten: HashSet<String>,
+}
+
+/// A parsed document waiting to be committed as part of a workspace index.
+#[derive(Debug)]
+pub struct BulkIndexDocument {
+    pub url: Url,
+    pub class_range: Range,
+    pub document: Document,
+}
+
+/// Result of registering a document with a [`BulkWorkspaceIndex`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BulkRegistration {
+    pub duplicate_document: bool,
+    pub duplicate_class: bool,
+}
+
+/// Explicit, short-lived workspace indexing transaction.
+///
+/// Registration records the complete declaration set without changing live
+/// project state. `finalize` commits it in one operation, allowing unresolved
+/// inheritance and method references to be repaired after later declarations
+/// become visible. Live document updates continue to use `add_document` and
+/// `incremental_update_document` directly.
+pub struct BulkWorkspaceIndex<'a> {
+    data: &'a mut ProjectData,
+    documents: Vec<BulkIndexDocument>,
+    urls: HashSet<Url>,
+    class_names: HashSet<String>,
+}
+
+type PendingVariable = (Variable, Range, Vec<String>, ScopeId);
+
+struct PendingBulkClass {
+    url: Url,
+    class_id: ClassId,
+    class_name: String,
+    class_range: Range,
+    document: Document,
+    class: Class,
+    properties: HashMap<String, (Property, Range, PropertyRef)>,
+    parameters: HashMap<String, (Parameter, Range, ParameterRef)>,
+    relationships: HashMap<String, (Relationship, Range, RelationshipRef)>,
+    foreignkeys: HashMap<String, (ForeignKey, Range, ForeignKeyRef)>,
+    queries: HashMap<String, (Query, Range, QueryRef)>,
+    indices: HashMap<String, (Index, Range, IndexRef)>,
+    triggers: HashMap<String, (Trigger, Range, TriggerRef)>,
+    xdata: HashMap<String, (XData, Range, XdataRef)>,
+    projections: HashMap<String, (Projection, Range, ProjectionRef)>,
+    storage: HashMap<String, (Storage, Range, StorageRef)>,
+    methods: HashMap<String, PreparedMethod>,
+    diagnostics: Vec<Diagnostic>,
+}
+
+struct PreparedMethod {
+    method: Method,
+    range: Range,
+    method_ref: MethodRef,
+    variables: Vec<PendingVariable>,
+    unresolved: HashSet<UnresolvedMethodRef>,
+    unresolved_orefs: HashSet<(String, String, Range, String)>,
+}
+
+impl<'a> BulkWorkspaceIndex<'a> {
+    pub fn register(&mut self, mut input: BulkIndexDocument) -> BulkRegistration {
+        let duplicate_document =
+            self.data.documents.contains_key(&input.url) || !self.urls.insert(input.url.clone());
+
+        let duplicate_class = input.document.file_type != FileType::Xml
+            && (self.data.classes.contains_key(&input.document.class_name)
+                || !self.class_names.insert(input.document.class_name.clone()));
+
+        if !duplicate_document {
+            if input.document.file_type != FileType::Xml {
+                input.document.class_id = Some(ClassId(self.data.global_semantic_model.next_id()));
+            }
+
+            self.documents.push(input);
+        }
+
+        BulkRegistration {
+            duplicate_document,
+            duplicate_class,
+        }
+    }
+
+    pub fn finalize(self) {
+        let total_started = std::time::Instant::now();
+        let data = self.data;
+        let prepare_started = std::time::Instant::now();
+        let (xml_documents, class_documents): (Vec<_>, Vec<_>) = self
+            .documents
+            .into_iter()
+            .partition(|input| input.document.file_type == FileType::Xml);
+
+        // Each worker owns its document and all products of class/method analysis.
+        // In particular, no worker observes ProjectData, so registration and every
+        // shared semantic/index mutation remain serial.
+        let pending: Vec<PendingBulkClass> = class_documents
+            .into_par_iter()
+            .map(|input| {
+                let BulkIndexDocument {
+                    url,
+                    class_range,
+                    document,
+                } = input;
+                let class_id = document
+                    .class_id
+                    .expect("register must assign an id to every non-XML document");
+                let class_name = document.class_name.clone();
+                let is_rtn = document.file_type == FileType::Routine;
+                let starting_node = if is_rtn {
+                    document.tree.root_node()
+                } else {
+                    find_class_definition(document.tree.root_node())
+                        .expect("registered class document must contain a class definition")
+                };
+                let mut class = Class::new(class_name.clone(), is_rtn);
+                let (
+                    _,
+                    _,
+                    methods,
+                    properties,
+                    parameters,
+                    relationships,
+                    foreignkeys,
+                    queries,
+                    indices,
+                    triggers,
+                    xdata,
+                    projections,
+                    storage,
+                    _,
+                    _,
+                    diagnostics,
+                ) = class.build_class(
+                    starting_node,
+                    &document.content,
+                    is_rtn,
+                    &class_id,
+                    class_range,
+                    &class_name,
+                );
+                class.build_imports(&document.tree, &document.content);
+                let class_is_final = class.is_final;
+                let class_is_procedure_block = class.is_procedure_block;
+                let methods = methods
+                    .into_iter()
+                    .filter_map(
+                        |(name, (mut method, range, method_ref, public_variables))| {
+                            let method_type = method.method_type;
+                            let node = match method_type {
+                                MethodType::ClassMethod
+                                | MethodType::InstanceMethod
+                                | MethodType::Procedure(_) => {
+                                    document.tree.root_node().named_descendant_for_byte_range(
+                                        range.start_byte,
+                                        range.end_byte,
+                                    )
+                                }
+                                _ => Some(document.tree.root_node()),
+                            }?;
+                            let (_, _, variables, unresolved, unresolved_orefs) = method
+                                .rebuild_method(
+                                    node,
+                                    &document.content,
+                                    &document.scope_tree,
+                                    method_type,
+                                    range,
+                                    public_variables,
+                                    class_is_final,
+                                    false,
+                                    class_is_procedure_block,
+                                    &class_name,
+                                );
+                            Some((
+                                name,
+                                PreparedMethod {
+                                    method,
+                                    range,
+                                    method_ref,
+                                    variables,
+                                    unresolved,
+                                    unresolved_orefs,
+                                },
+                            ))
+                        },
+                    )
+                    .collect();
+                PendingBulkClass {
+                    url,
+                    class_id,
+                    class_name,
+                    class_range,
+                    document,
+                    class,
+                    properties,
+                    parameters,
+                    relationships,
+                    foreignkeys,
+                    queries,
+                    indices,
+                    triggers,
+                    xdata,
+                    projections,
+                    storage,
+                    methods,
+                    diagnostics,
+                }
+            })
+            .collect();
+        eprintln!(
+            "[index] prepared {} classes/routines in {:.3?}",
+            pending.len(),
+            prepare_started.elapsed()
+        );
+
+        let commit_started = std::time::Instant::now();
+        for input in xml_documents {
+            data.documents.insert(input.url, input.document);
+        }
+        let mut pending_calls = Vec::with_capacity(pending.len());
+        for mut prepared in pending {
+            let class_name = prepared.class_name.clone();
+            let url = prepared.url.clone();
+            let class_id = prepared.class_id;
+            if let Some(existing_class_id) = data.classes.get(&class_name).copied()
+                && let Some(existing_symbol) = data
+                    .global_semantic_model
+                    .get_class_symbol(&existing_class_id)
+                && existing_symbol.url != url
+                && let Some(existing_document) = data.documents.get(&existing_symbol.url)
+            {
+                let existing_url = existing_symbol.url.clone();
+                let existing_content = existing_document.content.clone();
+                data.fully_remove_old_class_members(&existing_class_id, &existing_content, false);
+                data.global_semantic_model.remove_class(&existing_class_id);
+                data.documents.remove(&existing_url);
+                if data.sys_classes.contains(&class_name) {
+                    data.sys_classes_overwritten.insert(class_name.clone());
+                }
+            }
+            data.global_semantic_model
+                .new_local_semantic(class_id, LocalSemanticModel::new());
+            data.classes.insert(class_name.clone(), class_id);
+            data.global_semantic_model.new_class(
+                prepared.class,
+                class_id,
+                prepared.class_range,
+                url.clone(),
+            );
+            data.other_class_diagnostics
+                .insert(url.clone(), prepared.diagnostics);
+
+            for (name, (property, range, property_ref)) in prepared.properties {
+                if !property.is_public {
+                    prepared.document.scope_tree.new_property_symbol(
+                        name.clone(),
+                        range,
+                        property_ref,
+                        url.clone(),
+                    );
+                }
+                data.global_semantic_model
+                    .new_property(property, property_ref, range, url.clone());
+                data.property_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, property_ref);
+            }
+            for (name, (parameter, range, parameter_ref)) in prepared.parameters {
+                data.global_semantic_model.new_parameter(
+                    parameter,
+                    parameter_ref,
+                    range,
+                    url.clone(),
+                );
+                data.parameter_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, parameter_ref);
+            }
+            for (name, (value, range, member_ref)) in prepared.relationships {
+                if !value.is_public {
+                    prepared.document.scope_tree.new_relationship_symbol(
+                        name.clone(),
+                        range,
+                        member_ref,
+                        url.clone(),
+                    );
+                }
+                data.global_semantic_model
+                    .new_relationship(value, member_ref, range, url.clone());
+                data.relationship_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in prepared.foreignkeys {
+                data.global_semantic_model
+                    .new_foreignkey(value, member_ref, range, url.clone());
+                data.foreignkey_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in prepared.queries {
+                if !value.is_public {
+                    prepared.document.scope_tree.new_query_symbol(
+                        name.clone(),
+                        range,
+                        member_ref,
+                        url.clone(),
+                    );
+                }
+                data.global_semantic_model
+                    .new_query(value, member_ref, range, url.clone());
+                data.query_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in prepared.indices {
+                data.global_semantic_model
+                    .new_index(value, member_ref, range, url.clone());
+                data.index_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in prepared.triggers {
+                data.global_semantic_model
+                    .new_trigger(value, member_ref, range, url.clone());
+                data.trigger_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in prepared.xdata {
+                data.global_semantic_model
+                    .new_xdata(value, member_ref, range, url.clone());
+                data.xdata_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in prepared.projections {
+                data.global_semantic_model
+                    .new_projection(value, member_ref, range, url.clone());
+                data.projection_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in prepared.storage {
+                data.global_semantic_model
+                    .new_storage(value, member_ref, range, url.clone());
+                data.storage_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            let mut calls = Vec::new();
+            let mut oref_calls = Vec::new();
+            for (name, mut method) in prepared.methods {
+                data.method_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name.clone(), method.method_ref);
+                data.dependency_graph.get_or_add_node(method.method_ref);
+                if !method.method.is_public {
+                    prepared.document.scope_tree.new_method_symbol(
+                        name.clone(),
+                        method.range,
+                        method.method_ref,
+                        url.clone(),
+                    );
+                }
+                for (variable, range, dependencies, scope_id) in method.variables {
+                    let name = variable.name.clone();
+                    let is_public = variable.is_public;
+                    let variable_ref = data.global_semantic_model.new_variable(
+                        variable,
+                        method.method_ref,
+                        scope_id,
+                        dependencies.clone(),
+                        range,
+                        url.clone(),
+                    );
+                    method
+                        .method
+                        .variables
+                        .entry(name.clone())
+                        .or_default()
+                        .push((variable_ref, scope_id));
+                    if is_public {
+                        prepared.document.scope_tree.new_public_var_symbol_at_scope(
+                            scope_id,
+                            name.clone(),
+                            variable_ref,
+                        );
+                        data.pub_var_defs
+                            .entry(name)
+                            .or_default()
+                            .entry(method.method_ref)
+                            .or_default()
+                            .entry(scope_id)
+                            .or_default()
+                            .push(variable_ref);
+                    } else {
+                        prepared.document.scope_tree.new_variable_symbol_at_scope(
+                            scope_id,
+                            name,
+                            range,
+                            dependencies,
+                            variable_ref,
+                        );
+                    }
+                }
+                data.global_semantic_model.new_method(
+                    method.method,
+                    method.method_ref,
+                    method.range,
+                    url.clone(),
+                );
+                calls.push((method.method_ref, method.unresolved));
+                oref_calls.push((method.method_ref, method.unresolved_orefs));
+            }
+            data.documents.insert(url.clone(), prepared.document);
+            pending_calls.push((url.clone(), class_id, calls, oref_calls));
+        }
+        eprintln!(
+            "[index] committed prepared results in {:.3?}",
+            commit_started.elapsed()
+        );
+
+        // Establish the complete inheritance graph. No override/member
+        // table is built until the graph is complete.
+        let inheritance_started = std::time::Instant::now();
+        let inheritance_inputs: Vec<(Url, ClassId, Vec<(String, LspRange)>)> = data
+            .classes
+            .values()
+            .filter_map(|class_id| {
+                let class = data.global_semantic_model.get_class(class_id)?;
+                let symbol = data.global_semantic_model.get_class_symbol(class_id)?;
+                Some((
+                    symbol.url.clone(),
+                    *class_id,
+                    class.inherited_classes.clone(),
+                ))
+            })
+            .collect();
+        eprintln!(
+            "[index] building inheritance for {} classes/routines",
+            inheritance_inputs.len()
+        );
+        let affected: HashSet<ClassId> = data.classes.values().copied().collect();
+        data.unresolved_inheritance_references.clear();
+        data.inheritance_diagonstics.clear();
+        for (url, class_id, inherited_classes) in &inheritance_inputs {
+            let invalid_parents: Vec<(String, LspRange)> = inherited_classes
+                .iter()
+                .filter(|(name, _)| {
+                    let Some(parent_id) = data.classes.get(name) else {
+                        return true;
+                    };
+                    data.global_semantic_model
+                        .get_class(parent_id)
+                        .is_some_and(|parent| parent.is_final == true)
+                })
+                .cloned()
+                .collect();
+            let mut unused_affected = HashSet::new();
+            data.add_dependent_class_to_inherited_class(
+                *class_id,
+                url.clone(),
+                &invalid_parents,
+                &mut unused_affected,
+            );
+        }
+        data.dependent_class_index = data.global_semantic_model.build_dependents(&data.classes);
+        eprintln!(
+            "[index] built inheritance for {} classes/routines in {:.3?}",
+            inheritance_inputs.len(),
+            inheritance_started.elapsed()
+        );
+
+        // Phase 2B is internally topologically sorted parent-before-child.
+        let overrides_started = std::time::Instant::now();
+        eprintln!(
+            "[index] building override index for {} affected classes/routines",
+            affected.len()
+        );
+        data.rebuild_override_index_for_classes_and_apply(&affected);
+        eprintln!(
+            "[index] built override index for {} affected classes/routines in {:.3?}",
+            affected.len(),
+            overrides_started.elapsed()
+        );
+
+        // Build every ordinary caller -> callee edge before resolving oref calls.
+        // Public oref resolution walks incoming call edges, so interleaving these
+        // passes would make its result depend on document iteration order.
+        let ordinary_calls_started = std::time::Instant::now();
+        eprintln!("[index] resolving ordinary method calls");
+        for (url, class_id, calls, _) in &mut pending_calls {
+            let Some(document) = data.documents.remove(url) else {
+                continue;
+            };
+            for (method_ref, unresolved) in std::mem::take(calls) {
+                data.resolve_method_references(
+                    &document.content,
+                    &unresolved,
+                    method_ref,
+                    *class_id,
+                );
+            }
+            data.documents.insert(url.clone(), document);
+        }
+        eprintln!(
+            "[index] resolved ordinary method calls in {:.3?}",
+            ordinary_calls_started.elapsed()
+        );
+
+        let oref_calls_started = std::time::Instant::now();
+        eprintln!("[index] resolving oref method calls");
+        for (url, _, _, oref_calls) in pending_calls {
+            let Some(document) = data.documents.remove(&url) else {
+                continue;
+            };
+            for (method_ref, unresolved) in oref_calls {
+                for (oref_name, method_name, range, current_method_name) in unresolved {
+                    let (resolved, still_unresolved) = data.resolve_oref_methods(
+                        method_ref,
+                        &oref_name,
+                        &method_name,
+                        range,
+                        &current_method_name,
+                        &document.scope_tree,
+                    );
+                    for referenced in resolved {
+                        data.dependency_graph
+                            .add_edge(method_ref, referenced, range);
+                    }
+                    for (key, value) in still_unresolved {
+                        data.unresolved_method_references
+                            .entry(key)
+                            .or_default()
+                            .extend(value);
+                    }
+                }
+            }
+            data.documents.insert(url, document);
+        }
+        eprintln!(
+            "[index] resolved oref method calls in {:.3?}",
+            oref_calls_started.elapsed()
+        );
+        eprintln!(
+            "[index] finalized bulk workspace in {:.3?}",
+            total_started.elapsed()
+        );
+    }
 }
 
 /// Concurrency wrapper for a workspace’s state and parsers.
@@ -155,6 +734,24 @@ pub struct ProjectState {
 }
 
 impl ProjectData {
+    /// Classify every class currently loaded in this project as a SYS class.
+    ///
+    /// Call this after appending a SYS source root and before appending the
+    /// customer workspace. SYS classes keep the same full semantic model as
+    /// customer classes; this set is only dependency-classification metadata.
+    pub fn mark_current_classes_as_sys(&mut self) {
+        self.sys_classes = self.classes.keys().cloned().collect();
+    }
+
+    pub fn begin_bulk_index(&mut self) -> BulkWorkspaceIndex<'_> {
+        BulkWorkspaceIndex {
+            data: self,
+            documents: Vec::new(),
+            urls: HashSet::new(),
+            class_names: HashSet::new(),
+        }
+    }
+
     pub fn clear_diagnostics_for_url(&mut self, url: &Url) {
         self.other_class_diagnostics.remove(url);
 
@@ -191,40 +788,6 @@ impl ProjectData {
             curr_version,
             curr_tree,
         ))
-    }
-
-    /// Add a document only if it is not already present.
-    /// Returns true if the document was present, false otherwise.
-    pub fn add_document_if_absent(
-        &mut self,
-        url: Url,
-        code: String,
-        tree: &Tree,
-        filetype: FileType,
-        class_name: String,
-        class_range: Range,
-        version: Option<i32>,
-    ) -> bool {
-        if self.documents.contains_key(&url) {
-            eprintln!("Document already exists for file at :{:?}", url.path());
-            return true;
-        }
-        let class_id = if filetype == FileType::Xml {
-            None
-        } else {
-            Some(ClassId(self.global_semantic_model.next_id()))
-        };
-        self.add_document(
-            url,
-            code.as_str(),
-            tree,
-            filetype,
-            class_id,
-            class_name,
-            version,
-            class_range,
-        );
-        false
     }
 
     /// Refactor a document. Refactoring options are in `RefactorLevel`, and include
@@ -295,6 +858,133 @@ impl ProjectData {
         }
 
         (routine_members, current_class_methods)
+    }
+
+    /// Return direct and transitive SYS dependencies of all customer classes.
+    ///
+    /// Direct dependencies are SYS classes directly inherited by a customer
+    /// class or directly called by one of its methods. Transitive dependencies
+    /// are additional SYS classes reached through outgoing method calls or SYS
+    /// superclass chains. The returned sets are disjoint and use class names
+    /// because workspace-local ids cannot be compared across IRIS versions.
+    pub fn get_sys_dependencies(&self) -> (HashSet<String>, HashSet<String>) {
+        let customer_classes: Vec<ClassId> = self
+            .classes
+            .iter()
+            .filter_map(|(class_name, class_id)| {
+                (!self.sys_classes.contains(class_name)
+                    || self.sys_classes_overwritten.contains(class_name))
+                .then_some(*class_id)
+            })
+            .collect();
+
+        let mut direct_ids = HashSet::new();
+        let mut reachable_sys_ids = HashSet::new();
+        let mut start_nodes = Vec::new();
+
+        for class_id in customer_classes {
+            let Some(customer_class) = self.global_semantic_model.get_class(&class_id) else {
+                continue;
+            };
+
+            for (parent_name, _) in &customer_class.inherited_classes {
+                if self.sys_classes.contains(parent_name)
+                    && !self.sys_classes_overwritten.contains(parent_name)
+                    && let Some(parent_id) = self.classes.get(parent_name)
+                {
+                    direct_ids.insert(*parent_id);
+                    reachable_sys_ids.insert(*parent_id);
+                }
+            }
+
+            for node in self.dependency_graph.get_class_nodes(&class_id) {
+                start_nodes.push(node);
+                for edge in self
+                    .dependency_graph
+                    .graph
+                    .edges_directed(node, petgraph::Direction::Outgoing)
+                {
+                    let target = self.dependency_graph.graph[edge.target()];
+                    let Some(target_class) = self.global_semantic_model.get_class(&target.class)
+                    else {
+                        continue;
+                    };
+                    if self.sys_classes.contains(&target_class.name)
+                        && !self.sys_classes_overwritten.contains(&target_class.name)
+                    {
+                        direct_ids.insert(target.class);
+                        reachable_sys_ids.insert(target.class);
+                    }
+                }
+            }
+        }
+
+        let mut visited_nodes = HashSet::new();
+        let mut method_queue = std::collections::VecDeque::new();
+        for node in start_nodes {
+            if visited_nodes.insert(node) {
+                method_queue.push_back(node);
+            }
+        }
+        while let Some(node) = method_queue.pop_front() {
+            for edge in self
+                .dependency_graph
+                .graph
+                .edges_directed(node, petgraph::Direction::Outgoing)
+            {
+                let target_node = edge.target();
+                let target = self.dependency_graph.graph[target_node];
+                if let Some(target_class) = self.global_semantic_model.get_class(&target.class)
+                    && self.sys_classes.contains(&target_class.name)
+                    && !self.sys_classes_overwritten.contains(&target_class.name)
+                {
+                    reachable_sys_ids.insert(target.class);
+                }
+                if visited_nodes.insert(target_node) {
+                    method_queue.push_back(target_node);
+                }
+            }
+        }
+
+        let mut class_queue: std::collections::VecDeque<ClassId> =
+            reachable_sys_ids.iter().copied().collect();
+        while let Some(class_id) = class_queue.pop_front() {
+            let Some(class) = self.global_semantic_model.get_class(&class_id) else {
+                continue;
+            };
+            for (parent_name, _) in &class.inherited_classes {
+                if !self.sys_classes.contains(parent_name)
+                    || self.sys_classes_overwritten.contains(parent_name)
+                {
+                    continue;
+                }
+                let Some(parent_id) = self.classes.get(parent_name).copied() else {
+                    continue;
+                };
+                if reachable_sys_ids.insert(parent_id) {
+                    class_queue.push_back(parent_id);
+                }
+            }
+        }
+
+        let direct_sys_dependencies = direct_ids
+            .iter()
+            .filter_map(|class_id| {
+                self.global_semantic_model
+                    .get_class(class_id)
+                    .map(|class| class.name.clone())
+            })
+            .collect();
+        let transitive_sys_dependencies = reachable_sys_ids
+            .difference(&direct_ids)
+            .filter_map(|class_id| {
+                self.global_semantic_model
+                    .get_class(class_id)
+                    .map(|class| class.name.clone())
+            })
+            .collect();
+
+        (direct_sys_dependencies, transitive_sys_dependencies)
     }
 
     fn refactor_document_with_parser(
@@ -488,7 +1178,12 @@ impl ProjectData {
             })
     }
 
-    fn fully_remove_old_class_members(&mut self, class_id: &ClassId, content: &str) {
+    fn fully_remove_old_class_members(
+        &mut self,
+        class_id: &ClassId,
+        content: &str,
+        rebuild_overrides: bool,
+    ) {
         let classes: HashSet<ClassId> = self.classes.values().copied().collect();
         let (class_name, inherited_classes) =
             if let Some(class) = self.global_semantic_model.get_class(&class_id) {
@@ -538,6 +1233,11 @@ impl ProjectData {
                         .or_insert(HashSet::new())
                         .extend(method_caller_refs);
                 }
+                self.dependency_graph.remove_node(stale_method_ref);
+                self.pub_var_defs.retain(|_, methods| {
+                    methods.remove(&stale_method_ref);
+                    !methods.is_empty()
+                });
                 self.global_semantic_model.remove_method(&stale_method_ref);
             }
         }
@@ -553,12 +1253,54 @@ impl ProjectData {
                     .remove_parameter(&stale_parameter_ref);
             }
         }
+        if let Some(values) = self.relationship_defs.remove(&class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_relationship(&member_ref);
+            }
+        }
+        if let Some(values) = self.foreignkey_defs.remove(&class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_foreignkey(&member_ref);
+            }
+        }
+        if let Some(values) = self.query_defs.remove(&class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_query(&member_ref);
+            }
+        }
+        if let Some(values) = self.index_defs.remove(&class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_index(&member_ref);
+            }
+        }
+        if let Some(values) = self.trigger_defs.remove(&class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_trigger(&member_ref);
+            }
+        }
+        if let Some(values) = self.xdata_defs.remove(&class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_xdata(&member_ref);
+            }
+        }
+        if let Some(values) = self.projection_defs.remove(&class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_projection(&member_ref);
+            }
+        }
+        if let Some(values) = self.storage_defs.remove(&class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_storage(&member_ref);
+            }
+        }
 
         if let Some(class) = self.global_semantic_model.get_mut_class(class_id) {
             class.clear(class_name, false);
         }
 
-        self.rebuild_override_index_for_classes_and_apply(&classes);
+        if rebuild_overrides {
+            self.rebuild_override_index_for_classes_and_apply(&classes);
+        }
     }
 
     pub fn full_update_document(
@@ -583,13 +1325,13 @@ impl ProjectData {
                 filetype,
                 "XML".to_string(),
                 None,
-                ScopeTree::new(None),
+                ScopeTree::new(),
                 version,
             );
             self.documents.insert(url, document);
             return;
         } else if filetype == FileType::Routine || filetype == FileType::Cls {
-            self.fully_remove_old_class_members(&class_id, content);
+            self.fully_remove_old_class_members(&class_id, content, true);
             self.global_semantic_model.remove_class(&class_id);
             self.documents.remove(&url);
             self.add_document(
@@ -634,7 +1376,7 @@ impl ProjectData {
                 filetype,
                 "XML".to_string(),
                 None,
-                ScopeTree::new(None),
+                ScopeTree::new(),
                 version,
             );
             self.documents.insert(url, document);
@@ -644,7 +1386,6 @@ impl ProjectData {
                 return;
             };
             if self.documents.contains_key(&url) {
-                eprintln!("Error: Document already exists");
                 return;
             }
             let is_rtn = if filetype == FileType::Routine {
@@ -652,7 +1393,7 @@ impl ProjectData {
             } else {
                 false
             };
-            let scope_tree = initial_build_scope_tree(&tree, class_id, content, is_rtn);
+            let scope_tree = initial_build_scope_tree(&tree, content, is_rtn);
             let mut document = Document::new(
                 content.to_string(),
                 tree.clone(),
@@ -680,15 +1421,31 @@ impl ProjectData {
                 node
             };
             // this is a new class, so some things returned from this function are not applicable
-            let (_, _, methods, properties, parameters, inherited_classes, _, class_diagnostics) =
-                class.build_class(
-                    starting_node,
-                    content,
-                    is_rtn,
-                    &class_id,
-                    class_range,
-                    &class_name,
-                );
+            let (
+                _,
+                _,
+                methods,
+                properties,
+                parameters,
+                relationships,
+                foreignkeys,
+                queries,
+                indices,
+                triggers,
+                xdata,
+                projections,
+                storage,
+                inherited_classes,
+                _,
+                class_diagnostics,
+            ) = class.build_class(
+                starting_node,
+                content,
+                is_rtn,
+                &class_id,
+                class_range,
+                &class_name,
+            );
 
             class.build_imports(tree, content);
 
@@ -697,9 +1454,6 @@ impl ProjectData {
                 .new_class(class, class_id, class_range, url.clone());
             self.other_class_diagnostics
                 .insert(url.clone(), class_diagnostics);
-            // inherits is_procedure_block, is_final, language from leftmost inherited class if applicable
-            self.rebuild_keyword_inheritance_for_class(&class_id);
-            // NOTE: this must be checked after the keyword inheritance is completed.
             let (class_is_final, class_is_procedure_block) = {
                 if let Some(class) = self.global_semantic_model.get_class(&class_id) {
                     (class.is_final, class.is_procedure_block)
@@ -712,7 +1466,7 @@ impl ProjectData {
                 &class_name,
                 class_id,
                 &inherited_classes,
-                class_is_final.unwrap_or(false),
+                class_is_final,
                 &mut classes_to_recompute_inheritance,
                 &url,
             );
@@ -732,6 +1486,9 @@ impl ProjectData {
                 let mut unresolved_method_refs = HashSet::new();
                 let mut unresolved_oref_method_refs = HashSet::new();
                 match method_type {
+                    MethodType::ClientMethod => {
+                        continue;
+                    }
                     MethodType::ClassMethod | MethodType::InstanceMethod => {
                         if let Some(method_definition_node) =
                             tree.root_node().named_descendant_for_byte_range(
@@ -753,7 +1510,7 @@ impl ProjectData {
                                 method_range,
                                 public_variables_declared,
                                 class_is_final,
-                                None,
+                                false,
                                 class_is_procedure_block,
                                 &class_name,
                             );
@@ -780,7 +1537,7 @@ impl ProjectData {
                                 method_range,
                                 public_variables_declared,
                                 class_is_final,
-                                None,
+                                false,
                                 class_is_procedure_block,
                                 &class_name,
                             );
@@ -803,7 +1560,7 @@ impl ProjectData {
                             method_range,
                             public_variables_declared,
                             class_is_final,
-                            None,
+                            false,
                             class_is_procedure_block,
                             &class_name,
                         );
@@ -833,9 +1590,9 @@ impl ProjectData {
                         .push((variable_ref, variable_scope_id));
 
                     if variable_is_public {
-                        document.scope_tree.new_public_var_symbol(
+                        document.scope_tree.new_public_var_symbol_at_scope(
+                            variable_scope_id,
                             variable_name.clone(),
-                            variable_range,
                             variable_ref,
                         );
                         self.pub_var_defs
@@ -847,7 +1604,8 @@ impl ProjectData {
                             .or_insert(Vec::new())
                             .push(variable_ref);
                     } else {
-                        document.scope_tree.new_variable_symbol(
+                        document.scope_tree.new_variable_symbol_at_scope(
+                            variable_scope_id,
                             variable_name,
                             variable_range,
                             variable_dependencies,
@@ -855,7 +1613,6 @@ impl ProjectData {
                         );
                     }
                 }
-                self.dependency_graph.get_or_add_node(method_ref);
                 self.method_defs
                     .entry(class_name.clone())
                     .or_insert_with(HashMap::new)
@@ -890,7 +1647,7 @@ impl ProjectData {
                     method_name,
                     method_ref,
                     true,
-                    class_is_final.unwrap_or(false),
+                    class_is_final,
                 );
             }
 
@@ -975,7 +1732,7 @@ impl ProjectData {
                     property_name,
                     property_ref,
                     true,
-                    class_is_final.unwrap_or(false),
+                    class_is_final,
                 );
             }
             for (parameter_name, (parameter, parameter_range, parameter_ref)) in parameters {
@@ -998,8 +1755,88 @@ impl ProjectData {
                     parameter_name,
                     parameter_ref,
                     true,
-                    class_is_final.unwrap_or(false),
+                    class_is_final,
                 );
+            }
+            for (name, (value, range, member_ref)) in relationships {
+                if !value.is_public {
+                    document.scope_tree.new_relationship_symbol(
+                        name.clone(),
+                        range,
+                        member_ref,
+                        url.clone(),
+                    );
+                }
+                self.global_semantic_model
+                    .new_relationship(value, member_ref, range, url.clone());
+                self.relationship_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in foreignkeys {
+                self.global_semantic_model
+                    .new_foreignkey(value, member_ref, range, url.clone());
+                self.foreignkey_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in queries {
+                if !value.is_public {
+                    document.scope_tree.new_query_symbol(
+                        name.clone(),
+                        range,
+                        member_ref,
+                        url.clone(),
+                    );
+                }
+                self.global_semantic_model
+                    .new_query(value, member_ref, range, url.clone());
+                self.query_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in indices {
+                self.global_semantic_model
+                    .new_index(value, member_ref, range, url.clone());
+                self.index_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in triggers {
+                self.global_semantic_model
+                    .new_trigger(value, member_ref, range, url.clone());
+                self.trigger_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in xdata {
+                self.global_semantic_model
+                    .new_xdata(value, member_ref, range, url.clone());
+                self.xdata_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in projections {
+                self.global_semantic_model
+                    .new_projection(value, member_ref, range, url.clone());
+                self.projection_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in storage {
+                self.global_semantic_model
+                    .new_storage(value, member_ref, range, url.clone());
+                self.storage_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
             }
             self.documents.insert(url.clone(), document);
         }
@@ -1039,6 +1876,31 @@ impl ProjectData {
     ) {
         for (inherited_cls_name, inherited_class_ref_range) in inherited_classes {
             if let Some(inherited_class_id) = self.classes.get(inherited_cls_name).copied() {
+                if let Some(cls) = self.global_semantic_model.get_class(&inherited_class_id) {
+                    if cls.is_final {
+                        let diagnostic = Diagnostic {
+                            range: inherited_class_ref_range.clone(),
+                            severity: Some(DiagnosticSeverity::WARNING),
+                            code: None,
+                            code_description: None,
+                            source: Some("ObjectScript".to_string()),
+                            message: "Attempted to inherit Class that is marked as final."
+                                .to_string(),
+                            related_information: None,
+                            tags: None,
+                            data: None,
+                        };
+                        self.unresolved_inheritance_references
+                            .entry(inherited_cls_name.clone())
+                            .or_insert(Vec::new())
+                            .push((dependent_class_id, inherited_class_ref_range.clone()));
+                        self.inheritance_diagonstics
+                            .entry(inherited_cls_name.clone())
+                            .or_insert(HashMap::new())
+                            .insert(dependent_document_url.clone(), diagnostic);
+                        continue;
+                    }
+                }
                 self.dependent_class_index
                     .direct_subclasses
                     .entry(inherited_class_id)
@@ -1370,7 +2232,6 @@ impl ProjectData {
                         self.global_semantic_model.get_method(stale_method_ref)
                 {
                     let old_method_name = old_method.name.clone();
-                    let old_method_is_final = old_method.is_final;
                     for (method_ref, method_call_range) in &method_caller_refs {
                         let lsp_range = ts_range_to_lsp_range(content, *method_call_range);
                         let Some(cls_sym) = self
@@ -1403,10 +2264,8 @@ impl ProjectData {
                         .extend(method_caller_refs);
                     if let Some(new_class) = self.global_semantic_model.get_class(&class_id)
                         && let Some(new_method_ref) = new_class.get_method_ref(&old_method_name)
-                        && new_class
-                            .is_final
-                            .unwrap_or(old_method_is_final.unwrap_or(false))
                     {
+                        // TODO: not sure if this should be resolved here..
                         self.resolve_unresolved_method(
                             &(new_class_name.to_string(), old_method_name),
                             *new_method_ref,
@@ -1693,6 +2552,46 @@ impl ProjectData {
             &subclasses_to_recompute_inheritance,
             old_class_is_final,
         );
+        if let Some(values) = self.relationship_defs.remove(old_class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_relationship(&member_ref);
+            }
+        }
+        if let Some(values) = self.foreignkey_defs.remove(old_class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_foreignkey(&member_ref);
+            }
+        }
+        if let Some(values) = self.query_defs.remove(old_class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_query(&member_ref);
+            }
+        }
+        if let Some(values) = self.index_defs.remove(old_class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_index(&member_ref);
+            }
+        }
+        if let Some(values) = self.trigger_defs.remove(old_class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_trigger(&member_ref);
+            }
+        }
+        if let Some(values) = self.xdata_defs.remove(old_class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_xdata(&member_ref);
+            }
+        }
+        if let Some(values) = self.projection_defs.remove(old_class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_projection(&member_ref);
+            }
+        }
+        if let Some(values) = self.storage_defs.remove(old_class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_storage(&member_ref);
+            }
+        }
     }
 
     /// Returns true if successful, false otherwise
@@ -1731,7 +2630,7 @@ impl ProjectData {
             document.content = content.to_string();
             document.class_name = new_class_name;
             document.class_id = None;
-            document.scope_tree = ScopeTree::new(None);
+            document.scope_tree = ScopeTree::new();
             return;
         } else if file_type == FileType::Routine || file_type == FileType::Cls {
             let is_rtn = if file_type == FileType::Routine {
@@ -1862,6 +2761,14 @@ impl ProjectData {
                 new_methods,
                 properties_already_rebuilt,
                 parameters_already_rebuilt,
+                relationships_already_rebuilt,
+                foreignkeys_already_rebuilt,
+                queries_already_rebuilt,
+                indices_already_rebuilt,
+                triggers_already_rebuilt,
+                xdata_already_rebuilt,
+                projections_already_rebuilt,
+                storage_already_rebuilt,
                 new_inherited_classes,
                 all_methods,
                 class_diagnostics,
@@ -1907,7 +2814,7 @@ impl ProjectData {
             self.classes.insert(new_class_name.clone(), old_class_id);
 
             // rebuild scope tree
-            let mut scope_tree = initial_build_scope_tree(&tree, old_class_id, content, is_rtn);
+            let mut scope_tree = initial_build_scope_tree(&tree, content, is_rtn);
             // copy over the old variable defs from the old scope tree into the new rebuilt scope tree
             let old_class_member_scopes = old_scope_tree.get_root_children_scopes();
             for old_scope in old_class_member_scopes {
@@ -1916,9 +2823,6 @@ impl ProjectData {
             scope_tree.private_method_defs = old_scope_tree.private_method_defs;
             // NOTE: property defs are never copied over because they are fully rebuilt
 
-            // rebuild keywords for class (is_procedure, is_final, language)
-            self.rebuild_keyword_inheritance_for_class(&old_class_id);
-            // NOTE: this must be checked after the keyword inheritance is completed.
             let (new_class_is_final, new_class_is_procedure_block) = {
                 if let Some(class) = self.global_semantic_model.get_class(&old_class_id) {
                     (class.is_final, class.is_procedure_block)
@@ -1947,8 +2851,8 @@ impl ProjectData {
                 &old_inherited_classes,
                 &new_inherited_classes,
                 inheritance_changed,
-                old_is_final.unwrap_or(false),
-                new_class_is_final.unwrap_or(false),
+                old_is_final,
+                new_class_is_final,
                 &mut classes_to_fully_recompute_inheritance,
                 &url,
                 content,
@@ -1969,8 +2873,8 @@ impl ProjectData {
                 &old_class_name,
                 &classes_to_fully_recompute_inheritance,
                 &subclasses_to_recompute_inheritance,
-                new_class_is_final.unwrap_or(false),
-                old_is_final.unwrap_or(false),
+                new_class_is_final,
+                old_is_final,
                 &mut methods_already_rebuilt,
                 &mut scope_tree,
                 content,
@@ -1988,6 +2892,9 @@ impl ProjectData {
                 self.dependency_graph.get_or_add_node(method_ref);
                 let method_type = method.method_type.clone();
                 match method_type {
+                    MethodType::ClientMethod => {
+                        continue;
+                    }
                     MethodType::ClassMethod | MethodType::InstanceMethod => {
                         if let Some(method_definition_node) =
                             tree.root_node().named_descendant_for_byte_range(
@@ -2090,9 +2997,9 @@ impl ProjectData {
                         .push((variable_ref, variable_scope_id));
 
                     if variable_is_public {
-                        scope_tree.new_public_var_symbol(
+                        scope_tree.new_public_var_symbol_at_scope(
+                            variable_scope_id,
                             variable_name.clone(),
-                            variable_range,
                             variable_ref,
                         );
                         self.pub_var_defs
@@ -2104,7 +3011,8 @@ impl ProjectData {
                             .or_insert(Vec::new())
                             .push(variable_ref);
                     } else {
-                        scope_tree.new_variable_symbol(
+                        scope_tree.new_variable_symbol_at_scope(
+                            variable_scope_id,
                             variable_name,
                             variable_range,
                             variable_dependencies,
@@ -2147,7 +3055,7 @@ impl ProjectData {
                     method_name,
                     method_ref,
                     true,
-                    new_class_is_final.unwrap_or(false),
+                    new_class_is_final,
                 );
             }
             for (method_ref, unresolved_oref_methods) in unresolved_orefs {
@@ -2235,7 +3143,7 @@ impl ProjectData {
                     property_name,
                     property_ref,
                     true,
-                    new_class_is_final.unwrap_or(false),
+                    new_class_is_final,
                 );
             }
 
@@ -2261,14 +3169,89 @@ impl ProjectData {
                     parameter_name,
                     parameter_ref,
                     true,
-                    new_class_is_final.unwrap_or(false),
+                    new_class_is_final,
                 );
+            }
+            for (name, (value, range, member_ref)) in relationships_already_rebuilt {
+                if !value.is_public {
+                    scope_tree.new_relationship_symbol(
+                        name.clone(),
+                        range,
+                        member_ref,
+                        url.clone(),
+                    );
+                }
+                self.global_semantic_model
+                    .new_relationship(value, member_ref, range, url.clone());
+                self.relationship_defs
+                    .entry(new_class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in foreignkeys_already_rebuilt {
+                self.global_semantic_model
+                    .new_foreignkey(value, member_ref, range, url.clone());
+                self.foreignkey_defs
+                    .entry(new_class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in queries_already_rebuilt {
+                if !value.is_public {
+                    scope_tree.new_query_symbol(name.clone(), range, member_ref, url.clone());
+                }
+                self.global_semantic_model
+                    .new_query(value, member_ref, range, url.clone());
+                self.query_defs
+                    .entry(new_class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in indices_already_rebuilt {
+                self.global_semantic_model
+                    .new_index(value, member_ref, range, url.clone());
+                self.index_defs
+                    .entry(new_class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in triggers_already_rebuilt {
+                self.global_semantic_model
+                    .new_trigger(value, member_ref, range, url.clone());
+                self.trigger_defs
+                    .entry(new_class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in xdata_already_rebuilt {
+                self.global_semantic_model
+                    .new_xdata(value, member_ref, range, url.clone());
+                self.xdata_defs
+                    .entry(new_class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in projections_already_rebuilt {
+                self.global_semantic_model
+                    .new_projection(value, member_ref, range, url.clone());
+                self.projection_defs
+                    .entry(new_class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in storage_already_rebuilt {
+                self.global_semantic_model
+                    .new_storage(value, member_ref, range, url.clone());
+                self.storage_defs
+                    .entry(new_class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
             }
 
             let scope_tree_snapshot = scope_tree.clone();
             let mut curr_class_hash = HashSet::new();
             curr_class_hash.insert(old_class_id);
-            if !new_class_is_final.unwrap_or(false) {
+            if !new_class_is_final {
                 if let Some(dependents) = self
                     .dependent_class_index
                     .direct_subclasses
@@ -2312,6 +3295,7 @@ impl ProjectData {
                         if let Some(method) = self.global_semantic_model.get_mut_method(&method_ref)
                         {
                             match method_type {
+                                MethodType::ClientMethod => {}
                                 MethodType::ClassMethod | MethodType::InstanceMethod => {
                                     if let Some(method_definition_node) =
                                         tree.root_node().named_descendant_for_byte_range(
@@ -2398,7 +3382,7 @@ impl ProjectData {
                                 method_name.clone(),
                                 method_ref,
                                 true,
-                                new_class_is_final.unwrap_or(false),
+                                new_class_is_final,
                             );
                         }
                         if method_is_public_changed {
@@ -2464,7 +3448,7 @@ impl ProjectData {
                             method_name.clone(),
                             method_ref,
                             false,
-                            new_class_is_final.unwrap_or(false),
+                            new_class_is_final,
                         );
                         unresolved_orefs.insert(method_ref, unresolved_oref_method_refs);
                         for (variable, variable_range, variable_dependencies, variable_scope_id) in
@@ -2495,9 +3479,9 @@ impl ProjectData {
                             }
 
                             if variable_is_public {
-                                scope_tree.new_public_var_symbol(
+                                scope_tree.new_public_var_symbol_at_scope(
+                                    variable_scope_id,
                                     variable_name.clone(),
-                                    variable_range,
                                     variable_ref,
                                 );
                                 self.pub_var_defs
@@ -2509,7 +3493,8 @@ impl ProjectData {
                                     .or_insert(Vec::new())
                                     .push(variable_ref);
                             } else {
-                                scope_tree.new_variable_symbol(
+                                scope_tree.new_variable_symbol_at_scope(
+                                    variable_scope_id,
                                     variable_name,
                                     variable_range,
                                     variable_dependencies,
@@ -2802,12 +3787,12 @@ impl ProjectData {
                                         .get(&ancestor_ref)
                                         .and_then(|s| s.get(sid))
                                         .and_then(|vars| vars.get(var_id.0))
-                                        && var.is_oref
-                                        && let Some(ref oref_cls) = var.cls
+                                        && let VariableDefType::OrefDef(oref_cls) =
+                                            &var.variable_type
                                     {
                                         if let Some(referenced_method_ref) = self
                                             .method_defs
-                                            .get(oref_cls)
+                                            .get(oref_cls.as_str())
                                             .and_then(|methods| methods.get(oref_method_name))
                                         {
                                             all_possible_oref_methods
@@ -2846,67 +3831,33 @@ impl ProjectData {
         return (all_possible_oref_methods, unresolved_method_references);
     }
 
-    /// Rebuild keyword inheritance (is_procedure_block, default_language, is_final)
-    /// for a single class by walking up the primary parent chain.
-    pub fn rebuild_keyword_inheritance_for_class(&mut self, class_id: &ClassId) {
-        let Some(class) = self.global_semantic_model.get_class(class_id) else {
-            return;
-        };
-        if class.is_procedure_block.is_some()
-            && class.default_language.is_some()
-            && class.is_final.is_some()
-        {
-            return;
-        }
-
-        let mut pb = class.is_procedure_block;
-        let mut lang = class.default_language.clone();
-        let mut is_final = class.is_final;
-        let mut current_parents = class.inherited_classes.clone();
-        let mut visited = HashSet::new();
-
-        while pb.is_none() || lang.is_none() || is_final.is_none() {
-            let Some((parent_name, _)) = current_parents.get(0) else {
-                break;
-            };
-            if !visited.insert(parent_name.clone()) {
-                break;
-            }
-            let Some(&parent_id) = self.classes.get(parent_name) else {
-                break;
-            };
-            let Some(parent) = self.global_semantic_model.get_class(&parent_id) else {
-                break;
-            };
-            if pb.is_none() {
-                pb = parent.is_procedure_block;
-            }
-            if lang.is_none() {
-                lang = parent.default_language.clone();
-            }
-            if is_final.is_none() {
-                is_final = parent.is_final;
-            }
-            current_parents = parent.inherited_classes.clone();
-        }
-
-        if let Some(class) = self.global_semantic_model.get_mut_class(class_id) {
-            if class.is_procedure_block.is_none() {
-                class.is_procedure_block = pb;
-            }
-            if class.default_language.is_none() {
-                class.default_language = lang;
-            }
-            if class.is_final.is_none() {
-                class.is_final = is_final;
-            }
-        }
-    }
-
     fn rebuild_override_index_for_classes_and_apply(
         &mut self,
         affected_classes: &HashSet<ClassId>,
     ) {
+        // Reset accessible-definition maps to declarations owned by each class.
+        // The override rebuild below adds the currently inherited entries back.
+        // Without this reset, members removed from a replaced/updated parent can
+        // remain as stale inherited definitions in subclasses.
+        let own_definitions: Vec<_> = affected_classes
+            .iter()
+            .filter_map(|class_id| {
+                self.global_semantic_model.get_class(class_id).map(|class| {
+                    (
+                        class.name.clone(),
+                        class.methods.clone(),
+                        class.properties.clone(),
+                        class.parameters.clone(),
+                    )
+                })
+            })
+            .collect();
+        for (class_name, methods, properties, parameters) in own_definitions {
+            self.method_defs.insert(class_name.clone(), methods);
+            self.property_defs.insert(class_name.clone(), properties);
+            self.parameter_defs.insert(class_name, parameters);
+        }
+
         let (extended_methods, extended_properties, extended_parameters) =
             self.build_override_index_for_classes(affected_classes);
 
@@ -3013,7 +3964,16 @@ impl ProjectData {
                     .map(|c| {
                         c.inherited_classes
                             .iter()
-                            .filter(|(parent_name, _)| cls_name_to_id.contains_key(parent_name))
+                            .filter(|(parent_name, _)| {
+                                let Some(parent_id) = self.classes.get(parent_name) else {
+                                    return false;
+                                };
+                                cls_name_to_id.contains_key(parent_name)
+                                    && self
+                                        .global_semantic_model
+                                        .get_class(parent_id)
+                                        .is_some_and(|parent| !parent.is_final)
+                            })
                             .count()
                     })
                     .unwrap_or(0);
@@ -3076,13 +4036,26 @@ impl ProjectData {
             let mut property_table: HashMap<String, (PropertyRef, bool)> = HashMap::new();
             let mut parameter_table: HashMap<String, (ParameterRef, bool)> = HashMap::new();
 
-            let parent_names: Vec<String> = if let Some(inheritance_direction) =
-                inheritance_direction
-                && inheritance_direction == "right"
+            let valid_parent = |name: &String| {
+                self.classes
+                    .get(name)
+                    .and_then(|parent_id| self.global_semantic_model.get_class(parent_id))
+                    .is_some_and(|parent| !parent.is_final)
+            };
+            let parent_names: Vec<String> = if inheritance_direction == InheritanceDirection::Right
             {
-                parents.iter().rev().map(|(name, _)| name.clone()).collect()
+                parents
+                    .iter()
+                    .rev()
+                    .filter(|(name, _)| valid_parent(name))
+                    .map(|(name, _)| name.clone())
+                    .collect()
             } else {
-                parents.iter().map(|(name, _)| name.clone()).collect()
+                parents
+                    .iter()
+                    .filter(|(name, _)| valid_parent(name))
+                    .map(|(name, _)| name.clone())
+                    .collect()
             };
 
             for parent_name in &parent_names {
@@ -3380,9 +4353,7 @@ impl ProjectData {
             // Find inherited entry for this method name from parents
             let mut inherited_entry: Option<(PropertyRef, bool)> = None;
 
-            let parent_names: Vec<String> = if let Some(inheritance_direction) =
-                inheritance_direction
-                && inheritance_direction == "right"
+            let parent_names: Vec<String> = if inheritance_direction == InheritanceDirection::Right
             {
                 parents.iter().rev().map(|(name, _)| name.clone()).collect()
             } else {
@@ -3588,9 +4559,7 @@ impl ProjectData {
             // Find inherited entry for this method name from parents
             let mut inherited_entry: Option<(ParameterRef, bool)> = None;
 
-            let parent_names: Vec<String> = if let Some(inheritance_direction) =
-                inheritance_direction
-                && inheritance_direction == "right"
+            let parent_names: Vec<String> = if inheritance_direction == InheritanceDirection::Right
             {
                 parents.iter().rev().map(|(name, _)| name.clone()).collect()
             } else {
@@ -3793,9 +4762,7 @@ impl ProjectData {
             // Find inherited entry for this method name from parents
             let mut inherited_entry: Option<(MethodRef, bool)> = None;
 
-            let parent_names: Vec<String> = if let Some(inheritance_direction) =
-                inheritance_direction
-                && inheritance_direction == "right"
+            let parent_names: Vec<String> = if inheritance_direction == InheritanceDirection::Right
             {
                 parents.iter().rev().map(|(name, _)| name.clone()).collect()
             } else {
@@ -4285,7 +5252,7 @@ impl ProjectData {
 
         let cls_is_procedure_block =
             if let Some(c) = self.global_semantic_model.get_class(&method_ref.class) {
-                c.is_procedure_block.unwrap_or(true)
+                c.is_procedure_block
             } else {
                 return false;
             };
@@ -4619,6 +5586,14 @@ impl ProjectState {
                 method_defs: HashMap::new(),
                 pub_var_defs: HashMap::new(),
                 parameter_defs: HashMap::new(),
+                relationship_defs: HashMap::new(),
+                foreignkey_defs: HashMap::new(),
+                query_defs: HashMap::new(),
+                index_defs: HashMap::new(),
+                trigger_defs: HashMap::new(),
+                xdata_defs: HashMap::new(),
+                projection_defs: HashMap::new(),
+                storage_defs: HashMap::new(),
                 property_defs: HashMap::new(),
                 override_index: OverrideIndex::new(),
                 dependent_class_index: Dependents::new(),
@@ -4628,6 +5603,8 @@ impl ProjectState {
                 inheritance_diagonstics: HashMap::new(),
                 method_reference_diagnostics: HashMap::new(),
                 other_class_diagnostics: HashMap::new(),
+                sys_classes: HashSet::new(),
+                sys_classes_overwritten: HashSet::new(),
             }),
         }
     }

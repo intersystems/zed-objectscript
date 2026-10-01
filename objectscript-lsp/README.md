@@ -7,7 +7,8 @@ We built this language server to provide editor-independent ObjectScript semanti
 ## Current Features
 
 - Workspace indexing for `.cls`, `.inc`, `.rtn`, `.mac`, and `.int`
-- Everything is rebuilt incrementally.
+- Cold workspace construction uses a bulk declaration/linking pipeline; live documents are
+  rebuilt incrementally.
 - Multi-workspace support through LSP workspace folders, with deepest-parent routing per document
 - Go-to-definition for ObjectScript variables, orefs, methods, properties, classes, parameters with ProcedureBlock-aware private/public resolution
 - Go-to-implementation for inherited and overridden methods and classes
@@ -31,6 +32,12 @@ We built this language server to provide editor-independent ObjectScript semanti
 - Public symbols live in `GlobalSemanticModel`
 - Private symbols are tracked through `LocalSemanticModel` and `ScopeTree`
 - XML documents are tracked for diagnostics, but they do not enter the class/routine semantic rebuild pipeline
+- The bulk indexing phases, ownership model, SYS classification, and performance changes are
+  documented in [documentation/bulk-workspace-indexing.md](documentation/bulk-workspace-indexing.md).
+- Remaining measured bottlenecks and optimization priorities are documented in
+  [documentation/indexing-optimization-roadmap.md](documentation/indexing-optimization-roadmap.md).
+- Granular, ID-independent class and member comparison is documented in
+  [documentation/class-comparison.md](documentation/class-comparison.md).
 
 ## Workspace Layout
 
@@ -76,9 +83,9 @@ In this case, the `DependencyGraph` is used to determine all possible paths to t
 ## Grammar Baseline
 
 - `tree-sitter = 0.26.6`
-- `tree-sitter-objectscript = 1.9.20`
-- `tree-sitter-objectscript-routine = 1.9.20`
-- `tree-sitter-objectscript-playground = 1.9.20`
+- `tree-sitter-objectscript = 1.10.1`
+- `tree-sitter-objectscript-routine = 1.10.1`
+- `tree-sitter-objectscript-playground = 1.10.1`
 - `tree-sitter-xml = 0.7.0`
 
 ## Roadmap
