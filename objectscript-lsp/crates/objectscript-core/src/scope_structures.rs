@@ -43,6 +43,24 @@ pub struct PropertySymbol {
     pub references: Vec<Range>,
 }
 
+/// Definition site for a named class member.
+#[derive(Clone, Debug)]
+pub struct MemberSymbol {
+    pub name: String,
+    pub url: Url,
+    pub location: Range,
+    pub references: Vec<Range>,
+}
+
+pub type RelationshipSymbol = MemberSymbol;
+pub type ForeignKeySymbol = MemberSymbol;
+pub type QuerySymbol = MemberSymbol;
+pub type IndexSymbol = MemberSymbol;
+pub type TriggerSymbol = MemberSymbol;
+pub type XdataSymbol = MemberSymbol;
+pub type ProjectionSymbol = MemberSymbol;
+pub type StorageSymbol = MemberSymbol;
+
 /// A class definition symbol (definition site + liveness flag).
 #[derive(Clone, Debug)]
 pub struct ClassGlobalSymbol {

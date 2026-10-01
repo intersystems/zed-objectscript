@@ -1,7 +1,8 @@
 use crate::document::Document;
 use crate::parse_structures::{
-    CodeMode, InheritanceDirection, Language, Method, MethodType, Parameter, Property, TypeName,
-    VariableDefType,
+    Argument, CodeMode, ForeignKey, Index, InheritanceDirection, Language, Method, MethodType,
+    Parameter, Projection, Property, Query, Relationship, Storage, Trigger, TypeName,
+    VariableDefType, XData,
 };
 use crate::workspace::ProjectData;
 use rayon::prelude::*;
@@ -13,11 +14,21 @@ pub struct ValueChange<T> {
     pub after: T,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MemberChanges<T> {
     pub added: Vec<String>,
     pub removed: Vec<String>,
     pub changed: BTreeMap<String, T>,
+}
+
+impl<T> Default for MemberChanges<T> {
+    fn default() -> Self {
+        Self {
+            added: Vec::new(),
+            removed: Vec::new(),
+            changed: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -44,6 +55,33 @@ pub struct VariableSnapshot {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArgumentSnapshot {
+    pub name: String,
+    pub return_type: Option<TypeName>,
+    pub default_value: Option<String>,
+    pub output: bool,
+    pub byref: bool,
+}
+
+pub type ArgumentDiff = ValueChange<ArgumentSnapshot>;
+pub type RelationshipSnapshot = Relationship;
+pub type ForeignKeySnapshot = ForeignKey;
+pub type QuerySnapshot = Query;
+pub type IndexSnapshot = Index;
+pub type TriggerSnapshot = Trigger;
+pub type XDataSnapshot = XData;
+pub type ProjectionSnapshot = Projection;
+pub type StorageSnapshot = Storage;
+pub type RelationshipDiff = ValueChange<RelationshipSnapshot>;
+pub type ForeignKeyDiff = ValueChange<ForeignKeySnapshot>;
+pub type QueryDiff = ValueChange<QuerySnapshot>;
+pub type IndexDiff = ValueChange<IndexSnapshot>;
+pub type TriggerDiff = ValueChange<TriggerSnapshot>;
+pub type XDataDiff = ValueChange<XDataSnapshot>;
+pub type ProjectionDiff = ValueChange<ProjectionSnapshot>;
+pub type StorageDiff = ValueChange<StorageSnapshot>;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MethodSnapshot {
     pub method_type: MethodType,
     pub return_type: Option<TypeName>,
@@ -54,6 +92,7 @@ pub struct MethodSnapshot {
     pub public_variables_declared: Vec<String>,
     pub final_keyword: Option<bool>,
     pub variables: Vec<VariableSnapshot>,
+    pub arguments: BTreeMap<String, ArgumentSnapshot>,
     /// Exact declaration/body source for implementation-level comparison.
     pub implementation: Option<String>,
 }
@@ -65,6 +104,7 @@ pub struct PropertySnapshot {
     pub final_keyword: Option<bool>,
     pub multidimensional: bool,
     pub return_type: Option<TypeName>,
+    pub arguments: BTreeMap<String, ArgumentSnapshot>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -87,6 +127,14 @@ pub struct ClassSnapshot {
     pub methods: BTreeMap<String, MethodSnapshot>,
     pub properties: BTreeMap<String, PropertySnapshot>,
     pub parameters: BTreeMap<String, ParameterSnapshot>,
+    pub relationships: BTreeMap<String, RelationshipSnapshot>,
+    pub foreign_keys: BTreeMap<String, ForeignKeySnapshot>,
+    pub queries: BTreeMap<String, QuerySnapshot>,
+    pub indices: BTreeMap<String, IndexSnapshot>,
+    pub triggers: BTreeMap<String, TriggerSnapshot>,
+    pub xdata: BTreeMap<String, XDataSnapshot>,
+    pub projections: BTreeMap<String, ProjectionSnapshot>,
+    pub storage: BTreeMap<String, StorageSnapshot>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -100,6 +148,7 @@ pub struct MethodDiff {
     pub public_variables_declared: Option<ValueChange<Vec<String>>>,
     pub final_keyword: Option<ValueChange<Option<bool>>>,
     pub variables: CollectionChanges<VariableSnapshot>,
+    pub arguments: MemberChanges<ArgumentDiff>,
     /// Exact method declaration/body source changed.
     pub source_changed: bool,
 }
@@ -111,6 +160,7 @@ pub struct PropertyDiff {
     pub final_keyword: Option<ValueChange<Option<bool>>>,
     pub multidimensional: Option<ValueChange<bool>>,
     pub return_type: Option<ValueChange<Option<TypeName>>>,
+    pub arguments: MemberChanges<ArgumentDiff>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -132,6 +182,14 @@ pub struct ClassDiff {
     pub methods: MemberChanges<MethodDiff>,
     pub properties: MemberChanges<PropertyDiff>,
     pub parameters: MemberChanges<ParameterDiff>,
+    pub relationships: MemberChanges<RelationshipDiff>,
+    pub foreign_keys: MemberChanges<ForeignKeyDiff>,
+    pub queries: MemberChanges<QueryDiff>,
+    pub indices: MemberChanges<IndexDiff>,
+    pub triggers: MemberChanges<TriggerDiff>,
+    pub xdata: MemberChanges<XDataDiff>,
+    pub projections: MemberChanges<ProjectionDiff>,
+    pub storage: MemberChanges<StorageDiff>,
     /// Source changed, but no difference is represented by the current model.
     pub unmodeled_source_change: bool,
 }
@@ -322,6 +380,19 @@ pub fn snapshot_class(data: &ProjectData, class_name: &str) -> Option<ClassSnaps
                 .map(|parameter| (name.clone(), snapshot_parameter(parameter)))
         })
         .collect();
+    macro_rules! snapshot_members {
+        ($field:ident, $getter:ident) => {
+            class
+                .$field
+                .iter()
+                .filter_map(|(name, member_ref)| {
+                    data.global_semantic_model
+                        .$getter(member_ref)
+                        .map(|member| (name.clone(), member.clone()))
+                })
+                .collect()
+        };
+    }
 
     Some(ClassSnapshot {
         name: class.name.clone(),
@@ -335,6 +406,14 @@ pub fn snapshot_class(data: &ProjectData, class_name: &str) -> Option<ClassSnaps
         methods,
         properties,
         parameters,
+        relationships: snapshot_members!(relationships, get_relationship),
+        foreign_keys: snapshot_members!(foreignkeys, get_foreignkey),
+        queries: snapshot_members!(queries, get_query),
+        indices: snapshot_members!(indices, get_index),
+        triggers: snapshot_members!(triggers, get_trigger),
+        xdata: snapshot_members!(xdata, get_xdata),
+        projections: snapshot_members!(projections, get_projection),
+        storage: snapshot_members!(storage, get_storage),
     })
 }
 
@@ -387,6 +466,7 @@ fn snapshot_method(
         public_variables_declared,
         final_keyword: method.is_final,
         variables,
+        arguments: snapshot_arguments(&method.arguments),
         implementation,
     }
 }
@@ -398,7 +478,28 @@ fn snapshot_property(property: &Property) -> PropertySnapshot {
         final_keyword: property.is_final,
         multidimensional: property.multidimensional,
         return_type: property.return_type.clone(),
+        arguments: snapshot_arguments(&property.arguments),
     }
+}
+
+fn snapshot_arguments(
+    arguments: &std::collections::HashMap<String, (Argument, tree_sitter::Range)>,
+) -> BTreeMap<String, ArgumentSnapshot> {
+    arguments
+        .iter()
+        .map(|(name, (argument, _))| {
+            (
+                name.clone(),
+                ArgumentSnapshot {
+                    name: argument.name.clone(),
+                    return_type: argument.return_type.clone(),
+                    default_value: argument.default_value.clone(),
+                    output: argument.output,
+                    byref: argument.byref,
+                },
+            )
+        })
+        .collect()
 }
 
 fn snapshot_parameter(parameter: &Parameter) -> ParameterSnapshot {
@@ -412,6 +513,11 @@ fn diff_class(before: ClassSnapshot, after: ClassSnapshot) -> ClassDiff {
     let methods = diff_members(&before.methods, &after.methods, diff_method);
     let properties = diff_members(&before.properties, &after.properties, diff_property);
     let parameters = diff_members(&before.parameters, &after.parameters, diff_parameter);
+    macro_rules! value_member_diff {
+        ($field:ident) => {
+            diff_members(&before.$field, &after.$field, |a, b| value_change(a, b))
+        };
+    }
     let mut result = ClassDiff {
         class_name: before.name.clone(),
         imports: value_change(&before.imports, &after.imports),
@@ -430,6 +536,14 @@ fn diff_class(before: ClassSnapshot, after: ClassSnapshot) -> ClassDiff {
         methods,
         properties,
         parameters,
+        relationships: value_member_diff!(relationships),
+        foreign_keys: value_member_diff!(foreign_keys),
+        queries: value_member_diff!(queries),
+        indices: value_member_diff!(indices),
+        triggers: value_member_diff!(triggers),
+        xdata: value_member_diff!(xdata),
+        projections: value_member_diff!(projections),
+        storage: value_member_diff!(storage),
         unmodeled_source_change: false,
     };
     result.unmodeled_source_change = !result.has_semantic_changes();
@@ -448,11 +562,22 @@ impl ClassDiff {
             || has_member_changes(&self.methods)
             || has_member_changes(&self.properties)
             || has_member_changes(&self.parameters)
+            || has_member_changes(&self.relationships)
+            || has_member_changes(&self.foreign_keys)
+            || has_member_changes(&self.queries)
+            || has_member_changes(&self.indices)
+            || has_member_changes(&self.triggers)
+            || has_member_changes(&self.xdata)
+            || has_member_changes(&self.projections)
+            || has_member_changes(&self.storage)
     }
 }
 
 fn diff_method(before: &MethodSnapshot, after: &MethodSnapshot) -> Option<MethodDiff> {
     let variables = multiset_changes(&before.variables, &after.variables);
+    let arguments = diff_members(&before.arguments, &after.arguments, |a, b| {
+        value_change(a, b)
+    });
     let result = MethodDiff {
         method_type: value_change(&before.method_type, &after.method_type),
         return_type: value_change(&before.return_type, &after.return_type),
@@ -466,6 +591,7 @@ fn diff_method(before: &MethodSnapshot, after: &MethodSnapshot) -> Option<Method
         ),
         final_keyword: value_change(&before.final_keyword, &after.final_keyword),
         variables,
+        arguments,
         source_changed: before.implementation != after.implementation,
     };
     (result.method_type.is_some()
@@ -478,23 +604,29 @@ fn diff_method(before: &MethodSnapshot, after: &MethodSnapshot) -> Option<Method
         || result.final_keyword.is_some()
         || !result.variables.added.is_empty()
         || !result.variables.removed.is_empty()
+        || has_member_changes(&result.arguments)
         || result.source_changed)
         .then_some(result)
 }
 
 fn diff_property(before: &PropertySnapshot, after: &PropertySnapshot) -> Option<PropertyDiff> {
+    let arguments = diff_members(&before.arguments, &after.arguments, |a, b| {
+        value_change(a, b)
+    });
     let result = PropertyDiff {
         required: value_change(&before.required, &after.required),
         is_public: value_change(&before.is_public, &after.is_public),
         final_keyword: value_change(&before.final_keyword, &after.final_keyword),
         multidimensional: value_change(&before.multidimensional, &after.multidimensional),
         return_type: value_change(&before.return_type, &after.return_type),
+        arguments,
     };
     (result.required.is_some()
         || result.is_public.is_some()
         || result.final_keyword.is_some()
         || result.multidimensional.is_some()
-        || result.return_type.is_some())
+        || result.return_type.is_some()
+        || has_member_changes(&result.arguments))
     .then_some(result)
 }
 

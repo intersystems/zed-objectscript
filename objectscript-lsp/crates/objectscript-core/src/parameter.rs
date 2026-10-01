@@ -1,93 +1,61 @@
-use crate::common::{find_return_type, get_keyword_and_value, get_string_at_byte_range};
-use crate::parse_structures::{Parameter, TypeName};
-use tree_sitter::{Language as TsLanguage, Node, Query, QueryCursor, StreamingIterator};
-use tree_sitter_objectscript::LANGUAGE_OBJECTSCRIPT_UDL;
+use crate::common::{
+    get_node_children, get_string_at_byte_range, get_tracked_keywords, parse_return_type,
+};
+use crate::parse_structures::Parameter;
+use tree_sitter::Node;
 
-impl Parameter {
-    pub fn new(name: String) -> Self {
+impl Default for Parameter {
+    fn default() -> Self {
         Self {
-            name,
             is_final: None,
+            name: "TODO".to_string(),
             return_type: None,
+            default_value: None,
         }
     }
+}
 
-    /// Given a parameter node, queries the keywords and assigns
-    /// the return type and the keywords
-    /// Returns (bool, bool) representing (is_public_changed, is_final_changed)
-    pub fn build_keywords(
-        &mut self,
-        node: Node,
-        content: &str,
-        old_class_is_final: Option<bool>,
-        class_is_final: Option<bool>,
-    ) -> bool {
-        let query_str = r#"
-            [(parameter_keyword) @keyword
-            (return_type (typename (identifier) @returntype ))
-            ]"#;
-        let language: &TsLanguage = &LANGUAGE_OBJECTSCRIPT_UDL.into();
-        let mut is_final_changed = false;
-        if let Ok(query) = Query::new(language, query_str) {
-            let mut cursor = QueryCursor::new();
-            let mut iter = cursor.matches(&query, node, content.as_bytes());
-            let keyword_idx = query.capture_index_for_name("keyword");
-            let returntype_idx = query.capture_index_for_name("returntype");
-            let old_is_final = self.is_final.clone();
-            let mut return_type_parameters = Vec::new();
-            let mut saw_first_return_type = false;
-            let mut return_type_id = None;
-            while let Some(query_match) = iter.next() {
-                let mut i = 0;
-                while i < query_match.captures.len() {
-                    let capture = &query_match.captures[i];
-                    if keyword_idx == Some(capture.index) {
-                        if let Some(keyword_str) =
-                            get_string_at_byte_range(content, capture.node.byte_range())
-                        {
-                            let (not, keyword_name, _) =
-                                get_keyword_and_value(keyword_str.as_str());
-                            if keyword_name == "final" {
-                                if not {
-                                    self.is_final = Some(false);
-                                } else {
-                                    self.is_final = Some(true);
-                                }
-                            }
-                        }
-                        i += 1;
-                        continue;
-                    } else if returntype_idx == Some(capture.index) {
-                        let return_type_node = capture.node;
-                        let Some(typename) =
-                            get_string_at_byte_range(content, return_type_node.byte_range())
-                        else {
-                            continue;
-                        };
-                        if !saw_first_return_type {
-                            return_type_id = Some(find_return_type(typename));
-                            saw_first_return_type = true;
-                        } else {
-                            return_type_parameters.push(typename);
-                        }
-                        i += 1;
-                        continue;
-                    }
+pub fn build_parameter_struct(parameter_node: Node, content: &str) -> Option<Parameter> {
+    if parameter_node.kind() != "parameter" {
+        eprintln!(
+            "Error: build_parameter_struct was called for node {:?}, but it can only be called for parameter nodes",
+            parameter_node.kind()
+        );
+        return None;
+    }
+    let mut parameter = Parameter::default();
+    let parameter_children = get_node_children(parameter_node);
+    for parameter_child in parameter_children {
+        match parameter_child.kind() {
+            "parameter_name" => {
+                if let Some(parameter_name_node) = parameter_child.named_child(0)
+                    && let Some(name) =
+                        get_string_at_byte_range(content, parameter_name_node.byte_range())
+                {
+                    parameter.name = name;
+                } else {
+                    eprintln!("Error: failed to get parameter name.");
+                    return None;
                 }
             }
-            if let Some(typename_id) = return_type_id {
-                let typename = TypeName {
-                    ret_type: typename_id,
-                    parameters: return_type_parameters,
-                };
-                self.return_type = Some(typename);
+            "default_argument_value" => {
+                if let Some(val) = parameter_child.named_child(0) {
+                    parameter.default_value = get_string_at_byte_range(content, val.byte_range());
+                }
             }
-            let old_final_keyword_res = old_is_final.unwrap_or(old_class_is_final.unwrap_or(false));
-            let new_final_keyword = self.is_final.unwrap_or(class_is_final.unwrap_or(false));
-            if old_final_keyword_res != new_final_keyword {
-                is_final_changed = true;
+            "return_type" => {
+                parameter.return_type = parse_return_type(parameter_child, content);
             }
+            "parameter_keywords" => {
+                let tracked_keywords = get_tracked_keywords(parameter_child, content);
+                parameter.is_final = tracked_keywords.is_final;
+            }
+            _ => continue,
         }
-        is_final_changed
     }
+    if &parameter.name == "TODO" {
+        eprintln!("error: failed to parse parameter name");
+        return None;
+    }
+    Some(parameter)
 }

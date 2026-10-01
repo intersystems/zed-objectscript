@@ -1,5 +1,6 @@
 use crate::parse_structures::{
-    Method, MethodRef, PrivateVarId, Property, PropertyRef, Variable, VariableRef,
+    Method, MethodRef, PrivateVarId, Property, PropertyRef, Query, QueryRef, Relationship,
+    RelationshipRef, Variable, VariableRef,
 };
 use crate::scope_structures::ScopeId;
 use std::collections::{HashMap, HashSet};
@@ -10,6 +11,8 @@ use std::collections::{HashMap, HashSet};
 pub struct LocalSemanticModel {
     pub methods: HashMap<MethodRef, Method>,
     pub properties: HashMap<PropertyRef, Property>,
+    pub relationships: HashMap<RelationshipRef, Relationship>,
+    pub queries: HashMap<QueryRef, Query>,
     pub variables: HashMap<MethodRef, HashMap<ScopeId, Vec<Variable>>>,
     pub active: bool,
 }
@@ -20,6 +23,8 @@ impl LocalSemanticModel {
         Self {
             methods: HashMap::new(),
             properties: HashMap::new(),
+            relationships: HashMap::new(),
+            queries: HashMap::new(),
             variables: HashMap::new(),
             active: true,
         }
@@ -71,6 +76,8 @@ impl LocalSemanticModel {
     pub fn clear(&mut self) {
         self.methods.clear();
         self.properties.clear();
+        self.relationships.clear();
+        self.queries.clear();
         self.variables.clear();
         self.active = false;
     }
@@ -134,5 +141,24 @@ impl LocalSemanticModel {
     /// Given a Property, adds the Property to the vec corresponding to the class the Property is defined in.
     pub fn new_property(&mut self, property: Property, property_ref: PropertyRef) {
         self.properties.insert(property_ref, property);
+    }
+
+    pub fn new_relationship(&mut self, value: Relationship, member_ref: RelationshipRef) {
+        self.relationships.insert(member_ref, value);
+    }
+    pub fn get_relationship(&self, member_ref: &RelationshipRef) -> Option<&Relationship> {
+        self.relationships.get(member_ref)
+    }
+    pub fn remove_relationship(&mut self, member_ref: &RelationshipRef) -> Option<Relationship> {
+        self.relationships.remove(member_ref)
+    }
+    pub fn new_query(&mut self, value: Query, member_ref: QueryRef) {
+        self.queries.insert(member_ref, value);
+    }
+    pub fn get_query(&self, member_ref: &QueryRef) -> Option<&Query> {
+        self.queries.get(member_ref)
+    }
+    pub fn remove_query(&mut self, member_ref: &QueryRef) -> Option<Query> {
+        self.queries.remove(member_ref)
     }
 }

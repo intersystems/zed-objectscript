@@ -1,30 +1,118 @@
 use crate::common::{
-    get_dotted_subroutine_info, get_keyword_and_value, get_node_children, get_parameter_name,
-    get_procedure_info, get_property_name, get_routine_method_range, get_string_at_byte_range,
-    get_subroutine_info, ts_range_to_lsp_range,
+    get_dotted_subroutine_info, get_keyword_and_value, get_node_children, get_procedure_info,
+    get_routine_method_range, get_string_at_byte_range, get_subroutine_info, ts_range_to_lsp_range,
 };
 
+use crate::foreignkey::build_foreignkey_struct;
+use crate::index::build_index_struct;
+use crate::method::build_method_struct;
+use crate::parameter::build_parameter_struct;
 use crate::parse_structures::{
-    Class, ClassId, InheritanceDirection, Language, MemberType, Method, MethodId, MethodRef,
-    MethodType, Parameter, ParameterId, ParameterRef, Property, PropertyId, PropertyRef,
+    Class, ClassId, ForeignKey, ForeignKeyId, ForeignKeyRef, Index, IndexId, IndexRef,
+    InheritanceDirection, Language, MemberType, Method, MethodId, MethodRef, MethodType, Parameter,
+    ParameterId, ParameterRef, Projection, ProjectionId, ProjectionRef, Property, PropertyId,
+    PropertyRef, Query, QueryId, QueryRef, Relationship, RelationshipId, RelationshipRef, Storage,
+    StorageId, StorageRef, Trigger, TriggerId, TriggerRef, XData, XdataId, XdataRef,
 };
+use crate::projection::build_projection_struct;
+use crate::property::build_property_struct;
+use crate::query::build_query_struct;
+use crate::relationship::build_relationship_struct;
+use crate::storage::build_storage_struct;
+use crate::trigger::build_trigger_struct;
+use crate::xdata::build_xdata_struct;
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Range as LspRange};
 use tree_sitter::{
-    Language as TsLanguage, Node, Query, QueryCursor, Range, StreamingIterator, Tree,
+    Language as TsLanguage, Node, Query as TsQuery, QueryCursor, Range, StreamingIterator, Tree,
 };
 use tree_sitter_objectscript::LANGUAGE_OBJECTSCRIPT_UDL;
 use tree_sitter_objectscript_routine::LANGUAGE_OBJECTSCRIPT_ROUTINE;
 
-const UDL_CLASS_MEMBER_QUERY: &str = r#"(class_definition
-            (class_extends (class_name (identifier) @inherits)) ?
-            (class_keyword) @classkeyword
-            (class_body
-            (class_statement
-            [
+#[derive(Clone, Copy)]
+struct MemberCapture<'tree> {
+    member_type: MemberType,
+    node: Node<'tree>,
+}
+
+enum BuiltClassMember {
+    Method {
+        method: Method,
+        range: Range,
+        name_range: Range,
+    },
+    Property(Property, Range),
+    Parameter(Parameter, Range),
+    Relationship(Relationship, Range),
+    ForeignKey(ForeignKey, Range),
+    Query(Query, Range),
+    Index(Index, Range),
+    Trigger(Trigger, Range),
+    XData(XData, Range),
+    Projection(Projection, Range),
+    Storage(Storage, Range),
+}
+
+fn build_class_member(capture: MemberCapture<'_>, content: &str) -> Option<BuiltClassMember> {
+    let node = capture.node;
+    match capture.member_type {
+        MemberType::ClassMethodCall | MemberType::MethodDef | MemberType::ClientMethod => {
+            let method_type = match capture.member_type {
+                MemberType::ClassMethodCall => MethodType::ClassMethod,
+                MemberType::MethodDef => MethodType::InstanceMethod,
+                MemberType::ClientMethod => MethodType::ClientMethod,
+                _ => unreachable!(),
+            };
+            let method = build_method_struct(node, method_type, content)?;
+            let name_range = node.named_child(0)?.named_child(0)?.range();
+            Some(BuiltClassMember::Method {
+                method,
+                range: node.range(),
+                name_range,
+            })
+        }
+        MemberType::RelativeProperty => build_property_struct(node, content)
+            .map(|value| BuiltClassMember::Property(value, node.range())),
+        MemberType::RelativeParameter => build_parameter_struct(node, content)
+            .map(|value| BuiltClassMember::Parameter(value, node.range())),
+        MemberType::Relationship => build_relationship_struct(node, content)
+            .map(|value| BuiltClassMember::Relationship(value, node.range())),
+        MemberType::Foreignkey => build_foreignkey_struct(node, content)
+            .map(|value| BuiltClassMember::ForeignKey(value, node.range())),
+        MemberType::Query => build_query_struct(node, content)
+            .map(|value| BuiltClassMember::Query(value, node.range())),
+        MemberType::Index => build_index_struct(node, content)
+            .map(|value| BuiltClassMember::Index(value, node.range())),
+        MemberType::Trigger => build_trigger_struct(node, content)
+            .map(|value| BuiltClassMember::Trigger(value, node.range())),
+        MemberType::Xdata => build_xdata_struct(node, content)
+            .map(|value| BuiltClassMember::XData(value, node.range())),
+        MemberType::Projection => build_projection_struct(node, content)
+            .map(|value| BuiltClassMember::Projection(value, node.range())),
+        MemberType::Storage => build_storage_struct(node, content)
+            .map(|value| BuiltClassMember::Storage(value, node.range())),
+        _ => None,
+    }
+}
+
+const UDL_CLASS_MEMBER_QUERY: &str = r#"
+    (class_definition
+      (class_extends
+        (class_name
+          (identifier) @inherits)))
+
+    (class_definition
+      (class_keyword) @classkeyword)
+
+    (class_definition
+      (class_body
+        (class_statement
+          [
             (method (method_definition) @method)
             (classmethod (method_definition) @classmethod)
+            (clientmethod) @clientmethod
             (parameter) @parameter
             (property) @property
             (relationship) @relationship
@@ -35,9 +123,8 @@ const UDL_CLASS_MEMBER_QUERY: &str = r#"(class_definition
             (xdata) @xdata
             (projection) @projection
             (storage) @storage
-            ])
-            )
-            )"#;
+          ])))
+"#;
 
 const ROUTINE_MEMBER_QUERY: &str = r#"
 [(routine_definition) @routinedef  ?
@@ -47,29 +134,19 @@ const ROUTINE_MEMBER_QUERY: &str = r#"
 (statement (tag_statement)) @subroutine ?]"#;
 
 fn cached_query(
-    query: &'static OnceLock<Query>,
+    query: &'static OnceLock<TsQuery>,
     language: TsLanguage,
     source: &str,
     name: &str,
-) -> &'static Query {
+) -> &'static TsQuery {
     query.get_or_init(|| {
-        Query::new(&language, source)
+        TsQuery::new(&language, source)
             .unwrap_or_else(|error| panic!("failed to compile {name} Tree-sitter query: {error}"))
     })
 }
 
-// fn udl_class_header_query() -> &'static Query {
-//     static QUERY: OnceLock<Query> = OnceLock::new();
-//     cached_query(
-//         &QUERY,
-//         LANGUAGE_OBJECTSCRIPT_UDL.into(),
-//         UDL_CLASS_HEADER_QUERY,
-//         "UDL class header",
-//     )
-// }
-
-fn udl_class_query() -> &'static Query {
-    static QUERY: OnceLock<Query> = OnceLock::new();
+fn udl_class_query() -> &'static TsQuery {
+    static QUERY: OnceLock<TsQuery> = OnceLock::new();
     cached_query(
         &QUERY,
         LANGUAGE_OBJECTSCRIPT_UDL.into(),
@@ -78,8 +155,8 @@ fn udl_class_query() -> &'static Query {
     )
 }
 
-fn routine_member_query() -> &'static Query {
-    static QUERY: OnceLock<Query> = OnceLock::new();
+fn routine_member_query() -> &'static TsQuery {
+    static QUERY: OnceLock<TsQuery> = OnceLock::new();
     cached_query(
         &QUERY,
         LANGUAGE_OBJECTSCRIPT_ROUTINE.into(),
@@ -151,11 +228,50 @@ impl Class {
         self.methods = HashMap::new();
         self.properties = HashMap::new();
         self.parameters = HashMap::new();
+        self.relationships = HashMap::new();
+        self.foreignkeys = HashMap::new();
+        self.queries = HashMap::new();
+        self.indices = HashMap::new();
+        self.triggers = HashMap::new();
+        self.projections = HashMap::new();
+        self.xdata = HashMap::new();
+        self.storage = HashMap::new();
         self.active = active;
         self.next_method_id = 0;
         self.next_parameter_id = 0;
         self.next_property_id = 0;
+        self.next_relationship_id = 0;
+        self.next_index_id = 0;
+        self.next_foreign_key_id = 0;
+        self.next_query_id = 0;
+        self.next_trigger_id = 0;
+        self.next_xdata_id = 0;
+        self.next_projection_id = 0;
+        self.next_storage_id = 0;
         self.is_final = false;
+    }
+
+    pub fn clear_metadata_for_members_rebuilt(&mut self) {
+        self.next_parameter_id = 0;
+        self.next_property_id = 0;
+        self.next_relationship_id = 0;
+        self.next_index_id = 0;
+        self.next_foreign_key_id = 0;
+        self.next_query_id = 0;
+        self.next_trigger_id = 0;
+        self.next_xdata_id = 0;
+        self.next_projection_id = 0;
+        self.next_storage_id = 0;
+        self.properties.clear();
+        self.parameters.clear();
+        self.relationships.clear();
+        self.foreignkeys.clear();
+        self.queries.clear();
+        self.indices.clear();
+        self.triggers.clear();
+        self.projections.clear();
+        self.xdata.clear();
+        self.storage.clear();
     }
 
     /// Allocates and returns the next sequential method ID for this class.
@@ -276,6 +392,14 @@ impl Class {
         HashMap<String, (Method, Range, MethodRef, HashSet<String>)>, // new methods
         HashMap<String, (Property, Range, PropertyRef)>, // new properties
         HashMap<String, (Parameter, Range, ParameterRef)>, // new parameters
+        HashMap<String, (Relationship, Range, RelationshipRef)>,
+        HashMap<String, (ForeignKey, Range, ForeignKeyRef)>,
+        HashMap<String, (Query, Range, QueryRef)>,
+        HashMap<String, (Index, Range, IndexRef)>,
+        HashMap<String, (Trigger, Range, TriggerRef)>,
+        HashMap<String, (XData, Range, XdataRef)>,
+        HashMap<String, (Projection, Range, ProjectionRef)>,
+        HashMap<String, (Storage, Range, StorageRef)>,
         Vec<(String, LspRange)>, // new inherited classes
         HashMap<String, (Range, MethodType, HashSet<String>)>, // all methods info
         Vec<Diagnostic>,
@@ -288,6 +412,14 @@ impl Class {
         let mut new_methods = HashMap::new();
         let mut new_properties = HashMap::new();
         let mut new_parameters = HashMap::new();
+        let mut new_relationships = HashMap::new();
+        let mut new_foreignkeys = HashMap::new();
+        let mut new_queries = HashMap::new();
+        let mut new_indices = HashMap::new();
+        let mut new_triggers = HashMap::new();
+        let mut new_projections = HashMap::new();
+        let mut new_xdata = HashMap::new();
+        let mut new_storage = HashMap::new();
         let mut all_methods = HashMap::new();
         let mut diagnostics = Vec::new();
         let mut old_methods: HashSet<String> = self.methods.keys().cloned().collect();
@@ -297,7 +429,6 @@ impl Class {
         // NOTE: right now, properties and parameters are not incremental.. they are so small in terms of what it takes to rebuild that it doesn't make sense to incrementally build them atm
         self.properties.clear();
         self.parameters.clear();
-        self.properties.clear();
         self.relationships.clear();
         self.foreignkeys.clear();
         self.queries.clear();
@@ -326,6 +457,9 @@ impl Class {
             if let Some(method_idx) = query.capture_index_for_name("classmethod") {
                 capture_indices.insert(method_idx, MemberType::ClassMethodCall);
             }
+            if let Some(client_method_idx) = query.capture_index_for_name("clientmethod") {
+                capture_indices.insert(client_method_idx, MemberType::ClientMethod);
+            }
             if let Some(inherits_idx) = query.capture_index_for_name("inherits") {
                 capture_indices.insert(inherits_idx, MemberType::InheritedClass);
             }
@@ -350,37 +484,59 @@ impl Class {
             if let Some(prop_idx) = query.capture_index_for_name("property") {
                 capture_indices.insert(prop_idx, MemberType::RelativeProperty);
             }
-            if let Some(prop_idx) = query.capture_index_for_name("dottedstatement") {
-                capture_indices.insert(prop_idx, MemberType::DottedStatementTag);
+            if let Some(relationship_idx) = query.capture_index_for_name("relationship") {
+                capture_indices.insert(relationship_idx, MemberType::Relationship);
             }
+            if let Some(foreignkey_idx) = query.capture_index_for_name("foreignkey") {
+                capture_indices.insert(foreignkey_idx, MemberType::Foreignkey);
+            }
+            if let Some(query_idx) = query.capture_index_for_name("query") {
+                capture_indices.insert(query_idx, MemberType::Query);
+            }
+            if let Some(index_idx) = query.capture_index_for_name("index") {
+                capture_indices.insert(index_idx, MemberType::Index);
+            }
+            if let Some(trigger_idx) = query.capture_index_for_name("trigger") {
+                capture_indices.insert(trigger_idx, MemberType::Trigger);
+            }
+            if let Some(xdata_idx) = query.capture_index_for_name("xdata") {
+                capture_indices.insert(xdata_idx, MemberType::Xdata);
+            }
+            if let Some(projection_idx) = query.capture_index_for_name("projection") {
+                capture_indices.insert(projection_idx, MemberType::Projection);
+            }
+            if let Some(storage_idx) = query.capture_index_for_name("storage") {
+                capture_indices.insert(storage_idx, MemberType::Storage);
+            }
+
             let mut cursor = QueryCursor::new();
             let mut iter = cursor.matches(query, root_node, content.as_bytes());
 
-            while let Some(query_match) = iter.next() {
-                let mut i = 0;
-                while i < query_match.captures.len() {
-                    let capture = &query_match.captures[i];
-                    if let Some(cap_type) = capture_indices.get(&capture.index) {
-                        match cap_type {
+            if !is_rtn {
+                let mut member_captures = Vec::new();
+                while let Some(query_match) = iter.next() {
+                    for capture in query_match.captures {
+                        let Some(member_type) = capture_indices.get(&capture.index).copied() else {
+                            continue;
+                        };
+                        match member_type {
                             MemberType::ClassKeyword => {
                                 if let Some(keyword_str) =
                                     get_string_at_byte_range(content, capture.node.byte_range())
                                 {
                                     let (not, keyword_name, values) =
                                         get_keyword_and_value(keyword_str.as_str());
-                                    if keyword_name == "procedureblock" {
-                                        if not {
+                                    match keyword_name.as_str() {
+                                        "procedureblock" if not => {
                                             self.is_procedure_block = false;
                                         }
-                                    } else if keyword_name == "language" {
-                                        if let Some(value) = values.get(0).copied() {
-                                            if value == "tsql" {
+                                        "language" => {
+                                            if values.first().map(String::as_str) == Some("tsql") {
                                                 self.default_language = Language::TSql;
                                             }
                                         }
-                                    } else if keyword_name == "inheritance" {
-                                        if let Some(value) = values.get(0).copied() {
-                                            if value == "right" {
+                                        "inheritance" => {
+                                            if values.first().map(String::as_str) == Some("right") {
                                                 self.inheritance_direction =
                                                     InheritanceDirection::Right;
                                             }
@@ -390,446 +546,869 @@ impl Class {
                                                 inheritance_changed = true;
                                             }
                                         }
-                                    } else if keyword_name == "final" {
-                                        if !not {
+                                        "final" if !not => {
                                             self.is_final = true;
                                         }
+                                        _ => {}
                                     }
                                 }
-                                i += 1;
-                                continue;
                             }
                             MemberType::InheritedClass => {
-                                if let Some(inherited_cls_name) =
+                                if let Some(inherited_class_name) =
                                     get_string_at_byte_range(content, capture.node.byte_range())
                                 {
                                     let lsp_range =
                                         ts_range_to_lsp_range(content, capture.node.range());
-                                    inherited_classes.push((inherited_cls_name.clone(), lsp_range));
-                                    // inherited_class_ranges.insert(inherited_cls_name.clone(), lsp_range);
-                                    if let Some((old_inherited_class, _)) =
-                                        self.inherited_classes.get(inherited_count)
+                                    inherited_classes
+                                        .push((inherited_class_name.clone(), lsp_range));
+                                    if self
+                                        .inherited_classes
+                                        .get(inherited_count)
+                                        .map(|(name, _)| name)
+                                        != Some(&inherited_class_name)
                                     {
-                                        if &inherited_cls_name != old_inherited_class {
-                                            inheritance_changed = true;
-                                        }
-                                    } else {
                                         inheritance_changed = true;
                                     }
                                 }
                                 inherited_count += 1;
-                                i += 1;
-                                continue;
                             }
-                            MemberType::Procedure => {
-                                let procedure_statement_node = capture.node;
-                                if let Some((
-                                    method_name,
-                                    method_name_range,
-                                    method_range,
-                                    method_type,
-                                    public_variables_declared,
-                                )) = get_procedure_info(&procedure_statement_node, content)
-                                {
-                                    let existed = old_methods.remove(&method_name);
-                                    if all_methods.contains_key(&method_name) {
-                                        let lsp_range =
-                                            ts_range_to_lsp_range(content, method_name_range);
-                                        let diagnostic = Diagnostic {
-                                            range: lsp_range,
-                                            severity: Some(DiagnosticSeverity::ERROR),
-                                            code: None,
-                                            code_description: None,
-                                            source: Some("ObjectScript".to_string()),
-                                            message: format!(
-                                                "A Method named {:?} already exists in this class.",
-                                                &method_name
-                                            ),
-                                            related_information: None,
-                                            tags: None,
-                                            data: None,
-                                        };
-                                        diagnostics.push(diagnostic);
-                                    }
-                                    if !existed {
-                                        {
-                                            let new_method_id = self.get_next_method_id();
-                                            let method_ref = MethodRef {
-                                                id: MethodId(new_method_id),
-                                                class: *class_id,
-                                                offset: None,
-                                            };
-                                            self.methods.insert(method_name.clone(), method_ref);
-                                            let method = Method::new(
-                                                method_name.clone(),
-                                                public_variables_declared.clone(),
-                                                method_type,
-                                            );
-                                            new_methods.insert(
-                                                method_name.clone(),
-                                                (
-                                                    method,
-                                                    method_range,
-                                                    method_ref,
-                                                    public_variables_declared.clone(),
-                                                ),
-                                            );
-                                        }
-                                    }
-                                    all_methods.insert(
-                                        method_name,
-                                        (method_range, method_type, public_variables_declared),
-                                    );
-                                }
-                                i += 1;
-                                continue;
+                            MemberType::ClassMethodCall
+                            | MemberType::ClientMethod
+                            | MemberType::MethodDef
+                            | MemberType::RelativeParameter
+                            | MemberType::RelativeProperty
+                            | MemberType::Relationship
+                            | MemberType::Foreignkey
+                            | MemberType::Query
+                            | MemberType::Index
+                            | MemberType::Trigger
+                            | MemberType::Xdata
+                            | MemberType::Projection
+                            | MemberType::Storage => {
+                                member_captures.push(MemberCapture {
+                                    member_type,
+                                    node: capture.node,
+                                });
                             }
-                            MemberType::DottedStatementTag => {
-                                let subroutine_statement_node = capture.node;
-                                if let Some((
-                                    method_name,
-                                    method_name_range,
-                                    method_range,
-                                    method_type,
-                                )) =
-                                    get_dotted_subroutine_info(&subroutine_statement_node, content)
-                                {
-                                    let existed = old_methods.remove(&method_name);
-                                    if all_methods.contains_key(&method_name) {
-                                        let lsp_range =
-                                            ts_range_to_lsp_range(content, method_name_range);
-                                        let diagnostic = Diagnostic {
-                                            range: lsp_range,
-                                            severity: Some(DiagnosticSeverity::ERROR),
-                                            code: None,
-                                            code_description: None,
-                                            source: Some("ObjectScript".to_string()),
-                                            message: format!(
-                                                "A Method named {:?} already exists in this class.",
-                                                &method_name
-                                            ),
-                                            related_information: None,
-                                            tags: None,
-                                            data: None,
-                                        };
-                                        diagnostics.push(diagnostic);
-                                    }
-                                    if !existed {
-                                        {
-                                            let new_method_id = self.get_next_method_id();
-                                            let method_ref = MethodRef {
-                                                id: MethodId(new_method_id),
-                                                class: *class_id,
-                                                offset: None,
-                                            };
-                                            self.methods.insert(method_name.clone(), method_ref);
-                                            let method = Method::new(
-                                                method_name.clone(),
-                                                HashSet::new(),
-                                                method_type,
-                                            );
-                                            new_methods.insert(
-                                                method_name.clone(),
-                                                (method, method_range, method_ref, HashSet::new()),
-                                            );
-                                        }
-                                    }
-                                    all_methods.insert(
-                                        method_name,
-                                        (method_range, method_type, HashSet::new()),
-                                    );
-                                }
-                                i += 1;
-                                continue;
-                            }
-                            MemberType::RoutineMethodCall => {
-                                let subroutine_statement_node = capture.node;
-                                if let Some((
-                                    method_name,
-                                    method_name_range,
-                                    method_range,
-                                    method_type,
-                                )) = get_subroutine_info(&subroutine_statement_node, content)
-                                {
-                                    let existed = old_methods.remove(&method_name);
-                                    if all_methods.contains_key(&method_name) {
-                                        let lsp_range =
-                                            ts_range_to_lsp_range(content, method_name_range);
-                                        let diagnostic = Diagnostic {
-                                            range: lsp_range,
-                                            severity: Some(DiagnosticSeverity::ERROR),
-                                            code: None,
-                                            code_description: None,
-                                            source: Some("ObjectScript".to_string()),
-                                            message: format!(
-                                                "A Method named {:?} already exists in this class.",
-                                                &method_name
-                                            ),
-                                            related_information: None,
-                                            tags: None,
-                                            data: None,
-                                        };
-                                        diagnostics.push(diagnostic);
-                                    }
-                                    if !existed {
-                                        {
-                                            let new_method_id = self.get_next_method_id();
-                                            let method_ref = MethodRef {
-                                                id: MethodId(new_method_id),
-                                                class: *class_id,
-                                                offset: None,
-                                            };
-                                            self.methods.insert(method_name.clone(), method_ref);
-                                            let method = Method::new(
-                                                method_name.clone(),
-                                                HashSet::new(),
-                                                method_type,
-                                            );
-                                            new_methods.insert(
-                                                method_name.clone(),
-                                                (method, method_range, method_ref, HashSet::new()),
-                                            );
-                                        }
-                                    }
-                                    all_methods.insert(
-                                        method_name,
-                                        (method_range, method_type, HashSet::new()),
-                                    );
-                                }
-                                i += 1;
-                                continue;
-                            }
-                            MemberType::Routine => {
-                                let routine_node = capture.node;
-                                if class_name != &self.name {
-                                    self.name = class_name.clone();
-                                }
-                                if let Some(method_range) = get_routine_method_range(
-                                    &routine_node,
-                                    class_range.end_point,
-                                    class_range.end_byte,
-                                ) {
-                                    let existed = old_methods.remove(class_name);
-                                    if !existed {
-                                        {
-                                            let new_method_id = self.get_next_method_id();
-                                            let method_ref = MethodRef {
-                                                id: MethodId(new_method_id),
-                                                class: *class_id,
-                                                offset: None,
-                                            };
-                                            self.methods.insert(class_name.clone(), method_ref);
-                                            let method = Method::new(
-                                                class_name.clone(),
-                                                HashSet::new(),
-                                                MethodType::Routine,
-                                            );
-                                            new_methods.insert(
-                                                class_name.clone(),
-                                                (method, method_range, method_ref, HashSet::new()),
-                                            );
-                                        }
-                                    }
-                                    all_methods.insert(
-                                        class_name.clone(),
-                                        (method_range, MethodType::Routine, HashSet::new()),
-                                    );
-                                }
-
-                                i += 1;
-                                continue;
-                            }
-                            MemberType::ClassMethodCall => {
-                                let method_definition_capture = capture.node;
-                                if let Some(method_name_outer) =
-                                    method_definition_capture.named_child(0)
-                                    && let Some(method_name_node) = method_name_outer.named_child(0)
-                                    && let Some(method_name) = get_string_at_byte_range(
-                                        content,
-                                        method_name_node.byte_range(),
-                                    )
-                                {
-                                    let existed = old_methods.remove(&method_name);
-                                    if all_methods.contains_key(&method_name) {
-                                        let lsp_range = ts_range_to_lsp_range(
-                                            content,
-                                            method_name_node.range(),
-                                        );
-                                        let diagnostic = Diagnostic {
-                                            range: lsp_range,
-                                            severity: Some(DiagnosticSeverity::ERROR),
-                                            code: None,
-                                            code_description: None,
-                                            source: Some("ObjectScript".to_string()),
-                                            message: format!(
-                                                "A Method named {:?} already exists in this class.",
-                                                &method_name
-                                            ),
-                                            related_information: None,
-                                            tags: None,
-                                            data: None,
-                                        };
-                                        diagnostics.push(diagnostic);
-                                    }
-                                    if !existed {
-                                        {
-                                            let new_method_id = self.get_next_method_id();
-                                            let method_ref = MethodRef {
-                                                id: MethodId(new_method_id),
-                                                class: *class_id,
-                                                offset: None,
-                                            };
-                                            self.methods.insert(method_name.clone(), method_ref);
-                                            let method = Method::new(
-                                                method_name.clone(),
-                                                HashSet::new(),
-                                                MethodType::ClassMethod,
-                                            );
-                                            new_methods.insert(
-                                                method_name.clone(),
-                                                (
-                                                    method,
-                                                    method_definition_capture.range(),
-                                                    method_ref,
-                                                    HashSet::new(),
-                                                ),
-                                            );
-                                        }
-                                    }
-                                    all_methods.insert(
-                                        method_name,
-                                        (
-                                            method_definition_capture.range(),
-                                            MethodType::ClassMethod,
-                                            HashSet::new(),
-                                        ),
-                                    );
-                                }
-                                i += 1;
-                                continue;
-                            }
-                            MemberType::MethodDef => {
-                                let method_definition_capture = capture.node;
-                                if let Some(method_name_outer) =
-                                    method_definition_capture.named_child(0)
-                                    && let Some(method_name_node) = method_name_outer.named_child(0)
-                                    && let Some(method_name) = get_string_at_byte_range(
-                                        content,
-                                        method_name_node.byte_range(),
-                                    )
-                                {
-                                    let existed = old_methods.remove(&method_name);
-                                    if all_methods.contains_key(&method_name) {
-                                        let lsp_range = ts_range_to_lsp_range(
-                                            content,
-                                            method_name_node.range(),
-                                        );
-                                        let diagnostic = Diagnostic {
-                                            range: lsp_range,
-                                            severity: Some(DiagnosticSeverity::ERROR),
-                                            code: None,
-                                            code_description: None,
-                                            source: Some("ObjectScript".to_string()),
-                                            message: format!(
-                                                "A Method named {:?} already exists in this class.",
-                                                &method_name
-                                            ),
-                                            related_information: None,
-                                            tags: None,
-                                            data: None,
-                                        };
-                                        diagnostics.push(diagnostic);
-                                    }
-                                    if !existed {
-                                        {
-                                            let new_method_id = self.get_next_method_id();
-                                            let method_ref = MethodRef {
-                                                id: MethodId(new_method_id),
-                                                class: *class_id,
-                                                offset: None,
-                                            };
-                                            self.methods.insert(method_name.clone(), method_ref);
-                                            let method = Method::new(
-                                                method_name.clone(),
-                                                HashSet::new(),
-                                                MethodType::InstanceMethod,
-                                            );
-                                            new_methods.insert(
-                                                method_name.clone(),
-                                                (
-                                                    method,
-                                                    method_definition_capture.range(),
-                                                    method_ref,
-                                                    HashSet::new(),
-                                                ),
-                                            );
-                                        }
-                                    }
-                                    all_methods.insert(
-                                        method_name,
-                                        (
-                                            method_definition_capture.range(),
-                                            MethodType::InstanceMethod,
-                                            HashSet::new(),
-                                        ),
-                                    );
-                                }
-                                i += 1;
-                                continue;
-                            }
-                            MemberType::RelativeProperty => {
-                                let property_node = capture.node;
-                                if let Some(property_name) =
-                                    get_property_name(&property_node, content)
-                                {
-                                    let new_property_id = self.get_next_property_id();
-                                    let property_ref = PropertyRef {
-                                        id: PropertyId(new_property_id),
-                                        class: *class_id,
-                                    };
-                                    self.properties.insert(property_name.clone(), property_ref);
-                                    let mut property = Property::new(property_name.clone());
-                                    property.build_keywords(property_node, content, None, None);
-                                    new_properties.insert(
-                                        property_name.clone(),
-                                        (property, property_node.range(), property_ref),
-                                    );
-                                }
-                                i += 1;
-                                continue;
-                            }
-                            MemberType::RelativeParameter => {
-                                let parameter_node = capture.node;
-                                if let Some(parameter_name) =
-                                    get_parameter_name(&parameter_node, content)
-                                {
-                                    let new_parameter_id = self.get_next_parameter_id();
-                                    let parameter_ref = ParameterRef {
-                                        id: ParameterId(new_parameter_id),
-                                        class: *class_id,
-                                    };
-                                    self.parameters
-                                        .insert(parameter_name.clone(), parameter_ref);
-
-                                    let mut parameter = Parameter::new(parameter_name.clone());
-                                    parameter.build_keywords(parameter_node, content, None, None);
-                                    new_parameters.insert(
-                                        parameter_name.clone(),
-                                        (parameter, parameter_node.range(), parameter_ref),
-                                    );
-                                }
-                                i += 1;
-                                continue;
-                            }
-                            _ => {
-                                i += 1;
-                                continue;
-                            }
+                            _ => {}
                         }
                     }
-                    eprintln!("error: didn't match type, but node is {:?}", capture.node);
-                    i += 1;
-                    continue;
+                }
+
+                let built_members: Vec<BuiltClassMember> = member_captures
+                    .into_par_iter()
+                    .filter_map(|capture| build_class_member(capture, content))
+                    .collect();
+
+                for built_member in built_members {
+                    match built_member {
+                        BuiltClassMember::Method {
+                            method,
+                            range,
+                            name_range,
+                        } => {
+                            let method_name = method.name.clone();
+                            let method_type = method.method_type;
+                            let public_variables = method.public_variables_declared.clone();
+                            let existed = old_methods.remove(&method_name);
+                            if all_methods.contains_key(&method_name) {
+                                diagnostics.push(Diagnostic {
+                                    range: ts_range_to_lsp_range(content, name_range),
+                                    severity: Some(DiagnosticSeverity::ERROR),
+                                    code: None,
+                                    code_description: None,
+                                    source: Some("ObjectScript".to_string()),
+                                    message: format!(
+                                        "A Method named {:?} already exists in this class.",
+                                        &method_name
+                                    ),
+                                    related_information: None,
+                                    tags: None,
+                                    data: None,
+                                });
+                            }
+                            if !existed {
+                                let method_ref = MethodRef {
+                                    id: MethodId(self.get_next_method_id()),
+                                    class: *class_id,
+                                    offset: None,
+                                };
+                                self.methods.insert(method_name.clone(), method_ref);
+                                new_methods.insert(
+                                    method_name.clone(),
+                                    (method, range, method_ref, public_variables.clone()),
+                                );
+                            }
+                            all_methods.insert(method_name, (range, method_type, public_variables));
+                        }
+                        BuiltClassMember::Property(property, range) => {
+                            let name = property.name.clone();
+                            let member_ref = PropertyRef {
+                                id: PropertyId(self.get_next_property_id()),
+                                class: *class_id,
+                            };
+                            self.properties.insert(name.clone(), member_ref);
+                            new_properties.insert(name, (property, range, member_ref));
+                        }
+                        BuiltClassMember::Parameter(parameter, range) => {
+                            let name = parameter.name.clone();
+                            let member_ref = ParameterRef {
+                                id: ParameterId(self.get_next_parameter_id()),
+                                class: *class_id,
+                            };
+                            self.parameters.insert(name.clone(), member_ref);
+                            new_parameters.insert(name, (parameter, range, member_ref));
+                        }
+                        BuiltClassMember::Relationship(relationship, range) => {
+                            let name = relationship.name.clone();
+                            let member_ref = RelationshipRef {
+                                id: RelationshipId(self.get_next_relationship_id()),
+                                class: *class_id,
+                            };
+                            self.relationships.insert(name.clone(), member_ref);
+                            new_relationships.insert(name, (relationship, range, member_ref));
+                        }
+                        BuiltClassMember::ForeignKey(foreignkey, range) => {
+                            let name = foreignkey.name.clone();
+                            let member_ref = ForeignKeyRef {
+                                id: ForeignKeyId(self.get_next_foreignkey_id()),
+                                class: *class_id,
+                            };
+                            self.foreignkeys.insert(name.clone(), member_ref);
+                            new_foreignkeys.insert(name, (foreignkey, range, member_ref));
+                        }
+                        BuiltClassMember::Query(query, range) => {
+                            let name = query.name.clone();
+                            let member_ref = QueryRef {
+                                id: QueryId(self.get_next_query_id()),
+                                class: *class_id,
+                            };
+                            self.queries.insert(name.clone(), member_ref);
+                            new_queries.insert(name, (query, range, member_ref));
+                        }
+                        BuiltClassMember::Index(index, range) => {
+                            let name = index.name.clone();
+                            let member_ref = IndexRef {
+                                id: IndexId(self.get_next_index_id()),
+                                class: *class_id,
+                            };
+                            self.indices.insert(name.clone(), member_ref);
+                            new_indices.insert(name, (index, range, member_ref));
+                        }
+                        BuiltClassMember::Trigger(trigger, range) => {
+                            let name = trigger.name.clone();
+                            let member_ref = TriggerRef {
+                                id: TriggerId(self.get_next_trigger_id()),
+                                class: *class_id,
+                            };
+                            self.triggers.insert(name.clone(), member_ref);
+                            new_triggers.insert(name, (trigger, range, member_ref));
+                        }
+                        BuiltClassMember::XData(xdata, range) => {
+                            let name = xdata.name.clone();
+                            let member_ref = XdataRef {
+                                id: XdataId(self.get_next_xdata_id()),
+                                class: *class_id,
+                            };
+                            self.xdata.insert(name.clone(), member_ref);
+                            new_xdata.insert(name, (xdata, range, member_ref));
+                        }
+                        BuiltClassMember::Projection(projection, range) => {
+                            let name = projection.name.clone();
+                            let member_ref = ProjectionRef {
+                                id: ProjectionId(self.get_next_projection_id()),
+                                class: *class_id,
+                            };
+                            self.projections.insert(name.clone(), member_ref);
+                            new_projections.insert(name, (projection, range, member_ref));
+                        }
+                        BuiltClassMember::Storage(storage, range) => {
+                            let name = storage.name.clone();
+                            let member_ref = StorageRef {
+                                id: StorageId(self.get_next_storage_id()),
+                                class: *class_id,
+                            };
+                            self.storage.insert(name.clone(), member_ref);
+                            new_storage.insert(name, (storage, range, member_ref));
+                        }
+                    }
+                }
+            } else {
+                while let Some(query_match) = iter.next() {
+                    let mut i = 0;
+                    while i < query_match.captures.len() {
+                        let capture = &query_match.captures[i];
+                        if let Some(cap_type) = capture_indices.get(&capture.index) {
+                            match cap_type {
+                                MemberType::Relationship => {
+                                    let relationship_node = capture.node;
+                                    if let Some(relationship) =
+                                        build_relationship_struct(relationship_node, content)
+                                    {
+                                        let new_relationship_id = self.get_next_relationship_id();
+                                        let relationship_ref = RelationshipRef {
+                                            id: RelationshipId(new_relationship_id),
+                                            class: *class_id,
+                                        };
+                                        let relationship_name = relationship.name.clone();
+                                        self.relationships
+                                            .insert(relationship_name.clone(), relationship_ref);
+                                        new_relationships.insert(
+                                            relationship_name.clone(),
+                                            (
+                                                relationship,
+                                                relationship_node.range(),
+                                                relationship_ref,
+                                            ),
+                                        );
+                                    }
+                                    i += 1;
+                                    continue;
+                                }
+                                MemberType::ClassKeyword => {
+                                    if let Some(keyword_str) =
+                                        get_string_at_byte_range(content, capture.node.byte_range())
+                                    {
+                                        let (not, keyword_name, values) =
+                                            get_keyword_and_value(keyword_str.as_str());
+                                        if keyword_name == "procedureblock" {
+                                            if not {
+                                                self.is_procedure_block = false;
+                                            }
+                                        } else if keyword_name == "language" {
+                                            if let Some(value) = values.first().map(String::as_str)
+                                            {
+                                                if value == "tsql" {
+                                                    self.default_language = Language::TSql;
+                                                }
+                                            }
+                                        } else if keyword_name == "inheritance" {
+                                            if let Some(value) = values.first().map(String::as_str)
+                                            {
+                                                if value == "right" {
+                                                    self.inheritance_direction =
+                                                        InheritanceDirection::Right;
+                                                }
+                                                if self.inheritance_direction
+                                                    != old_inheritance_direction
+                                                {
+                                                    inheritance_changed = true;
+                                                }
+                                            }
+                                        } else if keyword_name == "final" {
+                                            if !not {
+                                                self.is_final = true;
+                                            }
+                                        }
+                                    }
+                                    i += 1;
+                                    continue;
+                                }
+                                MemberType::InheritedClass => {
+                                    if let Some(inherited_cls_name) =
+                                        get_string_at_byte_range(content, capture.node.byte_range())
+                                    {
+                                        let lsp_range =
+                                            ts_range_to_lsp_range(content, capture.node.range());
+                                        inherited_classes
+                                            .push((inherited_cls_name.clone(), lsp_range));
+                                        // inherited_class_ranges.insert(inherited_cls_name.clone(), lsp_range);
+                                        if let Some((old_inherited_class, _)) =
+                                            self.inherited_classes.get(inherited_count)
+                                        {
+                                            if &inherited_cls_name != old_inherited_class {
+                                                inheritance_changed = true;
+                                            }
+                                        } else {
+                                            inheritance_changed = true;
+                                        }
+                                    }
+                                    inherited_count += 1;
+                                    i += 1;
+                                    continue;
+                                }
+                                MemberType::Procedure => {
+                                    let procedure_statement_node = capture.node;
+                                    if let Some((
+                                        method_name,
+                                        method_name_range,
+                                        method_range,
+                                        method_type,
+                                        public_variables_declared,
+                                    )) = get_procedure_info(&procedure_statement_node, content)
+                                    {
+                                        let existed = old_methods.remove(&method_name);
+                                        if all_methods.contains_key(&method_name) {
+                                            let lsp_range =
+                                                ts_range_to_lsp_range(content, method_name_range);
+                                            let diagnostic = Diagnostic {
+                                                range: lsp_range,
+                                                severity: Some(DiagnosticSeverity::ERROR),
+                                                code: None,
+                                                code_description: None,
+                                                source: Some("ObjectScript".to_string()),
+                                                message: format!(
+                                                    "A Method named {:?} already exists in this class.",
+                                                    &method_name
+                                                ),
+                                                related_information: None,
+                                                tags: None,
+                                                data: None,
+                                            };
+                                            diagnostics.push(diagnostic);
+                                        }
+                                        if !existed {
+                                            {
+                                                let new_method_id = self.get_next_method_id();
+                                                let method_ref = MethodRef {
+                                                    id: MethodId(new_method_id),
+                                                    class: *class_id,
+                                                    offset: None,
+                                                };
+                                                self.methods
+                                                    .insert(method_name.clone(), method_ref);
+                                                let method = Method::new(
+                                                    method_name.clone(),
+                                                    public_variables_declared.clone(),
+                                                    method_type,
+                                                );
+                                                new_methods.insert(
+                                                    method_name.clone(),
+                                                    (
+                                                        method,
+                                                        method_range,
+                                                        method_ref,
+                                                        public_variables_declared.clone(),
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                        all_methods.insert(
+                                            method_name,
+                                            (method_range, method_type, public_variables_declared),
+                                        );
+                                    }
+                                    i += 1;
+                                    continue;
+                                }
+                                MemberType::DottedStatementTag => {
+                                    let subroutine_statement_node = capture.node;
+                                    if let Some((
+                                        method_name,
+                                        method_name_range,
+                                        method_range,
+                                        method_type,
+                                    )) = get_dotted_subroutine_info(
+                                        &subroutine_statement_node,
+                                        content,
+                                    ) {
+                                        let existed = old_methods.remove(&method_name);
+                                        if all_methods.contains_key(&method_name) {
+                                            let lsp_range =
+                                                ts_range_to_lsp_range(content, method_name_range);
+                                            let diagnostic = Diagnostic {
+                                                range: lsp_range,
+                                                severity: Some(DiagnosticSeverity::ERROR),
+                                                code: None,
+                                                code_description: None,
+                                                source: Some("ObjectScript".to_string()),
+                                                message: format!(
+                                                    "A Method named {:?} already exists in this class.",
+                                                    &method_name
+                                                ),
+                                                related_information: None,
+                                                tags: None,
+                                                data: None,
+                                            };
+                                            diagnostics.push(diagnostic);
+                                        }
+                                        if !existed {
+                                            {
+                                                let new_method_id = self.get_next_method_id();
+                                                let method_ref = MethodRef {
+                                                    id: MethodId(new_method_id),
+                                                    class: *class_id,
+                                                    offset: None,
+                                                };
+                                                self.methods
+                                                    .insert(method_name.clone(), method_ref);
+                                                let method = Method::new(
+                                                    method_name.clone(),
+                                                    HashSet::new(),
+                                                    method_type,
+                                                );
+                                                new_methods.insert(
+                                                    method_name.clone(),
+                                                    (
+                                                        method,
+                                                        method_range,
+                                                        method_ref,
+                                                        HashSet::new(),
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                        all_methods.insert(
+                                            method_name,
+                                            (method_range, method_type, HashSet::new()),
+                                        );
+                                    }
+                                    i += 1;
+                                    continue;
+                                }
+                                MemberType::RoutineMethodCall => {
+                                    let subroutine_statement_node = capture.node;
+                                    if let Some((
+                                        method_name,
+                                        method_name_range,
+                                        method_range,
+                                        method_type,
+                                    )) = get_subroutine_info(&subroutine_statement_node, content)
+                                    {
+                                        let existed = old_methods.remove(&method_name);
+                                        if all_methods.contains_key(&method_name) {
+                                            let lsp_range =
+                                                ts_range_to_lsp_range(content, method_name_range);
+                                            let diagnostic = Diagnostic {
+                                                range: lsp_range,
+                                                severity: Some(DiagnosticSeverity::ERROR),
+                                                code: None,
+                                                code_description: None,
+                                                source: Some("ObjectScript".to_string()),
+                                                message: format!(
+                                                    "A Method named {:?} already exists in this class.",
+                                                    &method_name
+                                                ),
+                                                related_information: None,
+                                                tags: None,
+                                                data: None,
+                                            };
+                                            diagnostics.push(diagnostic);
+                                        }
+                                        if !existed {
+                                            {
+                                                let new_method_id = self.get_next_method_id();
+                                                let method_ref = MethodRef {
+                                                    id: MethodId(new_method_id),
+                                                    class: *class_id,
+                                                    offset: None,
+                                                };
+                                                self.methods
+                                                    .insert(method_name.clone(), method_ref);
+                                                let method = Method::new(
+                                                    method_name.clone(),
+                                                    HashSet::new(),
+                                                    method_type,
+                                                );
+                                                new_methods.insert(
+                                                    method_name.clone(),
+                                                    (
+                                                        method,
+                                                        method_range,
+                                                        method_ref,
+                                                        HashSet::new(),
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                        all_methods.insert(
+                                            method_name,
+                                            (method_range, method_type, HashSet::new()),
+                                        );
+                                    }
+                                    i += 1;
+                                    continue;
+                                }
+                                MemberType::Routine => {
+                                    let routine_node = capture.node;
+                                    if class_name != &self.name {
+                                        self.name = class_name.clone();
+                                    }
+                                    if let Some(method_range) = get_routine_method_range(
+                                        &routine_node,
+                                        class_range.end_point,
+                                        class_range.end_byte,
+                                    ) {
+                                        let existed = old_methods.remove(class_name);
+                                        if !existed {
+                                            {
+                                                let new_method_id = self.get_next_method_id();
+                                                let method_ref = MethodRef {
+                                                    id: MethodId(new_method_id),
+                                                    class: *class_id,
+                                                    offset: None,
+                                                };
+                                                self.methods.insert(class_name.clone(), method_ref);
+                                                let method = Method::new(
+                                                    class_name.clone(),
+                                                    HashSet::new(),
+                                                    MethodType::Routine,
+                                                );
+                                                new_methods.insert(
+                                                    class_name.clone(),
+                                                    (
+                                                        method,
+                                                        method_range,
+                                                        method_ref,
+                                                        HashSet::new(),
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                        all_methods.insert(
+                                            class_name.clone(),
+                                            (method_range, MethodType::Routine, HashSet::new()),
+                                        );
+                                    }
+
+                                    i += 1;
+                                    continue;
+                                }
+                                MemberType::ClassMethodCall => {
+                                    let method_definition_capture = capture.node;
+                                    if let Some(method_name_outer) =
+                                        method_definition_capture.named_child(0)
+                                        && let Some(method_name_node) =
+                                            method_name_outer.named_child(0)
+                                        && let Some(method_name) = get_string_at_byte_range(
+                                            content,
+                                            method_name_node.byte_range(),
+                                        )
+                                    {
+                                        let existed = old_methods.remove(&method_name);
+                                        if all_methods.contains_key(&method_name) {
+                                            let lsp_range = ts_range_to_lsp_range(
+                                                content,
+                                                method_name_node.range(),
+                                            );
+                                            let diagnostic = Diagnostic {
+                                                range: lsp_range,
+                                                severity: Some(DiagnosticSeverity::ERROR),
+                                                code: None,
+                                                code_description: None,
+                                                source: Some("ObjectScript".to_string()),
+                                                message: format!(
+                                                    "A Method named {:?} already exists in this class.",
+                                                    &method_name
+                                                ),
+                                                related_information: None,
+                                                tags: None,
+                                                data: None,
+                                            };
+                                            diagnostics.push(diagnostic);
+                                        }
+                                        if !existed {
+                                            {
+                                                let new_method_id = self.get_next_method_id();
+                                                let method_ref = MethodRef {
+                                                    id: MethodId(new_method_id),
+                                                    class: *class_id,
+                                                    offset: None,
+                                                };
+                                                self.methods
+                                                    .insert(method_name.clone(), method_ref);
+                                                let method = build_method_struct(
+                                                    method_definition_capture,
+                                                    MethodType::ClassMethod,
+                                                    content,
+                                                )
+                                                .unwrap_or_else(|| {
+                                                    Method::new(
+                                                        method_name.clone(),
+                                                        HashSet::new(),
+                                                        MethodType::ClassMethod,
+                                                    )
+                                                });
+                                                new_methods.insert(
+                                                    method_name.clone(),
+                                                    (
+                                                        method,
+                                                        method_definition_capture.range(),
+                                                        method_ref,
+                                                        HashSet::new(),
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                        all_methods.insert(
+                                            method_name,
+                                            (
+                                                method_definition_capture.range(),
+                                                MethodType::ClassMethod,
+                                                HashSet::new(),
+                                            ),
+                                        );
+                                    }
+                                    i += 1;
+                                    continue;
+                                }
+                                MemberType::MethodDef => {
+                                    let method_definition_capture = capture.node;
+                                    if let Some(method_name_outer) =
+                                        method_definition_capture.named_child(0)
+                                        && let Some(method_name_node) =
+                                            method_name_outer.named_child(0)
+                                        && let Some(method_name) = get_string_at_byte_range(
+                                            content,
+                                            method_name_node.byte_range(),
+                                        )
+                                    {
+                                        let existed = old_methods.remove(&method_name);
+                                        if all_methods.contains_key(&method_name) {
+                                            let lsp_range = ts_range_to_lsp_range(
+                                                content,
+                                                method_name_node.range(),
+                                            );
+                                            let diagnostic = Diagnostic {
+                                                range: lsp_range,
+                                                severity: Some(DiagnosticSeverity::ERROR),
+                                                code: None,
+                                                code_description: None,
+                                                source: Some("ObjectScript".to_string()),
+                                                message: format!(
+                                                    "A Method named {:?} already exists in this class.",
+                                                    &method_name
+                                                ),
+                                                related_information: None,
+                                                tags: None,
+                                                data: None,
+                                            };
+                                            diagnostics.push(diagnostic);
+                                        }
+                                        if !existed {
+                                            {
+                                                let new_method_id = self.get_next_method_id();
+                                                let method_ref = MethodRef {
+                                                    id: MethodId(new_method_id),
+                                                    class: *class_id,
+                                                    offset: None,
+                                                };
+                                                self.methods
+                                                    .insert(method_name.clone(), method_ref);
+                                                let method = build_method_struct(
+                                                    method_definition_capture,
+                                                    MethodType::InstanceMethod,
+                                                    content,
+                                                )
+                                                .unwrap_or_else(|| {
+                                                    Method::new(
+                                                        method_name.clone(),
+                                                        HashSet::new(),
+                                                        MethodType::InstanceMethod,
+                                                    )
+                                                });
+                                                new_methods.insert(
+                                                    method_name.clone(),
+                                                    (
+                                                        method,
+                                                        method_definition_capture.range(),
+                                                        method_ref,
+                                                        HashSet::new(),
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                        all_methods.insert(
+                                            method_name,
+                                            (
+                                                method_definition_capture.range(),
+                                                MethodType::InstanceMethod,
+                                                HashSet::new(),
+                                            ),
+                                        );
+                                    }
+                                    i += 1;
+                                    continue;
+                                }
+                                MemberType::RelativeProperty => {
+                                    let property_node = capture.node;
+                                    if let Some(property) =
+                                        build_property_struct(property_node, content)
+                                    {
+                                        let new_property_id = self.get_next_property_id();
+                                        let property_ref = PropertyRef {
+                                            id: PropertyId(new_property_id),
+                                            class: *class_id,
+                                        };
+                                        let property_name = property.name.clone();
+                                        self.properties.insert(property_name.clone(), property_ref);
+                                        new_properties.insert(
+                                            property_name.clone(),
+                                            (property, property_node.range(), property_ref),
+                                        );
+                                    }
+                                    i += 1;
+                                    continue;
+                                }
+                                MemberType::Trigger => {
+                                    let trigger_node = capture.node;
+                                    if let Some(trigger) =
+                                        build_trigger_struct(trigger_node, content)
+                                    {
+                                        let new_trigger_id = self.get_next_trigger_id();
+                                        let trigger_ref = TriggerRef {
+                                            id: TriggerId(new_trigger_id),
+                                            class: *class_id,
+                                        };
+                                        let trigger_name = trigger.name.clone();
+                                        self.triggers.insert(trigger_name.clone(), trigger_ref);
+                                        new_triggers.insert(
+                                            trigger_name.clone(),
+                                            (trigger, trigger_node.range(), trigger_ref),
+                                        );
+                                    }
+                                    i += 1;
+                                    continue;
+                                }
+                                MemberType::Storage => {
+                                    let storage_node = capture.node;
+                                    if let Some(storage) =
+                                        build_storage_struct(storage_node, content)
+                                    {
+                                        let new_storage_id = self.get_next_storage_id();
+                                        let storage_ref = StorageRef {
+                                            id: StorageId(new_storage_id),
+                                            class: *class_id,
+                                        };
+                                        let storage_name = storage.name.clone();
+                                        self.storage.insert(storage_name.clone(), storage_ref);
+                                        new_storage.insert(
+                                            storage_name.clone(),
+                                            (storage, storage_node.range(), storage_ref),
+                                        );
+                                    }
+                                    i += 1;
+                                    continue;
+                                }
+                                MemberType::Index => {
+                                    let index_node = capture.node;
+                                    if let Some(index) = build_index_struct(index_node, content) {
+                                        let new_index_id = self.get_next_index_id();
+                                        let index_ref = IndexRef {
+                                            id: IndexId(new_index_id),
+                                            class: *class_id,
+                                        };
+                                        let index_name = index.name.clone();
+                                        self.indices.insert(index_name.clone(), index_ref);
+                                        new_indices.insert(
+                                            index_name.clone(),
+                                            (index, index_node.range(), index_ref),
+                                        );
+                                    }
+                                    i += 1;
+                                    continue;
+                                }
+                                MemberType::Projection => {
+                                    let projection_node = capture.node;
+                                    if let Some(projection) =
+                                        build_projection_struct(projection_node, content)
+                                    {
+                                        let new_projection_id = self.get_next_projection_id();
+                                        let projection_ref = ProjectionRef {
+                                            id: ProjectionId(new_projection_id),
+                                            class: *class_id,
+                                        };
+                                        let projection_name = projection.name.clone();
+                                        self.projections
+                                            .insert(projection_name.clone(), projection_ref);
+                                        new_projections.insert(
+                                            projection_name.clone(),
+                                            (projection, projection_node.range(), projection_ref),
+                                        );
+                                    }
+                                    i += 1;
+                                    continue;
+                                }
+                                MemberType::Foreignkey => {
+                                    let foreignkey_node = capture.node;
+                                    if let Some(foreignkey) =
+                                        build_foreignkey_struct(foreignkey_node, content)
+                                    {
+                                        let new_foreignkey_id = self.get_next_foreignkey_id();
+                                        let foreignkey_ref = ForeignKeyRef {
+                                            id: ForeignKeyId(new_foreignkey_id),
+                                            class: *class_id,
+                                        };
+                                        let foreignkey_name = foreignkey.name.clone();
+                                        self.foreignkeys
+                                            .insert(foreignkey_name.clone(), foreignkey_ref);
+                                        new_foreignkeys.insert(
+                                            foreignkey_name.clone(),
+                                            (foreignkey, foreignkey_node.range(), foreignkey_ref),
+                                        );
+                                    }
+                                    i += 1;
+                                    continue;
+                                }
+                                MemberType::Query => {
+                                    let query_node = capture.node;
+                                    if let Some(query) = build_query_struct(query_node, content) {
+                                        let new_query_id = self.get_next_query_id();
+                                        let query_ref = QueryRef {
+                                            id: QueryId(new_query_id),
+                                            class: *class_id,
+                                        };
+                                        let query_name = query.name.clone();
+                                        self.queries.insert(query_name.clone(), query_ref);
+                                        new_queries.insert(
+                                            query_name.clone(),
+                                            (query, query_node.range(), query_ref),
+                                        );
+                                    }
+                                    i += 1;
+                                    continue;
+                                }
+                                MemberType::Xdata => {
+                                    let xdata_node = capture.node;
+                                    if let Some(xdata) = build_xdata_struct(xdata_node, content) {
+                                        let new_xdata_id = self.get_next_xdata_id();
+                                        let xdata_ref = XdataRef {
+                                            id: XdataId(new_xdata_id),
+                                            class: *class_id,
+                                        };
+                                        let xdata_name = xdata.name.clone();
+                                        self.xdata.insert(xdata_name.clone(), xdata_ref);
+                                        new_xdata.insert(
+                                            xdata_name.clone(),
+                                            (xdata, xdata_node.range(), xdata_ref),
+                                        );
+                                    }
+                                    i += 1;
+                                    continue;
+                                }
+                                MemberType::RelativeParameter => {
+                                    let parameter_node = capture.node;
+                                    if let Some(parameter) =
+                                        build_parameter_struct(parameter_node, content)
+                                    {
+                                        let new_parameter_id = self.get_next_parameter_id();
+                                        let parameter_ref = ParameterRef {
+                                            id: ParameterId(new_parameter_id),
+                                            class: *class_id,
+                                        };
+                                        self.parameters
+                                            .insert(parameter.name.clone(), parameter_ref);
+                                        new_parameters.insert(
+                                            parameter.name.clone(),
+                                            (parameter, parameter_node.range(), parameter_ref),
+                                        );
+                                    }
+                                    i += 1;
+                                    continue;
+                                }
+                                _ => {
+                                    i += 1;
+                                    continue;
+                                }
+                            }
+                        }
+                        eprintln!(
+                            "error: didn't match type, but node is {:?} and class is {:?}",
+                            capture.node, class_name
+                        );
+                        i += 1;
+                        continue;
+                    }
                 }
             }
         }
@@ -841,6 +1420,14 @@ impl Class {
             new_methods,
             new_properties,
             new_parameters,
+            new_relationships,
+            new_foreignkeys,
+            new_queries,
+            new_indices,
+            new_triggers,
+            new_xdata,
+            new_projections,
+            new_storage,
             inherited_classes,
             all_methods,
             diagnostics,

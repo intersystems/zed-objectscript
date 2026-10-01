@@ -9,9 +9,11 @@ use crate::global_semantic::GlobalSemanticModel;
 use crate::local_semantic::LocalSemanticModel;
 use crate::override_index::OverrideIndex;
 use crate::parse_structures::{
-    Class, ClassId, FileType, InheritanceDirection, Method, MethodRef, MethodType, Parameter,
-    ParameterRef, Property, PropertyRef, RefactorLevel, UnresolvedMethodRef, Variable,
-    VariableDefType, VariableRef,
+    Class, ClassId, FileType, ForeignKey, ForeignKeyRef, Index, IndexRef, InheritanceDirection,
+    Method, MethodRef, MethodType, Parameter, ParameterRef, Projection, ProjectionRef, Property,
+    PropertyRef, Query, QueryRef, RefactorLevel, Relationship, RelationshipRef, Storage,
+    StorageRef, Trigger, TriggerRef, UnresolvedMethodRef, Variable, VariableDefType, VariableRef,
+    XData, XdataRef,
 };
 use crate::refactor::{
     refactor_conditionals_in_document, refactor_for_statements, refactor_legacy_do_statements,
@@ -124,6 +126,14 @@ pub struct ProjectData {
     pub property_defs: HashMap<String, HashMap<String, PropertyRef>>,
     /// Maps Class Name -> another hashmap which maps Parameter Name -> ParameterRef for all Parameters Accessible from the class.
     pub parameter_defs: HashMap<String, HashMap<String, ParameterRef>>,
+    pub relationship_defs: HashMap<String, HashMap<String, RelationshipRef>>,
+    pub foreignkey_defs: HashMap<String, HashMap<String, ForeignKeyRef>>,
+    pub query_defs: HashMap<String, HashMap<String, QueryRef>>,
+    pub index_defs: HashMap<String, HashMap<String, IndexRef>>,
+    pub trigger_defs: HashMap<String, HashMap<String, TriggerRef>>,
+    pub xdata_defs: HashMap<String, HashMap<String, XdataRef>>,
+    pub projection_defs: HashMap<String, HashMap<String, ProjectionRef>>,
+    pub storage_defs: HashMap<String, HashMap<String, StorageRef>>,
     /// Maps Var Name -> another hashmap which maps MethodRef -> HashMap of ScopeId -> Vec<VariableRef> for that variable.
     pub pub_var_defs: HashMap<String, HashMap<MethodRef, HashMap<ScopeId, Vec<VariableRef>>>>,
     /// Holds the OverrideIndex for the workspace.
@@ -185,6 +195,14 @@ struct PendingBulkClass {
     class: Class,
     properties: HashMap<String, (Property, Range, PropertyRef)>,
     parameters: HashMap<String, (Parameter, Range, ParameterRef)>,
+    relationships: HashMap<String, (Relationship, Range, RelationshipRef)>,
+    foreignkeys: HashMap<String, (ForeignKey, Range, ForeignKeyRef)>,
+    queries: HashMap<String, (Query, Range, QueryRef)>,
+    indices: HashMap<String, (Index, Range, IndexRef)>,
+    triggers: HashMap<String, (Trigger, Range, TriggerRef)>,
+    xdata: HashMap<String, (XData, Range, XdataRef)>,
+    projections: HashMap<String, (Projection, Range, ProjectionRef)>,
+    storage: HashMap<String, (Storage, Range, StorageRef)>,
     methods: HashMap<String, PreparedMethod>,
     diagnostics: Vec<Diagnostic>,
 }
@@ -253,7 +271,24 @@ impl<'a> BulkWorkspaceIndex<'a> {
                         .expect("registered class document must contain a class definition")
                 };
                 let mut class = Class::new(class_name.clone(), is_rtn);
-                let (_, _, methods, properties, parameters, _, _, diagnostics) = class.build_class(
+                let (
+                    _,
+                    _,
+                    methods,
+                    properties,
+                    parameters,
+                    relationships,
+                    foreignkeys,
+                    queries,
+                    indices,
+                    triggers,
+                    xdata,
+                    projections,
+                    storage,
+                    _,
+                    _,
+                    diagnostics,
+                ) = class.build_class(
                     starting_node,
                     &document.content,
                     is_rtn,
@@ -316,6 +351,14 @@ impl<'a> BulkWorkspaceIndex<'a> {
                     class,
                     properties,
                     parameters,
+                    relationships,
+                    foreignkeys,
+                    queries,
+                    indices,
+                    triggers,
+                    xdata,
+                    projections,
+                    storage,
                     methods,
                     diagnostics,
                 }
@@ -391,6 +434,86 @@ impl<'a> BulkWorkspaceIndex<'a> {
                     .entry(class_name.clone())
                     .or_default()
                     .insert(name, parameter_ref);
+            }
+            for (name, (value, range, member_ref)) in prepared.relationships {
+                if !value.is_public {
+                    prepared.document.scope_tree.new_relationship_symbol(
+                        name.clone(),
+                        range,
+                        member_ref,
+                        url.clone(),
+                    );
+                }
+                data.global_semantic_model
+                    .new_relationship(value, member_ref, range, url.clone());
+                data.relationship_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in prepared.foreignkeys {
+                data.global_semantic_model
+                    .new_foreignkey(value, member_ref, range, url.clone());
+                data.foreignkey_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in prepared.queries {
+                if !value.is_public {
+                    prepared.document.scope_tree.new_query_symbol(
+                        name.clone(),
+                        range,
+                        member_ref,
+                        url.clone(),
+                    );
+                }
+                data.global_semantic_model
+                    .new_query(value, member_ref, range, url.clone());
+                data.query_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in prepared.indices {
+                data.global_semantic_model
+                    .new_index(value, member_ref, range, url.clone());
+                data.index_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in prepared.triggers {
+                data.global_semantic_model
+                    .new_trigger(value, member_ref, range, url.clone());
+                data.trigger_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in prepared.xdata {
+                data.global_semantic_model
+                    .new_xdata(value, member_ref, range, url.clone());
+                data.xdata_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in prepared.projections {
+                data.global_semantic_model
+                    .new_projection(value, member_ref, range, url.clone());
+                data.projection_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in prepared.storage {
+                data.global_semantic_model
+                    .new_storage(value, member_ref, range, url.clone());
+                data.storage_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
             }
             let mut calls = Vec::new();
             let mut oref_calls = Vec::new();
@@ -1130,6 +1253,46 @@ impl ProjectData {
                     .remove_parameter(&stale_parameter_ref);
             }
         }
+        if let Some(values) = self.relationship_defs.remove(&class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_relationship(&member_ref);
+            }
+        }
+        if let Some(values) = self.foreignkey_defs.remove(&class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_foreignkey(&member_ref);
+            }
+        }
+        if let Some(values) = self.query_defs.remove(&class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_query(&member_ref);
+            }
+        }
+        if let Some(values) = self.index_defs.remove(&class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_index(&member_ref);
+            }
+        }
+        if let Some(values) = self.trigger_defs.remove(&class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_trigger(&member_ref);
+            }
+        }
+        if let Some(values) = self.xdata_defs.remove(&class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_xdata(&member_ref);
+            }
+        }
+        if let Some(values) = self.projection_defs.remove(&class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_projection(&member_ref);
+            }
+        }
+        if let Some(values) = self.storage_defs.remove(&class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_storage(&member_ref);
+            }
+        }
 
         if let Some(class) = self.global_semantic_model.get_mut_class(class_id) {
             class.clear(class_name, false);
@@ -1258,15 +1421,31 @@ impl ProjectData {
                 node
             };
             // this is a new class, so some things returned from this function are not applicable
-            let (_, _, methods, properties, parameters, inherited_classes, _, class_diagnostics) =
-                class.build_class(
-                    starting_node,
-                    content,
-                    is_rtn,
-                    &class_id,
-                    class_range,
-                    &class_name,
-                );
+            let (
+                _,
+                _,
+                methods,
+                properties,
+                parameters,
+                relationships,
+                foreignkeys,
+                queries,
+                indices,
+                triggers,
+                xdata,
+                projections,
+                storage,
+                inherited_classes,
+                _,
+                class_diagnostics,
+            ) = class.build_class(
+                starting_node,
+                content,
+                is_rtn,
+                &class_id,
+                class_range,
+                &class_name,
+            );
 
             class.build_imports(tree, content);
 
@@ -1307,6 +1486,9 @@ impl ProjectData {
                 let mut unresolved_method_refs = HashSet::new();
                 let mut unresolved_oref_method_refs = HashSet::new();
                 match method_type {
+                    MethodType::ClientMethod => {
+                        continue;
+                    }
                     MethodType::ClassMethod | MethodType::InstanceMethod => {
                         if let Some(method_definition_node) =
                             tree.root_node().named_descendant_for_byte_range(
@@ -1575,6 +1757,86 @@ impl ProjectData {
                     true,
                     class_is_final,
                 );
+            }
+            for (name, (value, range, member_ref)) in relationships {
+                if !value.is_public {
+                    document.scope_tree.new_relationship_symbol(
+                        name.clone(),
+                        range,
+                        member_ref,
+                        url.clone(),
+                    );
+                }
+                self.global_semantic_model
+                    .new_relationship(value, member_ref, range, url.clone());
+                self.relationship_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in foreignkeys {
+                self.global_semantic_model
+                    .new_foreignkey(value, member_ref, range, url.clone());
+                self.foreignkey_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in queries {
+                if !value.is_public {
+                    document.scope_tree.new_query_symbol(
+                        name.clone(),
+                        range,
+                        member_ref,
+                        url.clone(),
+                    );
+                }
+                self.global_semantic_model
+                    .new_query(value, member_ref, range, url.clone());
+                self.query_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in indices {
+                self.global_semantic_model
+                    .new_index(value, member_ref, range, url.clone());
+                self.index_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in triggers {
+                self.global_semantic_model
+                    .new_trigger(value, member_ref, range, url.clone());
+                self.trigger_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in xdata {
+                self.global_semantic_model
+                    .new_xdata(value, member_ref, range, url.clone());
+                self.xdata_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in projections {
+                self.global_semantic_model
+                    .new_projection(value, member_ref, range, url.clone());
+                self.projection_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in storage {
+                self.global_semantic_model
+                    .new_storage(value, member_ref, range, url.clone());
+                self.storage_defs
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
             }
             self.documents.insert(url.clone(), document);
         }
@@ -2290,6 +2552,46 @@ impl ProjectData {
             &subclasses_to_recompute_inheritance,
             old_class_is_final,
         );
+        if let Some(values) = self.relationship_defs.remove(old_class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_relationship(&member_ref);
+            }
+        }
+        if let Some(values) = self.foreignkey_defs.remove(old_class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_foreignkey(&member_ref);
+            }
+        }
+        if let Some(values) = self.query_defs.remove(old_class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_query(&member_ref);
+            }
+        }
+        if let Some(values) = self.index_defs.remove(old_class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_index(&member_ref);
+            }
+        }
+        if let Some(values) = self.trigger_defs.remove(old_class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_trigger(&member_ref);
+            }
+        }
+        if let Some(values) = self.xdata_defs.remove(old_class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_xdata(&member_ref);
+            }
+        }
+        if let Some(values) = self.projection_defs.remove(old_class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_projection(&member_ref);
+            }
+        }
+        if let Some(values) = self.storage_defs.remove(old_class_name) {
+            for (_, member_ref) in values {
+                self.global_semantic_model.remove_storage(&member_ref);
+            }
+        }
     }
 
     /// Returns true if successful, false otherwise
@@ -2459,6 +2761,14 @@ impl ProjectData {
                 new_methods,
                 properties_already_rebuilt,
                 parameters_already_rebuilt,
+                relationships_already_rebuilt,
+                foreignkeys_already_rebuilt,
+                queries_already_rebuilt,
+                indices_already_rebuilt,
+                triggers_already_rebuilt,
+                xdata_already_rebuilt,
+                projections_already_rebuilt,
+                storage_already_rebuilt,
                 new_inherited_classes,
                 all_methods,
                 class_diagnostics,
@@ -2582,6 +2892,9 @@ impl ProjectData {
                 self.dependency_graph.get_or_add_node(method_ref);
                 let method_type = method.method_type.clone();
                 match method_type {
+                    MethodType::ClientMethod => {
+                        continue;
+                    }
                     MethodType::ClassMethod | MethodType::InstanceMethod => {
                         if let Some(method_definition_node) =
                             tree.root_node().named_descendant_for_byte_range(
@@ -2859,6 +3172,81 @@ impl ProjectData {
                     new_class_is_final,
                 );
             }
+            for (name, (value, range, member_ref)) in relationships_already_rebuilt {
+                if !value.is_public {
+                    scope_tree.new_relationship_symbol(
+                        name.clone(),
+                        range,
+                        member_ref,
+                        url.clone(),
+                    );
+                }
+                self.global_semantic_model
+                    .new_relationship(value, member_ref, range, url.clone());
+                self.relationship_defs
+                    .entry(new_class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in foreignkeys_already_rebuilt {
+                self.global_semantic_model
+                    .new_foreignkey(value, member_ref, range, url.clone());
+                self.foreignkey_defs
+                    .entry(new_class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in queries_already_rebuilt {
+                if !value.is_public {
+                    scope_tree.new_query_symbol(name.clone(), range, member_ref, url.clone());
+                }
+                self.global_semantic_model
+                    .new_query(value, member_ref, range, url.clone());
+                self.query_defs
+                    .entry(new_class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in indices_already_rebuilt {
+                self.global_semantic_model
+                    .new_index(value, member_ref, range, url.clone());
+                self.index_defs
+                    .entry(new_class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in triggers_already_rebuilt {
+                self.global_semantic_model
+                    .new_trigger(value, member_ref, range, url.clone());
+                self.trigger_defs
+                    .entry(new_class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in xdata_already_rebuilt {
+                self.global_semantic_model
+                    .new_xdata(value, member_ref, range, url.clone());
+                self.xdata_defs
+                    .entry(new_class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in projections_already_rebuilt {
+                self.global_semantic_model
+                    .new_projection(value, member_ref, range, url.clone());
+                self.projection_defs
+                    .entry(new_class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
+            for (name, (value, range, member_ref)) in storage_already_rebuilt {
+                self.global_semantic_model
+                    .new_storage(value, member_ref, range, url.clone());
+                self.storage_defs
+                    .entry(new_class_name.clone())
+                    .or_default()
+                    .insert(name, member_ref);
+            }
 
             let scope_tree_snapshot = scope_tree.clone();
             let mut curr_class_hash = HashSet::new();
@@ -2907,6 +3295,7 @@ impl ProjectData {
                         if let Some(method) = self.global_semantic_model.get_mut_method(&method_ref)
                         {
                             match method_type {
+                                MethodType::ClientMethod => {}
                                 MethodType::ClassMethod | MethodType::InstanceMethod => {
                                     if let Some(method_definition_node) =
                                         tree.root_node().named_descendant_for_byte_range(
@@ -5197,6 +5586,14 @@ impl ProjectState {
                 method_defs: HashMap::new(),
                 pub_var_defs: HashMap::new(),
                 parameter_defs: HashMap::new(),
+                relationship_defs: HashMap::new(),
+                foreignkey_defs: HashMap::new(),
+                query_defs: HashMap::new(),
+                index_defs: HashMap::new(),
+                trigger_defs: HashMap::new(),
+                xdata_defs: HashMap::new(),
+                projection_defs: HashMap::new(),
+                storage_defs: HashMap::new(),
                 property_defs: HashMap::new(),
                 override_index: OverrideIndex::new(),
                 dependent_class_index: Dependents::new(),

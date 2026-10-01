@@ -2,12 +2,15 @@ use crate::common::generic_exit_statements;
 use crate::dependency_tracker::Dependents;
 use crate::local_semantic::LocalSemanticModel;
 use crate::parse_structures::{
-    Class, ClassId, DfsState, Method, MethodRef, Parameter, ParameterRef, Property, PropertyRef,
-    PublicVarId, Variable, VariableDefType, VariableRef,
+    Class, ClassId, DfsState, ForeignKey, ForeignKeyRef, Index, IndexRef, Method, MethodRef,
+    Parameter, ParameterRef, Projection, ProjectionRef, Property, PropertyRef, PublicVarId, Query,
+    QueryRef, Relationship, RelationshipRef, Storage, StorageRef, Trigger, TriggerRef, Variable,
+    VariableDefType, VariableRef, XData, XdataRef,
 };
 use crate::scope_structures::{
-    ClassGlobalSymbol, MethodSymbol, ParameterSymbol, PropertySymbol, ScopeId,
-    VariableGlobalSymbol, VariableSymbol,
+    ClassGlobalSymbol, ForeignKeySymbol, IndexSymbol, MethodSymbol, ParameterSymbol,
+    ProjectionSymbol, PropertySymbol, QuerySymbol, RelationshipSymbol, ScopeId, StorageSymbol,
+    TriggerSymbol, VariableGlobalSymbol, VariableSymbol, XdataSymbol,
 };
 use std::collections::{HashMap, HashSet};
 use tower_lsp::lsp_types::Url;
@@ -26,6 +29,14 @@ pub struct GlobalSemanticModel {
     pub properties: HashMap<PropertyRef, Property>,
     /// Stores Parameters in a workspace for public parameters.
     pub parameters: HashMap<ParameterRef, Parameter>,
+    pub relationships: HashMap<RelationshipRef, Relationship>,
+    pub foreignkeys: HashMap<ForeignKeyRef, ForeignKey>,
+    pub queries: HashMap<QueryRef, Query>,
+    pub indices: HashMap<IndexRef, Index>,
+    pub triggers: HashMap<TriggerRef, Trigger>,
+    pub xdata: HashMap<XdataRef, XData>,
+    pub projections: HashMap<ProjectionRef, Projection>,
+    pub storage: HashMap<StorageRef, Storage>,
     /// Stores all local semantic models in a workspace.
     pub lsms: HashMap<ClassId, LocalSemanticModel>,
     /// Stores all class symbols in a workspace.
@@ -36,6 +47,14 @@ pub struct GlobalSemanticModel {
     pub property_defs: HashMap<PropertyRef, PropertySymbol>,
     /// Stores Parameter Symbols in a workspace for public properties.
     pub parameter_defs: HashMap<ParameterRef, ParameterSymbol>,
+    pub relationship_defs: HashMap<RelationshipRef, RelationshipSymbol>,
+    pub foreignkey_defs: HashMap<ForeignKeyRef, ForeignKeySymbol>,
+    pub query_defs: HashMap<QueryRef, QuerySymbol>,
+    pub index_defs: HashMap<IndexRef, IndexSymbol>,
+    pub trigger_defs: HashMap<TriggerRef, TriggerSymbol>,
+    pub xdata_defs: HashMap<XdataRef, XdataSymbol>,
+    pub projection_defs: HashMap<ProjectionRef, ProjectionSymbol>,
+    pub storage_defs: HashMap<StorageRef, StorageSymbol>,
     /// Stores Variable Global Symbols per Class Global Symbol
     pub variable_defs: HashMap<MethodRef, HashMap<ScopeId, Vec<VariableGlobalSymbol>>>,
     next_class_id: usize,
@@ -59,6 +78,22 @@ impl GlobalSemanticModel {
             property_defs: HashMap::new(),
             parameter_defs: HashMap::new(),
             parameters: HashMap::new(),
+            relationships: HashMap::new(),
+            foreignkeys: HashMap::new(),
+            queries: HashMap::new(),
+            indices: HashMap::new(),
+            triggers: HashMap::new(),
+            xdata: HashMap::new(),
+            projections: HashMap::new(),
+            storage: HashMap::new(),
+            relationship_defs: HashMap::new(),
+            foreignkey_defs: HashMap::new(),
+            query_defs: HashMap::new(),
+            index_defs: HashMap::new(),
+            trigger_defs: HashMap::new(),
+            xdata_defs: HashMap::new(),
+            projection_defs: HashMap::new(),
+            storage_defs: HashMap::new(),
             next_class_id: 0,
         }
     }
@@ -209,6 +244,168 @@ impl GlobalSemanticModel {
     ) {
         self.new_parameter_symbol(parameter.name.clone(), parameter_range, url, parameter_ref);
         self.parameters.insert(parameter_ref, parameter);
+    }
+
+    fn member_symbol(
+        name: String,
+        location: Range,
+        url: Url,
+    ) -> crate::scope_structures::MemberSymbol {
+        crate::scope_structures::MemberSymbol {
+            name,
+            url,
+            location,
+            references: Vec::new(),
+        }
+    }
+
+    pub fn new_relationship(
+        &mut self,
+        value: Relationship,
+        member_ref: RelationshipRef,
+        range: Range,
+        url: Url,
+    ) {
+        let symbol = Self::member_symbol(value.name.clone(), range, url);
+        if value.is_public {
+            self.relationship_defs.insert(member_ref, symbol);
+            self.relationships.insert(member_ref, value);
+        } else if let Some(lsm) = self.get_local_semantic_mut(&member_ref.class) {
+            lsm.new_relationship(value, member_ref);
+        }
+    }
+    pub fn get_relationship(&self, member_ref: &RelationshipRef) -> Option<&Relationship> {
+        self.relationships.get(member_ref).or_else(|| {
+            self.get_local_semantic(&member_ref.class)?
+                .get_relationship(member_ref)
+        })
+    }
+    pub fn remove_relationship(&mut self, member_ref: &RelationshipRef) -> Option<Relationship> {
+        self.relationship_defs.remove(member_ref);
+        self.relationships.remove(member_ref).or_else(|| {
+            self.get_local_semantic_mut(&member_ref.class)?
+                .remove_relationship(member_ref)
+        })
+    }
+
+    pub fn new_query(&mut self, value: Query, member_ref: QueryRef, range: Range, url: Url) {
+        let symbol = Self::member_symbol(value.name.clone(), range, url);
+        if value.is_public {
+            self.query_defs.insert(member_ref, symbol);
+            self.queries.insert(member_ref, value);
+        } else if let Some(lsm) = self.get_local_semantic_mut(&member_ref.class) {
+            lsm.new_query(value, member_ref);
+        }
+    }
+    pub fn get_query(&self, member_ref: &QueryRef) -> Option<&Query> {
+        self.queries.get(member_ref).or_else(|| {
+            self.get_local_semantic(&member_ref.class)?
+                .get_query(member_ref)
+        })
+    }
+    pub fn remove_query(&mut self, member_ref: &QueryRef) -> Option<Query> {
+        self.query_defs.remove(member_ref);
+        self.queries.remove(member_ref).or_else(|| {
+            self.get_local_semantic_mut(&member_ref.class)?
+                .remove_query(member_ref)
+        })
+    }
+
+    pub fn new_foreignkey(
+        &mut self,
+        value: ForeignKey,
+        member_ref: ForeignKeyRef,
+        range: Range,
+        url: Url,
+    ) {
+        self.foreignkey_defs.insert(
+            member_ref,
+            Self::member_symbol(value.name.clone(), range, url),
+        );
+        self.foreignkeys.insert(member_ref, value);
+    }
+    pub fn get_foreignkey(&self, member_ref: &ForeignKeyRef) -> Option<&ForeignKey> {
+        self.foreignkeys.get(member_ref)
+    }
+    pub fn remove_foreignkey(&mut self, member_ref: &ForeignKeyRef) -> Option<ForeignKey> {
+        self.foreignkey_defs.remove(member_ref);
+        self.foreignkeys.remove(member_ref)
+    }
+    pub fn new_index(&mut self, value: Index, member_ref: IndexRef, range: Range, url: Url) {
+        self.index_defs.insert(
+            member_ref,
+            Self::member_symbol(value.name.clone(), range, url),
+        );
+        self.indices.insert(member_ref, value);
+    }
+    pub fn get_index(&self, member_ref: &IndexRef) -> Option<&Index> {
+        self.indices.get(member_ref)
+    }
+    pub fn remove_index(&mut self, member_ref: &IndexRef) -> Option<Index> {
+        self.index_defs.remove(member_ref);
+        self.indices.remove(member_ref)
+    }
+    pub fn new_trigger(&mut self, value: Trigger, member_ref: TriggerRef, range: Range, url: Url) {
+        self.trigger_defs.insert(
+            member_ref,
+            Self::member_symbol(value.name.clone(), range, url),
+        );
+        self.triggers.insert(member_ref, value);
+    }
+    pub fn get_trigger(&self, member_ref: &TriggerRef) -> Option<&Trigger> {
+        self.triggers.get(member_ref)
+    }
+    pub fn remove_trigger(&mut self, member_ref: &TriggerRef) -> Option<Trigger> {
+        self.trigger_defs.remove(member_ref);
+        self.triggers.remove(member_ref)
+    }
+    pub fn new_xdata(&mut self, value: XData, member_ref: XdataRef, range: Range, url: Url) {
+        self.xdata_defs.insert(
+            member_ref,
+            Self::member_symbol(value.name.clone(), range, url),
+        );
+        self.xdata.insert(member_ref, value);
+    }
+    pub fn get_xdata(&self, member_ref: &XdataRef) -> Option<&XData> {
+        self.xdata.get(member_ref)
+    }
+    pub fn remove_xdata(&mut self, member_ref: &XdataRef) -> Option<XData> {
+        self.xdata_defs.remove(member_ref);
+        self.xdata.remove(member_ref)
+    }
+    pub fn new_projection(
+        &mut self,
+        value: Projection,
+        member_ref: ProjectionRef,
+        range: Range,
+        url: Url,
+    ) {
+        self.projection_defs.insert(
+            member_ref,
+            Self::member_symbol(value.name.clone(), range, url),
+        );
+        self.projections.insert(member_ref, value);
+    }
+    pub fn get_projection(&self, member_ref: &ProjectionRef) -> Option<&Projection> {
+        self.projections.get(member_ref)
+    }
+    pub fn remove_projection(&mut self, member_ref: &ProjectionRef) -> Option<Projection> {
+        self.projection_defs.remove(member_ref);
+        self.projections.remove(member_ref)
+    }
+    pub fn new_storage(&mut self, value: Storage, member_ref: StorageRef, range: Range, url: Url) {
+        self.storage_defs.insert(
+            member_ref,
+            Self::member_symbol(value.name.clone(), range, url),
+        );
+        self.storage.insert(member_ref, value);
+    }
+    pub fn get_storage(&self, member_ref: &StorageRef) -> Option<&Storage> {
+        self.storage.get(member_ref)
+    }
+    pub fn remove_storage(&mut self, member_ref: &StorageRef) -> Option<Storage> {
+        self.storage_defs.remove(member_ref);
+        self.storage.remove(member_ref)
     }
 
     /// Given a Class, adds the class to the `self.classes` vec, returning ClassId, which

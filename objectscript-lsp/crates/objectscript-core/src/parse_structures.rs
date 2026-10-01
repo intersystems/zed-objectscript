@@ -43,6 +43,10 @@ pub struct ForeignKeyId(pub usize);
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct QueryId(pub usize);
 
+/// Stores the Argument Index, which is assigned by `method.get_next_argument_id()`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct ArgumentId(pub usize);
+
 /// Stores the Index Index, which is assigned by `class.get_next_index_key_id()`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct IndexId(pub usize);
@@ -79,6 +83,7 @@ pub enum MemberType {
     Xdata,
     Storage,
     ClassMethodCall,
+    ClientMethod,
     RelativeMethodCall,
     Query,
     Trigger,
@@ -97,6 +102,55 @@ pub enum MemberType {
     DottedStatementTag,
     InheritedClass,
     ClassKeyword,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrackedKeywords {
+    pub(crate) is_final: Option<bool>,
+    pub(crate) is_public: bool,
+    pub(crate) is_required: bool,
+    pub(crate) multidimensional: bool,
+    pub(crate) inverse: Option<String>,
+    pub(crate) cardinality: Option<Cardinality>,
+    pub(crate) on_delete: ForeignKeyAction,
+    pub(crate) on_update: ForeignKeyAction,
+    pub(crate) requires: Vec<String>,
+    pub(crate) index_type: IndexType,
+    pub(crate) trigger_insert: bool,
+    pub(crate) trigger_delete: bool,
+    pub(crate) trigger_update: bool,
+    pub(crate) trigger_time: TriggerFire,
+    pub(crate) trigger_for_each: TriggerForEach,
+    pub(crate) language: Option<Language>,
+    pub(crate) code_mode: CodeMode,
+    pub(crate) procedure_block: Option<bool>,
+    pub(crate) public_variables_declared: HashSet<String>,
+}
+
+impl Default for TrackedKeywords {
+    fn default() -> Self {
+        Self {
+            is_final: None,
+            is_public: true,
+            is_required: false,
+            multidimensional: false,
+            inverse: None,
+            cardinality: None,
+            on_delete: ForeignKeyAction::NoAction,
+            on_update: ForeignKeyAction::NoAction,
+            requires: Vec::new(),
+            index_type: IndexType::Index,
+            trigger_insert: false,
+            trigger_update: false,
+            trigger_delete: false,
+            trigger_time: TriggerFire::BEFORE,
+            trigger_for_each: TriggerForEach::Row,
+            language: None,
+            code_mode: CodeMode::Code,
+            procedure_block: None,
+            public_variables_declared: HashSet::new(),
+        }
+    }
 }
 
 pub struct IndexParsers {
@@ -225,6 +279,13 @@ pub struct StorageRef {
     pub id: StorageId,
 }
 
+/// Reference to an argument in a method.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ArgumentRef {
+    pub method: MethodRef,
+    pub id: ArgumentId,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Parameter {
     /// If true, the Parameter cannot be overwritten by subclasses.
@@ -233,6 +294,8 @@ pub struct Parameter {
     pub name: String,
     /// Expected return type.
     pub return_type: Option<TypeName>,
+    /// Optional Default Value.
+    pub default_value: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -249,6 +312,161 @@ pub struct Property {
     pub multidimensional: bool,
     /// Expected return type.
     pub return_type: Option<TypeName>,
+    /// Argument name -> Argument, Range
+    pub arguments: HashMap<String, (Argument, Range)>,
+    /// The next Id available for a new argument.
+    pub next_argument_id: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForeignKey {
+    /// ForeignKey Name.
+    pub name: String,
+    /// names of properties constrained by this key
+    pub properties_constrained: Vec<String>,
+    /// name of class referenced
+    pub referenced_class: String,
+    /// name of index within referenced class
+    pub referenced_index: Option<String>,
+    /// Specifies action that this foreign key should cause in the table when the key value of a record in the table is updated.
+    pub on_update: ForeignKeyAction,
+    /// Specifies action that this foreign key should cause in the table when the key value of a record in the table is deleted.
+    pub on_delete: ForeignKeyAction,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Copy)]
+pub enum ForeignKeyAction {
+    NoAction,
+    SetDefault,
+    SetNull,
+    Cascade,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Copy)]
+pub enum Cardinality {
+    Children,
+    Parent,
+    Many,
+    One,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Relationship {
+    /// Whether Relationship is required or not.
+    pub required: bool,
+    /// Whether Relationship is final or not.
+    pub is_final: Option<bool>,
+    /// Whether Relationship is public or not.
+    pub is_public: bool,
+    /// Relationship Name.
+    pub name: String,
+    /// Specifies the cardinality.
+    pub cardinality: Cardinality,
+    /// Expected return type.
+    pub return_type: Option<TypeName>,
+    /// Specifies the inverse side of this relationship.
+    pub inverse: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Query {
+    /// Specifies a list of privileges a user or process must have to call this query.
+    pub required_privileges: Vec<String>,
+    /// Whether Query is final or not.
+    pub is_final: Option<bool>,
+    /// Whether Query is public or not.
+    pub is_public: bool,
+    /// Query Name.
+    pub name: String,
+    /// Specifies the query class used by this query.
+    pub return_type: TypeName,
+    /// Query argument declarations keyed by argument name.
+    pub arguments: HashMap<String, (Argument, Range)>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Projection {
+    /// Whether Projection is final or not.
+    pub is_final: Option<bool>,
+    /// Projection Name.
+    pub name: String,
+    /// Specifies the query class used by this query.
+    pub return_type: TypeName,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Index {
+    /// Index Name.
+    pub name: String,
+    /// Properties that the index is based on
+    pub properties: Vec<IndexPropertyValue>,
+    /// Specifies the Index Type, default is Index.
+    pub index_type: IndexType,
+    /// Specifies expected return type.
+    pub return_type: Option<TypeName>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Trigger {
+    /// Trigger Name.
+    pub name: String,
+    /// Stores CodeMode of Trigger. If None, Trigger defaults to Code.
+    pub code_mode: CodeMode,
+    /// If true, this trigger cannot be inherited by subclasses.
+    pub is_final: Option<bool>,
+    /// Stores language of trigger, defaults to ObjectScript.
+    pub language: Language,
+    /// if true, this trigger is fired during an SQL DELETE operation.
+    pub delete: bool,
+    /// if true, this trigger is fired during an SQL UPDATE operation.
+    pub update: bool,
+    /// if true, this trigger is fired during an SQL INSERT operation.
+    pub insert: bool,
+    /// Specifies whether Trigger Fires Before or After Event. Default is BEFORE.
+    pub time: TriggerFire,
+    /// Specifies when Trigger is Fired. Default is row.
+    pub for_each: TriggerForEach,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct XData {
+    /// XData Block Name.
+    pub name: String,
+    /// Specifies the Language of the Xdata Block. Default is Xml.
+    pub language: Language,
+}
+
+/// Specifies whether Trigger Fires Before or After Event.
+#[derive(Clone, Debug, Eq, PartialEq, Copy)]
+pub enum TriggerFire {
+    BEFORE,
+    AFTER,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Copy)]
+pub enum TriggerForEach {
+    Row,       // This trigger is fired by each row affected by the triggering statement.
+    RowObject, // This trigger is fired by each row affected by the triggering statement or by changes via object access.
+    Statement, // This trigger is fired once for the whole statement.
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndexPropertyValue {
+    pub name: String,
+    pub elements: bool,
+    pub keys: bool,
+    pub return_type: Option<TypeName>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Copy)]
+pub enum IndexType {
+    CollatedKey,
+    Bitslice,
+    Columnar,
+    Bitmap,
+    Index,
+    Key,
+    Extent,
 }
 
 impl PartialEq for MethodRef {
@@ -327,26 +545,33 @@ pub struct Class {
     pub(crate) next_xdata_id: usize,
     pub(crate) next_projection_id: usize,
     pub(crate) next_storage_id: usize,
-    /// If true, this class and all of its members cannot be overwritten by subclasses.
+    /// If true, this class and all of its members cannot be inherited by subclasses.
     pub is_final: bool,
 }
 
-/// Language keyword values supported for classes/methods.
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Storage {
+    /// Storage Name
+    pub name: String,
+}
+
+/// Language keyword values supported for classes/methods.
+#[derive(Clone, Debug, Eq, PartialEq, Copy)]
 pub enum Language {
     Objectscript,
     TSql,
-    Python,
     ISpl,
-}
-
-/// Semantic representation of a class parameter declaration.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ClassParameter {
-    pub name: String,
-    pub property_type: Option<String>,
-    pub default_argument_value: Option<String>, // this can be a numeric literal, string literal, or identifier
-    pub range: Range,
+    Basic,
+    Json,
+    Html,
+    JavaScript,
+    Css,
+    Sql,
+    Java,
+    Python,
+    Xml,
+    Yaml,
+    Markdown,
 }
 
 /// Distinguishes instance methods from class methods.
@@ -358,6 +583,7 @@ pub enum MethodType {
     Subroutine(bool),
     DottedSubroutine(bool),
     Routine,
+    ClientMethod,
 }
 
 /// Reference linking a variable to its public and/or private identifier.
@@ -378,6 +604,8 @@ pub struct Method {
     pub name: String,
     /// Stores variable name -> VariableRef for all variable definitions in this method.
     pub variables: HashMap<String, Vec<(VariableRef, ScopeId)>>,
+    /// Stores argument name -> Argument for all arguments in this method.
+    pub arguments: HashMap<String, (Argument, Range)>,
     /// Whether method is public or not.
     pub is_public: bool,
     /// Whether method is a procedure block or not. If None, method defaults to procedure block.
@@ -390,6 +618,8 @@ pub struct Method {
     pub public_variables_declared: HashSet<String>,
     /// If true, this method cannot be overwritten by subclasses.
     pub is_final: Option<bool>,
+    /// Tracks the next available id for an argument in the method.
+    pub next_argument_id: usize,
 }
 
 /// CodeMode keyword values supported for methods.
@@ -408,6 +638,32 @@ pub struct ClassMethodCall {
     pub class_name: String,
     pub method_name: String,
     pub is_public: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Argument {
+    /// Argument name.
+    pub name: String,
+    /// Return Type
+    pub return_type: Option<TypeName>,
+    /// Default Value for Arg
+    pub default_value: Option<String>,
+    /// Indicate that an argument should be passed by reference and is intended to have no incoming value.
+    pub output: bool,
+    /// If true, the method modifies the value of the variable outside the method.
+    pub byref: bool,
+}
+
+impl Default for Argument {
+    fn default() -> Self {
+        Self {
+            name: "TODO".to_string(),
+            return_type: None,
+            default_value: None,
+            output: false,
+            byref: false,
+        }
+    }
 }
 
 /// Semantic representation of a variable discovered in a method.

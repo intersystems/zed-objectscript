@@ -140,6 +140,58 @@ mod tests {
         assert!(data.classes.contains_key("hksubclass"));
     }
 
+    #[tokio::test]
+    async fn test_relationship_and_query_members_are_stored_semantically() {
+        let test_root = env::current_dir().unwrap().join("objectscript-tests");
+
+        let relationship_root = test_root.join("gotodef").join("relative-method-call");
+        let (relationship_backend, relationship_uri) =
+            setup_backend_and_workspace(relationship_root).await;
+        let relationship_project = relationship_backend
+            .get_project(&relationship_uri)
+            .expect("missing relationship project");
+        let relationship_data = relationship_project.data.read();
+        let hk_id = relationship_data.classes["hk"];
+        let hk = relationship_data
+            .global_semantic_model
+            .get_class(&hk_id)
+            .expect("hk should be indexed");
+        let relationship_ref = hk.relationships["manyProp"];
+        let relationship = relationship_data
+            .global_semantic_model
+            .get_relationship(&relationship_ref)
+            .expect("manyProp relationship should be stored");
+        assert_eq!(relationship.name, "manyProp");
+        assert_eq!(
+            relationship_data.relationship_defs["hk"]["manyProp"],
+            relationship_ref
+        );
+        drop(relationship_data);
+
+        let query_root = test_root.join("dependencies");
+        let (query_backend, query_uri) = setup_backend_and_workspace(query_root).await;
+        let query_project = query_backend
+            .get_project(&query_uri)
+            .expect("missing query project");
+        let query_data = query_project.data.read();
+        let class_id = query_data.classes["Demo.QueryExamples"];
+        let class = query_data
+            .global_semantic_model
+            .get_class(&class_id)
+            .expect("Demo.QueryExamples should be indexed");
+        let query_ref = class.queries["EmployeesByCity"];
+        let query = query_data
+            .global_semantic_model
+            .get_query(&query_ref)
+            .expect("EmployeesByCity query should be stored");
+        assert_eq!(query.name, "EmployeesByCity");
+        assert!(query.arguments.contains_key("pCity"));
+        assert_eq!(
+            query_data.query_defs["Demo.QueryExamples"]["EmployeesByCity"],
+            query_ref
+        );
+    }
+
     #[test]
     fn test_sys_dependencies_include_calls_and_superclasses() {
         let project = ProjectState::new();
@@ -263,17 +315,17 @@ mod tests {
     #[test]
     fn test_get_keyword_and_value() {
         let (not, keyword, values) = get_keyword_and_value("ClientDataType = longvarchar");
-        let value = values.get(0).copied();
+        let value = values.first().map(String::as_str);
         assert!(!not);
         assert_eq!(keyword, "clientdatatype");
         assert_eq!(value, Some("longvarchar"));
         let (not, keyword, values) = get_keyword_and_value("ClientDataType=longvarchar");
-        let value = values.get(0).copied();
+        let value = values.first().map(String::as_str);
         assert!(!not);
         assert_eq!(keyword, "clientdatatype");
         assert_eq!(value, Some("longvarchar"));
         let (not, keyword, values) = get_keyword_and_value("ProcedureBlock = 1");
-        let value = values.get(0).copied();
+        let value = values.first().map(String::as_str);
         assert!(!not);
         assert_eq!(keyword, "procedureblock");
         assert_eq!(value, Some("1"));
@@ -322,13 +374,19 @@ mod tests {
         let (backend, uri) = setup_backend_and_workspace(project_root).await;
         let project_state = backend.get_project(&uri).unwrap();
         let project_data = project_state.data.read();
-
+        // println!("PROJECT DATA {:#?}", project_data);
         let superclass_id = project_data.classes.get("hk").unwrap();
         let superclass = project_data
             .global_semantic_model
             .get_class(superclass_id)
             .unwrap();
         let superclass_method_ref = superclass.get_method_ref("print2").unwrap();
+        // println!("OVERRIDE: {:#?}", project_data.override_index);
+        let id = project_data.classes.get("hksubclass").unwrap();
+        println!(
+            "HKSUBCLASS {:#?}",
+            project_data.global_semantic_model.get_class(id)
+        );
         let methods = project_data
             .override_index
             .effective_methods
@@ -573,6 +631,114 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_udl_query_captures_each_inherited_class_once() {
+        let project = ProjectState::new();
+        project.handle_document_opened(
+            Url::parse("file:///workspace/Demo.Child.cls").unwrap(),
+            r#"
+Class Demo.Child Extends Demo.Parent
+{
+    Parameter Value = 1;
+    Property Name As %String;
+    ClassMethod Run() { Quit }
+}
+"#
+            .to_string(),
+            FileType::Cls,
+            1,
+        );
+
+        let data = project.data.read();
+        let class_id = data.classes["Demo.Child"];
+        let class = data
+            .global_semantic_model
+            .get_class(&class_id)
+            .expect("Demo.Child should be indexed");
+        assert_eq!(
+            class
+                .inherited_classes
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Demo.Parent"]
+        );
+    }
+
+    #[test]
+    fn test_combined_udl_method_query_collects_all_facts() {
+        let project = ProjectState::new();
+        project.handle_document_opened(
+            Url::parse("file:///workspace/Demo.Combined.cls").unwrap(),
+            r#"
+Class Demo.Combined
+{
+    ClassMethod Target() { Quit }
+
+    ClassMethod Analyze(untyped, typed As %String) As %Integer
+        [ Private, ProcedureBlock = 1, PublicList = (shared) ]
+    {
+        Set local = 1, shared = 2
+        Do ..Target()
+        Quit local
+    }
+}
+"#
+            .to_string(),
+            FileType::Cls,
+            1,
+        );
+
+        let data = project.data.read();
+        let snapshot = objectscript_core::workspace_diff::snapshot_class(&data, "Demo.Combined")
+            .expect("Demo.Combined should have a semantic snapshot");
+        let analyze = snapshot
+            .methods
+            .get("Analyze")
+            .expect("Analyze should be indexed");
+        assert!(!analyze.is_public);
+        assert_eq!(analyze.procedure_block, Some(true));
+        assert!(analyze.return_type.is_some());
+        assert!(
+            analyze
+                .public_variables_declared
+                .contains(&"shared".to_string())
+        );
+        assert!(
+            analyze
+                .arguments
+                .get("untyped")
+                .is_some_and(|argument| argument.return_type.is_none())
+        );
+        assert!(
+            analyze
+                .arguments
+                .get("typed")
+                .is_some_and(|argument| argument.return_type.is_some())
+        );
+        assert!(
+            analyze
+                .variables
+                .iter()
+                .any(|variable| variable.name == "local" && !variable.is_public)
+        );
+        assert!(
+            analyze
+                .variables
+                .iter()
+                .any(|variable| variable.name == "shared" && variable.is_public)
+        );
+
+        let class_id = data.classes["Demo.Combined"];
+        let class = data
+            .global_semantic_model
+            .get_class(&class_id)
+            .expect("Demo.Combined class should exist");
+        let analyze_ref = class.methods["Analyze"];
+        let target_ref = class.methods["Target"];
+        assert!(data.dependency_graph.is_ancestor(analyze_ref, target_ref));
     }
 
     #[tokio::test]
@@ -1242,7 +1408,6 @@ Method Test()
         let (backend, uri) = setup_backend_and_workspace(project_root.clone()).await;
         let project_state = backend.get_project(&uri).expect("missing project state");
         let project_data = project_state.data.read();
-
         let method_ref = project_data
             .method_defs
             .get("Demo.Utility")

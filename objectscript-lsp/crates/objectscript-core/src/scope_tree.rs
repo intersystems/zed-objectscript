@@ -1,5 +1,5 @@
 use crate::common::{generic_exit_statements, point_in_range};
-use crate::parse_structures::{MethodRef, PropertyRef, VariableRef};
+use crate::parse_structures::{MethodRef, PropertyRef, QueryRef, RelationshipRef, VariableRef};
 use crate::scope_structures::*;
 use std::collections::{HashMap, HashSet};
 use tower_lsp::lsp_types::Url;
@@ -151,6 +151,8 @@ pub struct ScopeTree {
     pub private_method_defs: HashMap<MethodRef, MethodSymbol>,
     /// Stores PropertyRef -> Property Symbol for all private properties in the document.
     pub private_property_defs: HashMap<PropertyRef, PropertySymbol>,
+    pub private_relationship_defs: HashMap<RelationshipRef, RelationshipSymbol>,
+    pub private_query_defs: HashMap<QueryRef, QuerySymbol>,
 }
 
 impl Clone for ScopeTree {
@@ -162,6 +164,8 @@ impl Clone for ScopeTree {
             next_scope_id: self.next_scope_id,
             private_method_defs: self.private_method_defs.clone(),
             private_property_defs: self.private_property_defs.clone(),
+            private_relationship_defs: self.private_relationship_defs.clone(),
+            private_query_defs: self.private_query_defs.clone(),
         }
     }
 }
@@ -188,6 +192,8 @@ impl ScopeTree {
             next_scope_id: 1,
             private_method_defs: HashMap::new(),
             private_property_defs: HashMap::new(),
+            private_relationship_defs: HashMap::new(),
+            private_query_defs: HashMap::new(),
         }
     }
 
@@ -246,6 +252,17 @@ impl ScopeTree {
     /// returns `None` if it does not exist.
     pub fn get_private_method_symbol(&self, method_ref: &MethodRef) -> Option<&MethodSymbol> {
         self.private_method_defs.get(method_ref)
+    }
+
+    pub fn get_private_relationship_symbol(
+        &self,
+        member_ref: &RelationshipRef,
+    ) -> Option<&RelationshipSymbol> {
+        self.private_relationship_defs.get(member_ref)
+    }
+
+    pub fn get_private_query_symbol(&self, member_ref: &QueryRef) -> Option<&QuerySymbol> {
+        self.private_query_defs.get(member_ref)
     }
 
     /// Add a new child scope to `parent`, returning the new `ScopeId`.
@@ -411,6 +428,42 @@ impl ScopeTree {
         };
         self.private_property_defs
             .insert(property_ref, property_symbol);
+    }
+
+    pub fn new_relationship_symbol(
+        &mut self,
+        name: String,
+        location: Range,
+        member_ref: RelationshipRef,
+        url: Url,
+    ) {
+        self.private_relationship_defs.insert(
+            member_ref,
+            MemberSymbol {
+                name,
+                url,
+                location,
+                references: Vec::new(),
+            },
+        );
+    }
+
+    pub fn new_query_symbol(
+        &mut self,
+        name: String,
+        location: Range,
+        member_ref: QueryRef,
+        url: Url,
+    ) {
+        self.private_query_defs.insert(
+            member_ref,
+            MemberSymbol {
+                name,
+                url,
+                location,
+                references: Vec::new(),
+            },
+        );
     }
     /// Get an immutable reference to the innermost scope containing `point`.
     ///
